@@ -6,8 +6,8 @@
 |---|---|
 | **Status** | Proposed for formal approval (Phase 3 exit) |
 | **Version** | 1.0.0 |
-| **Implements** | `plans/design/SRS_async_multiagent_ai_coding_system.md` **v1.3** |
-| **Supersedes** | `claude_design_spec.md` (#4) · `grok_design_spec.md` (#2) · `gemini_design_spec.md` (#3) |
+| **Implements** | [`docs/requirements/SRS_async_multiagent_ai_coding_system.md`](../requirements/SRS_async_multiagent_ai_coding_system.md) **v1.3** |
+| **Supersedes** | [`proposals/claude_design_spec.md`](proposals/claude_design_spec.md) (#4) · [`proposals/grok_design_spec.md`](proposals/grok_design_spec.md) (#2) · [`proposals/gemini_design_spec.md`](proposals/gemini_design_spec.md) (#3) |
 | **Ref** | Issue #1 |
 | **Drafted by** | Claude Agent (`@huozheclaude`), per group assignment |
 | **Consensus source** | Issue #1, Rounds 1–5 + owner rulings from `@huozhe` |
