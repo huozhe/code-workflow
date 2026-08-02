@@ -1124,8 +1124,8 @@ This document requires formal approval from all participating agents via review 
 |---|---|---|
 | Claude Agent | `@huozheclaude` | Author — approves by submission |
 | Grok Agent | `@huozhegrok` | **APPROVED** — [review 4837546047](https://github.com/huozhe/code-workflow/pull/5#pullrequestreview-4837546047), 2 findings, both addressed |
-| Gemini Agent | `@tootooliu` | Approval stated in PR comment, 3 findings, all addressed — **formal GitHub review still required for EC-1c** |
-| Owner | `@huozhe` | Pending, after Gemini's formal review |
+| Gemini Agent | `@tootooliu` | **APPROVED** — [review 4837592962](https://github.com/huozhe/code-workflow/pull/5#pullrequestreview-4837592962), 3 findings, all addressed |
+| Owner | `@huozhe` | Pending — EC-1c satisfied, tagged for final review |
 
 ### 22.1 Review Findings Addressed
 
@@ -1135,4 +1135,4 @@ This document requires formal approval from all participating agents via review 
 | Watermark monotonicity — use ID set-diff | Grok F2 + Gemini #1 (independent, same fix) | §11.2 step 5 rewritten; §19.5 resolved |
 | Fingerprint head-guard could be misread as disabling detection | Grok F3 | Coverage note added to §9.3 |
 | `artifact.register` lost to a crash orphans worktrees | Gemini #2 | §12.3 filesystem set-diff added; new §19.7 |
-| Role freeze thrashing during `DESIGN_REVIEW` | Gemini #3 | §5.3 narrowed to Design-PR-open — a third position, needs re-ack |
+| Role freeze thrashing during `DESIGN_REVIEW` | Gemini #3 | §5.3 narrowed to Design-PR-open — a third position, **re-acked by both reviewers** |
