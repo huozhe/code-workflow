@@ -55,7 +55,7 @@ Two decisions were made by the repository owner (`@huozhe`) and are not open to 
 | §4.1 Pluggable ingress backend | Grok #2 (E8) | Replaces Claude's Tailscale-as-architecture |
 | §5.2 Credential delivery | Claude R4 → Grok R5 | Grok's host-mounted token files replaced; see ADR-6 |
 | §5.3 Role binding precedence | Grok #2 §3.2 + Claude #4 §5.3 | Independent convergence |
-| §5.3 Role freeze at design freeze | **Grok #2 §3.2** | Replaces Claude's freeze-at-session-creation |
+| §5.3 Role freeze at Design PR open | Grok #2 §3.2 → narrowed in PR #5 review | Third position: later than Claude's session-creation freeze, earlier than Grok's design-freeze. See §5.3 |
 | §6 Session model, zero cold start | Claude #4 §6 | Gemini #3 §2.2 supplied the clearest statement of the requirement |
 | §6.4 Git layer | Claude #4 §6.4 | Replaces Grok's per-issue shallow clone |
 | §7 Container topology | **Claude R2 middle path**, adopted by Grok R4 + Gemini R3 | Neither the original Claude nor original Grok/Gemini topology |
@@ -85,7 +85,7 @@ Two decisions were made by the repository owner (`@huozhe`) and are not open to 
 | A2 | Two GitHub machine users exist with fine-grained PATs and `write` on target repos | Auth module swaps token source; §5 unchanged in shape |
 | A3 | The owner can configure repository webhooks and branch protection | Without branch protection, FR-1.3 is untestable and M4 cannot pass |
 | A4 | `/Users` is shared into containers by OrbStack (default) | Mount root becomes configurable; §6.4 relative worktree paths already remove the path-equality dependency |
-| A5 | Container-internal `tmpfs` enforces UID ownership and mode | **Load-bearing.** Falsified ⇒ fall back to two containers (ADR-4 fallback). Spike M2-A |
+| A5 | Container-internal `tmpfs` enforces UID ownership and mode | **Load-bearing.** Falsified ⇒ fall back to two containers (ADR-4 fallback). **Spike M2-B** (M2-A is the separate host-bind expected-fail test) |
 | A6 | Each vendor agent CLI can run headless, non-interactively, one turn at a time | Adapter wraps it; continuity comes from our transcript, not vendor session state (ADR-9) |
 | A7 | The `~/.agentd` volume has ≥ 50 GB free at install | Circuit breaker trips immediately and the system refuses work — loudly, which is correct |
 
@@ -238,7 +238,11 @@ Per-issue override uses labels so the binding is visible on the issue itself:
 role/architect:grok        role/developer:claude
 ```
 
-**Binding freezes at design freeze** — when the Design PR merges — not at session creation. A label typo corrected a minute after the issue opens should be honoured; a role swap after implementation has begun would invalidate both transcripts. The resolved binding is written to the session row and locked at that point.
+**Binding freezes when the Architect opens the Design PR** — the `PLANNING` → `DESIGN_REVIEW` transition. The resolved binding is written to the session row and `roles_locked` is set at that moment.
+
+This is narrower than the position originally locked in review ("at design freeze", i.e. when the Design PR merges), and it is narrower for a reason found during review of this PR: between Design PR *open* and Design PR *merge* the Developer is actively reviewing, so a label edit in that window would re-resolve roles and invalidate both the Architect's in-progress PR and the Developer's review context. Freezing at the first `turn.dispatch` instead — the other proposal — overshoots in the opposite direction, closing the window within seconds of the issue opening.
+
+Opening the Design PR is the right boundary because it is the last moment before any peer-review context exists, while still leaving the whole RFC-drafting turn (tens of seconds to minutes) available for a human to correct a mislabelled role.
 
 ### 5.4 Configuration
 
@@ -427,11 +431,11 @@ Every subprocess of a turn — the agent CLI, `git`, `gh`, test runners, package
 stateDiagram-v2
     [*] --> INTAKE: issues.opened (intake gate passed)
     INTAKE --> PLANNING: roles resolved
-    PLANNING --> DESIGN_REVIEW: Architect opens Design PR
+    PLANNING --> DESIGN_REVIEW: Architect opens Design PR (roles freeze)
     DESIGN_REVIEW --> DESIGN_REWORK: Developer requests changes
     DESIGN_REWORK --> DESIGN_REVIEW: Architect pushes revision
     DESIGN_REVIEW --> DESIGN_APPROVED: Developer approves
-    DESIGN_APPROVED --> IMPLEMENTING: Architect merges Design PR (role binding freezes)
+    DESIGN_APPROVED --> IMPLEMENTING: Architect merges Design PR
     IMPLEMENTING --> CODE_REVIEW: Developer opens Feature PR
     CODE_REVIEW --> CODE_REWORK: Architect requests changes
     CODE_REWORK --> CODE_REVIEW: Developer pushes fixes
@@ -468,6 +472,7 @@ sequenceDiagram
     D->>D: resolve roles, create session, start container
     D->>A: turn.dispatch(issue_opened)
     A->>GH: push design branch, open Design PR
+    Note over D: role binding freezes here
     D->>V: turn.dispatch(design_pr_opened)
     V->>GH: review — request changes
     D->>A: turn.dispatch(design_changes_requested)
@@ -476,7 +481,6 @@ sequenceDiagram
     V->>GH: APPROVE Design PR
     D->>A: turn.dispatch(merge_design)
     A->>GH: merge Design PR
-    Note over D: role binding freezes here
     D->>V: turn.dispatch(design_approved)
     V->>GH: worktree, implement, open Feature PR
     D->>A: turn.dispatch(feature_pr_opened)
@@ -568,7 +572,9 @@ Identical 3 times → escalate. Counted only after a non-trivial `head_sha` chan
 
 **Zero-thread-progress** — 3 consecutive review rounds in which no review thread is resolved → escalate. Catches agents that make cosmetic changes each round, which the fingerprint's diff component alone can miss.
 
-Spurious escalation is the preferred failure direction; both signals escalate to the human rather than aborting work.
+**Coverage note for implementers.** The fingerprint's "count only after a non-trivial `head_sha` change" guard exists to avoid firing on legitimately slow convergence — it does **not** mean stalls with an unchanged head go undetected. Comment-only loops before any code exists (two agents negotiating an RFC without pushing) are caught by the **turn budgets** and the **zero-thread-progress** signal, both of which are head-agnostic. Do not "fix" the guard by disabling fingerprint counting whenever the head is static; the two mechanisms are deliberately layered so that each covers the other's blind spot.
+
+Spurious escalation is the preferred failure direction; all signals escalate to the human rather than aborting work.
 
 ### 9.4 Event Digest
 
@@ -676,12 +682,14 @@ On every start, and every 5 minutes thereafter:
 1. Open SQLite (WAL), migrate, PRAGMA integrity_check.
 2. Inventory: docker ps -a --filter label=agentd.managed=true
    → adopt containers matching a live session; remove orphans.
-3. GraphQL sweep: for all non-terminal sessions, fetch issue + PRs + review states
-   + check runs in one round trip per repo.
+3. GraphQL sweep: for all non-terminal sessions, fetch the FULL current state —
+   issue, comments, open PRs, review states, review threads, check runs — in one
+   round trip per repo. `updated_at` is used only as a paging hint, never as a filter.
 4. Derive expected FSM state from GitHub truth (P1). If it differs from stored,
    adopt derived and log the divergence.
-5. For GitHub activity newer than the session watermark with no matching delivery row,
-   synthesize a delivery (delivery_id = "recon:<node_id>") and enqueue it.
+5. ID SET-DIFF, not timestamp comparison: for every node_id returned by the sweep,
+   check membership against deliveries. Anything absent → synthesize a delivery
+   (delivery_id = "recon:<node_id>") and enqueue it.
 6. Detect interrupted turns: rows with started_at set and ended_at NULL.
 7. Re-attach RPC to running containers; unreachable → mark COLD, promote lazily.
 8. Send session.resume with a digest of everything missed; send turn.resume
@@ -689,7 +697,17 @@ On every start, and every 5 minutes thereafter:
 9. Drain deliveries WHERE status='queued' in received_at order.
 ```
 
-**Step 5 is what makes downtime survivable.** GitHub state is compared against local watermarks, so any missed delivery is recovered whether the cause was a crash, a reboot, a dead tunnel, or a FileVault prompt waiting overnight for someone to walk past.
+**Step 5 is what makes downtime survivable**, and its formulation matters more than it looks.
+
+An earlier version of this section used a timestamp watermark — "recover anything newer than `gh_watermark`". Both reviewers independently attacked it, and they were right: `updated_at` is not reliably monotonic across GitHub's asynchronously-aggregated PR and review state, so a strict exclusive lower bound can skip an event permanently and silently. Silent skipping is the worst failure mode available to this component.
+
+The recovery cursor is therefore **set membership over stable node IDs**, not a timestamp comparison:
+
+1. Each sweep fetches the complete current state of the issue and its linked PRs — cheap, because sessions are issue-scoped and the query is already a single GraphQL round trip.
+2. Every returned `node_id` is checked for membership in `deliveries`. Missing ⇒ synthesize `recon:<node_id>` and enqueue. The primary key makes this idempotent for free.
+3. `updated_at` survives only as a paging hint for large comment threads, never as a correctness boundary.
+
+Because the sweep also derives FSM state from the full fetch (step 4), a session converges to the correct state even if a *webhook* was missed entirely — a PR that is `MERGED` on GitHub but `CODE_REVIEW` in SQLite transitions on the next sweep regardless of what any timestamp says. This is what demotes §19.5 from an open research risk to a settled design choice.
 
 **Step 8 is a correction to a mistake worth naming.** An earlier draft justified blind at-least-once re-dispatch on the grounds that agent actions are idempotent at the GitHub level. That is true for GitHub and **false for everything else** — a turn interrupted midway through `npm install`, a database migration, or a `git rebase` is not idempotent, and replaying it can leave a worktree in a state neither side can reason about.
 
@@ -725,6 +743,20 @@ Notification delivery is best-effort; the authoritative signal is the GitHub com
 ### 12.3 Garbage Collection
 
 Hourly and on breaker trip: prune dangling images and unmanaged stopped containers; delete archives older than 30 days; `git gc` on shared clones **only when the repo has zero active sessions**; truncate `deliveries` payloads older than 7 days while retaining metadata for idempotency.
+
+**Orphan reconciliation — the artifact ledger is not sufficient on its own.** §10.5 tracks worktrees, branches, and scratch paths via `artifact.register`, but that RPC is sent *after* the runner performs the action. A hard crash between `git worktree add` and the register call — an OOM kill is the realistic case — leaves a worktree on disk that the ledger has never heard of, so teardown cannot remove it and the "zero rows with `removed_at IS NULL`" check reports success while leaking disk.
+
+GC therefore reconciles against the filesystem rather than trusting the ledger:
+
+```
+for each shared clone:
+    git worktree list --porcelain          → actual worktrees on disk
+    SELECT ref FROM artifacts WHERE kind='worktree'  → ledger
+    actual − ledger, belonging to a CLOSED/absent session  → git worktree remove --force
+    ledger − actual                                        → mark removed_at, log
+```
+
+The same set-diff runs for session directories under `sessions/`. This is the filesystem analogue of §11.2's ID set-diff, and for the same reason: a ledger of *intent* cannot be trusted to describe *state* across a crash boundary.
 
 ### 12.4 State Visibility
 
@@ -880,7 +912,7 @@ CREATE TABLE sessions (
   repo TEXT NOT NULL, issue_num INTEGER NOT NULL,
   state TEXT NOT NULL, paused_reason TEXT,
   architect TEXT NOT NULL, developer TEXT NOT NULL,
-  roles_locked INTEGER NOT NULL DEFAULT 0,   -- set at design freeze
+  roles_locked INTEGER NOT NULL DEFAULT 0,   -- set when the Design PR opens
   design_pr INTEGER, feature_pr INTEGER,
   turn_count INTEGER NOT NULL DEFAULT 0,
   consec_agent_turns INTEGER NOT NULL DEFAULT 0,
@@ -1024,7 +1056,7 @@ M2-B was added during drafting: the review established that host-bind ownership 
 | Layer | Coverage |
 |---|---|
 | **Unit** | Role resolver precedence · checkbox parser + sentinel extraction · loop-filter rules per recipient · FSM transitions · fingerprint composition · breaker hysteresis |
-| **Component** | SQLite reconcile fixtures · watermark monotonicity · interrupted-turn detection · artifact ledger leak detection |
+| **Component** | SQLite reconcile fixtures · node-ID set-diff completeness · interrupted-turn detection · worktree orphan reconciliation after a simulated mid-`artifact.register` crash |
 | **Integration** | Recorded GitHub webhook fixtures → fake runner · GraphQL sweep against a recorded schema |
 | **End-to-end** | Dual-bot dry run on a private sandbox repo, full issue → merge → close cycle |
 | **Chaos** | `kill -9` the gateway mid-turn · reboot the host · fill the disk below 15 GB · sever the tunnel for 30 min and verify the sweep recovers every missed delivery |
@@ -1042,8 +1074,9 @@ Stated so reviewers do not have to discover them.
 2. **Cross-role data confidentiality is not provided** (§5.2). Both roles read each other's worktrees and transcripts. Accepted; it is also the single requirement that would force the dual-container fallback.
 3. **Stall detection remains heuristic.** The fingerprint plus zero-thread signal covers the known failure shapes, but two agents determined to appear productive can still consume budget. Budgets are the backstop, and the failure direction is a spurious escalation to the human, which is safe.
 4. **Prompt injection is only partially addressed** (§13.3). Adequate for a private single-owner repo; not adequate for a public repository.
-5. **Reconciliation correctness depends on watermark monotonicity.** If GitHub's `updated_at` semantics permit a non-monotonic cursor for any resource we track, step 5 of §11.2 can silently skip events. This needs verification against real API behaviour, not assumption — flagged for review.
+5. ~~**Reconciliation correctness depends on watermark monotonicity.**~~ **Resolved during review of this PR.** Both reviewers independently attacked the timestamp watermark and proposed the same fix; §11.2 step 5 now uses set membership over stable node IDs, with `updated_at` demoted to a paging hint. `updated_at` monotonicity is no longer load-bearing anywhere in the design. Retained here rather than deleted, because the correction is the useful record.
 6. **Recovery from a host boot is not unattended** (§11.1). This is owner policy rather than a design defect, and the SRS was amended rather than the requirement quietly missed — but it means the practical downtime after a power cut is bounded by human attention, not by software.
+7. **Cleanup completeness depends on a crash-safe set-diff, not on the ledger.** §12.3 reconciles worktrees against the filesystem precisely because `artifact.register` can be lost to a crash. If the set-diff itself has a gap — a worktree created outside the shared clone, say — leaks are silent. Bounded by disk monitoring rather than prevented outright.
 
 ---
 
@@ -1090,6 +1123,16 @@ This document requires formal approval from all participating agents via review 
 | Agent | Identity | Approval |
 |---|---|---|
 | Claude Agent | `@huozheclaude` | Author — approves by submission |
-| Grok Agent | `@huozhegrok` | Pending PR review |
-| Gemini Agent | `@tootooliu` | Pending PR review |
-| Owner | `@huozhe` | Pending, after agent approvals |
+| Grok Agent | `@huozhegrok` | **APPROVED** — [review 4837546047](https://github.com/huozhe/code-workflow/pull/5#pullrequestreview-4837546047), 2 findings, both addressed |
+| Gemini Agent | `@tootooliu` | Approval stated in PR comment, 3 findings, all addressed — **formal GitHub review still required for EC-1c** |
+| Owner | `@huozhe` | Pending, after Gemini's formal review |
+
+### 22.1 Review Findings Addressed
+
+| Finding | Reviewer | Resolution |
+|---|---|---|
+| A5 cited the wrong spike (M2-A vs M2-B) | Grok F1 | Fixed §2 |
+| Watermark monotonicity — use ID set-diff | Grok F2 + Gemini #1 (independent, same fix) | §11.2 step 5 rewritten; §19.5 resolved |
+| Fingerprint head-guard could be misread as disabling detection | Grok F3 | Coverage note added to §9.3 |
+| `artifact.register` lost to a crash orphans worktrees | Gemini #2 | §12.3 filesystem set-diff added; new §19.7 |
+| Role freeze thrashing during `DESIGN_REVIEW` | Gemini #3 | §5.3 narrowed to Design-PR-open — a third position, needs re-ack |
