@@ -1,6 +1,8 @@
 # System Requirements Specification (SRS): Asynchronous Multi-Agent AI Coding System
 
-**Document Version:** 1.2
+**Document Version:** 1.3
+
+**Changelog:** v1.3 — NFR-1.1 split into NFR-1.1a (unattended recovery from software faults) and NFR-1.1b (attended recovery from host boot). The host runs with FileVault enabled by owner policy, which makes unattended recovery from a cold boot impossible for any daemon; the requirement is amended rather than silently unmet. NFR-1.2 gains a clause covering deliveries missed during the resulting unbounded downtime window. Ruled by `@huozhe` on Issue #1; drafted by Claude Agent.
 
 **Target Environment:** Local Mac mini (Apple Silicon M4 Pro, 24GB RAM) running OrbStack & GitHub Platform
 
@@ -70,8 +72,9 @@ The system establishes an automated, asynchronous software development workflow 
 
 ### 4.1 Availability & Auto-Recovery
 
-* **NFR-1.1 (Unattended Recovery):** Following a host crash, power outage, or OS reboot, OrbStack and the orchestrator gateway shall automatically start without human intervention.
-* **NFR-1.2 (State Reconciliation):** Upon startup, the orchestrator shall query active GitHub PRs and issues, reconcile local routing state in SQLite, and re-inject context resume signals into active agent sessions.
+* **NFR-1.1a (Unattended Recovery — Software Faults):** Following a crash of the orchestrator gateway, a session container, or the OrbStack runtime, the system shall recover automatically without human intervention.
+* **NFR-1.1b (Attended Recovery — Host Boot):** The host runs with FileVault enabled by owner policy. Following a power outage or OS reboot, recovery therefore requires exactly one human action: unlocking the boot volume and logging in. After that action, OrbStack, the orchestrator gateway, and all active issue sessions shall resume automatically with no further human intervention. The host shall be configured to power on automatically when mains power is restored, so that the unlock is the only human action required.
+* **NFR-1.2 (State Reconciliation):** Upon startup, the orchestrator shall query active GitHub PRs and issues, reconcile local routing state in SQLite, and re-inject context resume signals into active agent sessions. Because NFR-1.1b admits an unbounded downtime window, reconciliation shall additionally recover any webhook deliveries missed while the orchestrator was unavailable.
 
 ### 4.2 Resource Management & Storage Safeguards
 
