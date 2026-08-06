@@ -43,6 +43,22 @@ class Config:
         return int(self.raw.get("gateway", {}).get("docker_wait_timeout_s", 300))
 
     @property
+    def intake_mode(self) -> str:
+        return str(self.raw.get("intake", {}).get("mode", "label"))
+
+    @property
+    def intake_label(self) -> str:
+        return str(self.raw.get("intake", {}).get("label", "agentd"))
+
+    @property
+    def intake_actors(self) -> str:
+        return str(self.raw.get("intake", {}).get("actors", "collaborators"))
+
+    @property
+    def governor_interval_s(self) -> float:
+        return float(self.raw.get("gateway", {}).get("governor_interval_s", 30))
+
+    @property
     def state_db(self) -> Path:
         return self.root / "state.db"
 

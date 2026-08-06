@@ -25,7 +25,8 @@ def client(tmp_path: Path, secret: bytes, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("AGENTD_ROOT", str(tmp_path))
     store = Store(tmp_path / "state.db")
     cfg = Config(raw={"host": {"owner": "huozhe"}, "gateway": {}}, root=tmp_path)
-    app = create_app(cfg, store, secret)
+    # Tests drive the dispatcher explicitly; skip background workers.
+    app = create_app(cfg, store, secret, start_workers=False)
     return TestClient(app), store, secret
 
 

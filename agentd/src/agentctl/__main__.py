@@ -24,18 +24,38 @@ def main(argv: list[str] | None = None) -> None:
 
     config = load_config()
     if args.cmd == "status":
+        from agentd.disk import disk_free_gb
+
         store = Store(config.state_db)
         snap = store.status_snapshot()
         snap["owner"] = config.owner
         snap["docker"] = docker_socket_ready(config.docker_socket)
         snap["root"] = str(config.root)
+        snap["disk_free_gb"] = disk_free_gb(config.root)
+        snap["disk_floor_gb"] = config.disk_floor_gb
+        snap["disk_resume_gb"] = config.disk_resume_gb
+        snap["intake"] = {
+            "mode": config.intake_mode,
+            "label": config.intake_label,
+            "actors": config.intake_actors,
+        }
         print(json.dumps(snap, indent=2))
         store.close()
         return
 
     if args.cmd == "sessions":
-        # M0: session table not yet provisioned
-        print(json.dumps({"sessions": [], "note": "session table arrives in M2"}, indent=2))
+        store = Store(config.state_db)
+        rows = store.list_sessions()
+        print(
+            json.dumps(
+                {
+                    "sessions": rows,
+                    "note": "rows empty until M2 creates sessions",
+                },
+                indent=2,
+            )
+        )
+        store.close()
         return
 
     if args.cmd == "logs":

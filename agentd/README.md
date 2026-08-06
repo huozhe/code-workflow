@@ -4,12 +4,15 @@ Local orchestrator gateway for the asynchronous multi-agent AI coding system.
 
 Contract: [`docs/design/unified_design_spec.md`](../docs/design/unified_design_spec.md).
 
-## M0 scope
+## M0–M1 scope
 
 - Host layout under `~/.agentd/`
-- Webhook ingress (`POST /webhooks/github`) with HMAC + durable SQLite queue
+- Webhook ingress (`POST /webhooks/github`) with HMAC + durable SQLite queue (P7)
+- Full §15.1 schema (sessions/runners/turns reserved for M2+)
+- Resource Governor (30 s disk sample; trip below 15 GB / reset above 20 GB)
+- Intake gate (§4.3 label + collaborators) via dispatcher drain
 - LaunchAgent template + Docker socket wait
-- `agentctl` status CLI
+- `agentctl status | sessions | logs`
 - Keychain helpers for secrets
 
 ## Quick start

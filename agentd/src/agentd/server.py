@@ -1,10 +1,11 @@
-"""FastAPI webhook gateway — M0 ingress (§4.2)."""
+"""FastAPI webhook gateway — §4.2 ingress + M1 background workers."""
 
 from __future__ import annotations
 
 import json
 import logging
 import threading
+from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, Header, Request, Response
@@ -14,7 +15,10 @@ from starlette.concurrency import run_in_threadpool
 from agentd import __version__
 from agentd.config import Config
 from agentd.db import Store
+from agentd.disk import disk_free_gb
+from agentd.dispatcher import Dispatcher
 from agentd.docker_wait import docker_socket_ready
+from agentd.governor import ResourceGovernor
 from agentd.hmac_verify import verify_signature
 
 log = logging.getLogger("agentd.server")
@@ -29,13 +33,56 @@ class AppState:
         # Loaded once at process start — never re-read per request (B1).
         self.webhook_secret = webhook_secret
         self.nudge = threading.Event()
+        self.governor: ResourceGovernor | None = None
+        self.dispatcher: Dispatcher | None = None
 
 
-def create_app(config: Config, store: Store, webhook_secret: bytes) -> FastAPI:
+def create_app(
+    config: Config,
+    store: Store,
+    webhook_secret: bytes,
+    *,
+    start_workers: bool = True,
+    governor_interval_s: float | None = None,
+    free_gb_fn=None,
+    notify=None,
+) -> FastAPI:
     if not webhook_secret:
         raise ValueError("webhook_secret must be non-empty at startup")
     state = AppState(config, store, webhook_secret)
-    app = FastAPI(title="agentd", version=__version__)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        if start_workers:
+            interval = (
+                governor_interval_s
+                if governor_interval_s is not None
+                else config.governor_interval_s
+            )
+            gov_kw: dict[str, Any] = {
+                "floor_gb": config.disk_floor_gb,
+                "resume_gb": config.disk_resume_gb,
+                "interval_s": interval,
+            }
+            if free_gb_fn is not None:
+                gov_kw["free_gb_fn"] = free_gb_fn
+            if notify is not None:
+                gov_kw["notify"] = notify
+            state.governor = ResourceGovernor(store, config.root, **gov_kw)
+            state.dispatcher = Dispatcher(store, config, state.nudge)
+            state.governor.start()
+            state.dispatcher.start()
+            log.info("governor + dispatcher started")
+        try:
+            yield
+        finally:
+            if state.dispatcher:
+                state.dispatcher.stop()
+            if state.governor:
+                state.governor.stop()
+            log.info("background workers stopped")
+
+    app = FastAPI(title="agentd", version=__version__, lifespan=lifespan)
     app.state.agentd = state
 
     @app.get("/healthz")
@@ -50,7 +97,7 @@ def create_app(config: Config, store: Store, webhook_secret: bytes) -> FastAPI:
             db_ok = True
         except Exception:
             db_ok = False
-        disk = _disk_free_gb(config.root)
+        disk = disk_free_gb(config.root)
         disk_ok = disk is None or disk >= config.disk_floor_gb
         ok = docker_ok and db_ok and disk_ok
         body = {
@@ -59,6 +106,7 @@ def create_app(config: Config, store: Store, webhook_secret: bytes) -> FastAPI:
             "sqlite": db_ok,
             "disk_free_gb": disk,
             "disk_ok": disk_ok,
+            "disk_paused": store.is_disk_paused(),
         }
         return JSONResponse(body, status_code=200 if ok else 503)
 
@@ -162,13 +210,3 @@ def _parse_meta(body: bytes) -> tuple[str | None, str | None, int | None, str | 
         int(issue_num) if issue_num is not None else None,
         str(sender) if sender is not None else None,
     )
-
-
-def _disk_free_gb(path) -> float | None:
-    try:
-        import shutil
-
-        usage = shutil.disk_usage(path)
-        return usage.free / (1024**3)
-    except OSError:
-        return None

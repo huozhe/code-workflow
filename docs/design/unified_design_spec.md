@@ -924,7 +924,16 @@ CREATE TABLE deliveries (               -- idempotency ledger + durable queue
   -- zlib (RFC 1950) compressed raw JSON. Spec originally said "zstd"; M0 uses
   -- stdlib zlib to avoid a native dependency. Wire format is still compressed.
   payload BLOB NOT NULL,
-  status TEXT NOT NULL DEFAULT 'queued' -- queued|routed|dropped|done|failed
+  -- Status vocabulary (M1 amendment — `deferred` added):
+  --   queued   : accepted by ingress, not yet examined by the dispatcher
+  --   deferred : examined; no handler yet (no session / milestone not built).
+  --              Not the same as routed. M2+ resumes with WHERE status='deferred'.
+  --   routed   : handed to a session (requires a sessions row)
+  --   dropped  : intentionally discarded (intake fail, loop filter, …)
+  --   done     : fully processed terminal success (e.g. ping)
+  --   failed   : processed with error
+  status TEXT NOT NULL DEFAULT 'queued'
+  -- queued|deferred|routed|dropped|done|failed
 );
 CREATE INDEX ix_deliveries_pending ON deliveries(status, received_at);
 
