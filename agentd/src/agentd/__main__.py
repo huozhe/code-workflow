@@ -22,24 +22,13 @@ LOG_MAX_BYTES = 1 << 20  # 1 MiB
 LOG_BACKUP_COUNT = 5
 
 
-class _MaxLevelFilter(logging.Filter):
-    """Pass records at or below max_level (so INFO stays off stderr)."""
-
-    def __init__(self, max_level: int) -> None:
-        super().__init__()
-        self.max_level = max_level
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        return record.levelno <= self.max_level
-
-
 def configure_logging(level: str, log_dir: Path | None = None) -> Path:
     """Configure root logging.
 
-    - Primary: RotatingFileHandler → ``{log_dir}/agentd.log`` (owns its fd).
-    - Mirror: DEBUG/INFO → stdout, WARNING+ → stderr (LaunchAgent sinks /
-      crash path; not size-capped — keep them quiet, do not treat non-empty
-      err as a fault: uvicorn.error INFO still lands on stderr).
+    - Primary: RotatingFileHandler → ``{log_dir}/agentd.log`` (owns its fd;
+      caps scanner/access volume when uvicorn uses log_config=None).
+    - stderr WARNING+: LaunchAgent ``gateway.err.log`` crash/traceback sink only.
+      No stdout INFO mirror — that would re-unbound ``gateway.log``.
     """
     root = logging.getLogger()
     root.handlers.clear()
@@ -59,16 +48,9 @@ def configure_logging(level: str, log_dir: Path | None = None) -> Path:
     file_h.setFormatter(fmt)
     root.addHandler(file_h)
 
-    out = logging.StreamHandler(sys.stdout)
-    out.setLevel(logging.DEBUG)
-    out.addFilter(_MaxLevelFilter(logging.INFO))
-    out.setFormatter(fmt)
-
     err = logging.StreamHandler(sys.stderr)
     err.setLevel(logging.WARNING)
     err.setFormatter(fmt)
-
-    root.addHandler(out)
     root.addHandler(err)
     return file_path
 
@@ -125,7 +107,15 @@ def main(argv: list[str] | None = None) -> None:
         app = create_app(config, store, secret)
         host, port = _listen(config.listen, args.host, args.port)
         log.info("listening on %s:%s db=%s", host, port, config.state_db)
-        uvicorn.run(app, host=host, port=port, log_level=args.log_level.lower())
+        # log_config=None: do not install uvicorn's own stdout/stderr handlers
+        # (propagate=False). Access/error then reach root RotatingFileHandler.
+        uvicorn.run(
+            app,
+            host=host,
+            port=port,
+            log_level=args.log_level.lower(),
+            log_config=None,
+        )
         return
 
     parser.error(f"unknown command {args.cmd}")

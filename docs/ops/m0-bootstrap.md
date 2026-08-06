@@ -48,9 +48,9 @@ curl -s localhost:8787/healthz
 
 | Path | Role |
 |---|---|
-| `~/.agentd/logs/agentd.log` | Primary app log — in-process `RotatingFileHandler` (1 MiB × 5). `agentctl logs` tails this. |
-| `~/.agentd/logs/gateway.log` | LaunchAgent stdout sink (crash/pre-config noise + mirrored INFO). Not rotated by the app. |
-| `~/.agentd/logs/gateway.err.log` | LaunchAgent stderr sink. Not warnings-only: uvicorn's `uvicorn.error` INFO (`Uvicorn running on…`) lands here too — a non-empty err log is not by itself a fault signal. |
+| `~/.agentd/logs/agentd.log` | **Primary** (app + `uvicorn.access` / `uvicorn.error`) — in-process `RotatingFileHandler` (1 MiB × 5). `agentctl logs` tails this. `uvicorn.run(..., log_config=None)` so access traffic is not stranded on an uncapped stdout sink. |
+| `~/.agentd/logs/gateway.log` | LaunchAgent stdout crash/pre-config sink only — no INFO mirror (would re-unbound the loud path). |
+| `~/.agentd/logs/gateway.err.log` | LaunchAgent stderr sink for WARNING+ and hard crashes / uncaught tracebacks. |
 
 newsyslog cannot rotate LaunchAgent `StandardOutPath` files safely: launchd holds the inode open, so rename leaves the process writing unbounded data into `gateway.log.0`. Rotation is in-process on `agentd.log` only.
 

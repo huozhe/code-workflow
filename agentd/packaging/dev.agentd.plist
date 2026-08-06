@@ -12,8 +12,9 @@
     REPLACE_CHECKOUT_PATH → path from $HOME to the code-workflow repo
                             (e.g. claude_repos/code-workflow or grok_repos/code-workflow)
 
-  StandardOutPath / StandardErrorPath are crash/traceback sinks only.
-  Application logs rotate in-process to ~/.agentd/logs/agentd.log.
+  StandardOutPath / StandardErrorPath are crash/traceback sinks only
+  (no app INFO mirror). App + uvicorn access/error rotate in-process to
+  ~/.agentd/logs/agentd.log (uvicorn log_config=None → root handlers).
 -->
 <plist version="1.0">
 <dict>

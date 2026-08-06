@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import logging
-import logging.config
 from pathlib import Path
 
 import pytest
-import uvicorn.config
 
 from agentd.__main__ import configure_logging
 
@@ -26,38 +24,45 @@ def restore_root_logger() -> None:
     root.setLevel(old_level)
 
 
-def test_configure_logging_routes_levels(
+def test_configure_logging_file_and_stderr(
     restore_root_logger: None,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    """INFO → agentd.log only; WARNING+ → file + stderr. No stdout mirror."""
     configure_logging("DEBUG", log_dir=tmp_path)
     log = logging.getLogger("agentd.test_logging")
     log.info("info-line")
     log.warning("warn-line")
     captured = capsys.readouterr()
-    assert "info-line" in captured.out
+    assert "info-line" not in captured.out
     assert "info-line" not in captured.err
-    assert "warn-line" in captured.err
     assert "warn-line" not in captured.out
+    assert "warn-line" in captured.err
     body = (tmp_path / "agentd.log").read_text(encoding="utf-8")
     assert "info-line" in body
     assert "warn-line" in body
 
 
-def test_configure_logging_survives_uvicorn_dictconfig(
+def test_uvicorn_access_reaches_rotating_file(
     restore_root_logger: None,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """uvicorn.run() applies LOGGING_CONFIG; must not steal agentd root handlers."""
+    """With log_config=None, uvicorn.* propagate to root (capped access log)."""
     configure_logging("INFO", log_dir=tmp_path)
-    logging.config.dictConfig(uvicorn.config.LOGGING_CONFIG)
-    log = logging.getLogger("agentd.test_logging")
-    log.info("after-uvicorn")
-    log.warning("warn-after")
-    captured = capsys.readouterr()
-    assert "after-uvicorn" in captured.out
-    assert "after-uvicorn" not in captured.err
-    assert "warn-after" in captured.err
-    assert "warn-after" not in captured.out
+    access = logging.getLogger("uvicorn.access")
+    old_handlers = list(access.handlers)
+    old_propagate = access.propagate
+    access.handlers.clear()
+    access.propagate = True
+    try:
+        access.info('127.0.0.1:0 - "GET /.env HTTP/1.1" 404')
+        body = (tmp_path / "agentd.log").read_text(encoding="utf-8")
+        assert "GET /.env" in body
+        captured = capsys.readouterr()
+        assert "GET /.env" not in captured.out
+    finally:
+        access.handlers.clear()
+        access.handlers.extend(old_handlers)
+        access.propagate = old_propagate
