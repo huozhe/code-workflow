@@ -11,6 +11,7 @@ import uvicorn
 from agentd.config import load_config
 from agentd.db import Store
 from agentd.docker_wait import wait_for_docker
+from agentd.keychain import webhook_secret
 from agentd.paths import ensure_layout
 from agentd.server import create_app
 
@@ -46,6 +47,16 @@ def main(argv: list[str] | None = None) -> None:
             level=getattr(logging, args.log_level),
             format="%(asctime)s %(levelname)s %(name)s %(message)s",
         )
+        log = logging.getLogger("agentd")
+        # B1: refuse to listen if we cannot verify signatures.
+        secret = webhook_secret()
+        if not secret:
+            log.error(
+                "webhook secret not found (Keychain agentd/webhook-secret "
+                "or AGENTD_SECRET_WEBHOOK_SECRET); refusing to start"
+            )
+            sys.exit(1)
+
         config = load_config()
         if not args.skip_docker_wait:
             ok = wait_for_docker(
@@ -53,15 +64,13 @@ def main(argv: list[str] | None = None) -> None:
                 timeout_s=config.docker_wait_timeout_s,
             )
             if not ok:
-                logging.getLogger("agentd").warning(
+                log.warning(
                     "continuing without Docker socket; /readyz will report not ready"
                 )
         store = Store(config.state_db)
-        app = create_app(config, store)
+        app = create_app(config, store, secret)
         host, port = _listen(config.listen, args.host, args.port)
-        logging.getLogger("agentd").info(
-            "listening on %s:%s db=%s", host, port, config.state_db
-        )
+        log.info("listening on %s:%s db=%s", host, port, config.state_db)
         uvicorn.run(app, host=host, port=port, log_level=args.log_level.lower())
         return
 

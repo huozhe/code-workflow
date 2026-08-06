@@ -7,6 +7,7 @@ import logging
 import threading
 from typing import Any
 
+import anyio
 from fastapi import FastAPI, Header, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
 
@@ -15,7 +16,6 @@ from agentd.config import Config
 from agentd.db import Store
 from agentd.docker_wait import docker_socket_ready
 from agentd.hmac_verify import verify_signature
-from agentd.keychain import webhook_secret
 
 log = logging.getLogger("agentd.server")
 
@@ -23,14 +23,18 @@ MAX_BODY = 2 * 1024 * 1024  # 2 MiB
 
 
 class AppState:
-    def __init__(self, config: Config, store: Store) -> None:
+    def __init__(self, config: Config, store: Store, webhook_secret: bytes) -> None:
         self.config = config
         self.store = store
-        self._nudge = threading.Event()
+        # Loaded once at process start — never re-read per request (B1).
+        self.webhook_secret = webhook_secret
+        self.nudge = threading.Event()
 
 
-def create_app(config: Config, store: Store) -> FastAPI:
-    state = AppState(config, store)
+def create_app(config: Config, store: Store, webhook_secret: bytes) -> FastAPI:
+    if not webhook_secret:
+        raise ValueError("webhook_secret must be non-empty at startup")
+    state = AppState(config, store, webhook_secret)
     app = FastAPI(title="agentd", version=__version__)
     app.state.agentd = state
 
@@ -58,22 +62,31 @@ def create_app(config: Config, store: Store) -> FastAPI:
         }
         return JSONResponse(body, status_code=200 if ok else 503)
 
+    # Sync def: FastAPI runs these in a threadpool so SQLite commits do not
+    # stall the event loop (B2). Secret is already in memory (B1).
     @app.post("/webhooks/github")
-    async def github_webhook(
+    def github_webhook(
         request: Request,
         x_hub_signature_256: str | None = Header(default=None),
         x_github_delivery: str | None = Header(default=None),
         x_github_event: str | None = Header(default=None),
+        content_length: str | None = Header(default=None),
     ) -> Response:
-        # P7: never 5xx for downstream conditions (breaker, dispatcher, docker).
-        body = await request.body()
-        if len(body) > MAX_BODY:
-            return PlainTextResponse("payload too large", status_code=413)
+        secret = state.webhook_secret
+        assert secret, "webhook secret missing after startup gate"
 
-        secret = webhook_secret()
-        if secret is None:
-            log.error("webhook secret missing; rejecting")
-            return PlainTextResponse("webhook secret not configured", status_code=500)
+        # Cap memory before buffering (B3): honor Content-Length when present.
+        if content_length is not None:
+            try:
+                cl = int(content_length)
+            except ValueError:
+                return PlainTextResponse("invalid content-length", status_code=400)
+            if cl > MAX_BODY:
+                return PlainTextResponse("payload too large", status_code=413)
+
+        body = _read_body_capped(request, MAX_BODY)
+        if body is None:
+            return PlainTextResponse("payload too large", status_code=413)
 
         if not verify_signature(secret, body, x_hub_signature_256):
             return PlainTextResponse("invalid signature", status_code=401)
@@ -104,13 +117,30 @@ def create_app(config: Config, store: Store) -> FastAPI:
                 repo,
                 sender,
             )
-            state._nudge.set()
+            state.nudge.set()
         else:
             log.info("delivery duplicate id=%s ignored", x_github_delivery)
 
         return PlainTextResponse("ok", status_code=200)
 
     return app
+
+
+def _read_body_capped(request: Request, max_bytes: int) -> bytes | None:
+    """Stream the body with a hard byte cap. Returns None if over limit."""
+
+    async def _stream() -> bytes | None:
+        total = 0
+        parts: list[bytes] = []
+        async for chunk in request.stream():
+            total += len(chunk)
+            if total > max_bytes:
+                return None
+            parts.append(chunk)
+        return b"".join(parts)
+
+    # Handler runs in a worker thread; hop to the event loop for ASGI stream.
+    return anyio.from_thread.run(_stream)
 
 
 def _parse_meta(body: bytes) -> tuple[str | None, str | None, int | None, str | None]:

@@ -224,7 +224,7 @@ Consequences: no token material on the host filesystem, in the image, in `docker
 
 **The boundary this creates is precise, and the ADR states it plainly: the two-UID split protects _credentials_, not _data_.** Both roles can read each other's worktrees and transcripts. That is accepted — both roles are already trusted with the repository. What must not cross is the ability of the Developer identity to produce an approval that branch protection accepts on its own PR.
 
-**Identity preflight (added M0 — ADR-11).** Cross-role isolation inside the container does not stop an operator from mapping the *wrong* PAT to a role in config/Keychain. A wrong-identity token silently defeats §9.1 (owner login resets turn budgets), §10.2 (owner-only checkbox), and §8.4 (Architect approval). On every `session.init` and `session.resume`, **before any turn is dispatched**, the runner calls `GET /user` with each delivered token and asserts `login == the configured GitHub identity for that role`. Mismatch ⇒ fail the session loudly, escalate to `@owner` (§8.5), dispatch nothing.
+**Identity preflight (added M0 — see ADR-11 at end of §16).** Cross-role isolation inside the container does not stop an operator from mapping the *wrong* PAT to a role in config/Keychain. A wrong-identity token silently defeats §9.1 (owner login resets turn budgets), §10.2 (owner-only checkbox), and §8.4 (Architect approval). On every `session.init` and `session.resume`, **before any turn is dispatched**, the runner calls `GET /user` with each delivered token and asserts `login == the configured GitHub identity for that role`. Mismatch ⇒ fail the session loudly, escalate to `@owner` (§8.5), dispatch nothing.
 
 **Inbound detection net:** the gateway rejects and escalates any event where `sender.login == config.gateway.owner` **and** the body carries an `agentd:turn` provenance footer — a combination that is impossible under correct operation and is the signature of an agent acting with the owner token.
 
@@ -906,17 +906,35 @@ When `transcript.jsonl` exceeds a configured token estimate, the runner self-sum
 ### 15.1 Schema
 
 ```sql
-PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON;
+-- Connection pragmas must be set with individual execute() calls before
+-- any multi-statement script: foreign_keys cannot change inside a transaction.
+PRAGMA journal_mode=WAL;
+PRAGMA busy_timeout=5000;
+PRAGMA foreign_keys=ON;
 
 CREATE TABLE deliveries (               -- idempotency ledger + durable queue
   delivery_id TEXT PRIMARY KEY,         -- X-GitHub-Delivery, or recon:<node_id>
   event TEXT NOT NULL, action TEXT,
-  repo TEXT NOT NULL, issue_num INTEGER,
-  sender TEXT NOT NULL, received_at INTEGER NOT NULL,
-  payload BLOB NOT NULL,                -- zstd-compressed raw JSON
+  -- repo/sender default to '' when the payload cannot be parsed; empty string
+  -- rather than NULL so NOT NULL holds and indexes stay simple (M0 amendment).
+  repo TEXT NOT NULL DEFAULT '',
+  issue_num INTEGER,
+  sender TEXT NOT NULL DEFAULT '',
+  received_at INTEGER NOT NULL,
+  -- zlib (RFC 1950) compressed raw JSON. Spec originally said "zstd"; M0 uses
+  -- stdlib zlib to avoid a native dependency. Wire format is still compressed.
+  payload BLOB NOT NULL,
   status TEXT NOT NULL DEFAULT 'queued' -- queued|routed|dropped|done|failed
 );
 CREATE INDEX ix_deliveries_pending ON deliveries(status, received_at);
+
+-- Host circuit-breaker latch (NFR-2.2). Single-row table; not session-scoped.
+CREATE TABLE circuit_breaker (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  disk_paused INTEGER NOT NULL DEFAULT 0,
+  reason TEXT,
+  updated_at INTEGER NOT NULL
+);
 
 CREATE TABLE sessions (
   session_key TEXT PRIMARY KEY,         -- owner/repo#42
@@ -966,7 +984,7 @@ CREATE TABLE escalations (
 );
 ```
 
-`agentd` is the only writer, so WAL plus `busy_timeout` suffices; no pool coordination is required.
+`agentd` is the only *process* writer, so WAL plus `busy_timeout` suffices for multi-process contention. Within the process, concurrent threadpool handlers share one connection behind a **mutex** around write methods (M0 review S3).
 
 ---
 
@@ -1024,16 +1042,6 @@ Credentials are delivered in `session.init` and written to container-internal tm
 
 *Rejected: host-provisioned `0400` token files on a bind mount.* Confirmed by spike M2-A (2026-08-06): bind-mounted files surface as `root` inside OrbStack; both role UIDs read them; in-container `chown` does not stick. Tmpfs is the **only** working mechanism, not merely preferred.
 
-### ADR-11: Identity Preflight on Token Delivery
-
-*Added during M0 dry-run after a wrong-account `gh` post attributed agent work to the owner.* §5.2 prevents cross-agent token confusion *inside* the container but not operator mis-mapping of PATs in Keychain/config.
-
-**Rule:** before any turn after `session.init` / `session.resume`, assert `GET /user` login matches the configured identity for each role token. Fail closed + escalate on mismatch.
-
-**Complement:** gateway escalates on `sender.login == owner` combined with an `agentd:turn` provenance footer.
-
-*Rejected: trust config forever after first successful boot.* Silent wrong-token operation is indistinguishable from legitimate human action at the verification and loop-budget gates.
-
 ### ADR-7: Machine Users, Not a GitHub App
 
 SRS §2 requires identity strings matching registered GitHub usernames for communications and webhook filtering; App bots surface as `app-name[bot]` and their reviews interact with branch protection through a different mechanism. Two machine users match the SRS literally and keep the model simple: each agent *is* a GitHub user.
@@ -1057,6 +1065,18 @@ Vendor CLI session-resume capability is an optimization, not a dependency (§14.
 Ingress never returns 5xx for a downstream condition. GitHub does not automatically retry failed repository webhook deliveries, so a rejected delivery is a lost delivery. Persisting first and deciding later costs one `INSERT` and removes an entire class of silent data loss — including during the circuit-breaker pause NFR-2.2 mandates.
 
 Two of the three Phase 1 drafts specified 503-on-breaker, one of them justified by the incorrect belief that GitHub retries automatically. Both conceded.
+
+**M0 hardening:** the webhook HMAC secret is loaded **once at process start** from Keychain (or a documented test-only env override). If unavailable, the process **refuses to bind a port**. Returning 5xx when the secret is missing would permanently drop deliveries during the NFR-1.1b post-unlock window when the login keychain may lag LaunchAgent start.
+
+### ADR-11: Identity Preflight on Token Delivery
+
+*Added during M0 dry-run after a wrong-account `gh` post attributed agent work to the owner.* §5.2 prevents cross-agent token confusion *inside* the container but not operator mis-mapping of PATs in Keychain/config.
+
+**Rule:** before any turn after `session.init` / `session.resume`, assert `GET /user` login matches the configured identity for each role token. Fail closed + escalate on mismatch.
+
+**Complement:** gateway escalates on `sender.login == owner` combined with an `agentd:turn` provenance footer.
+
+*Rejected: trust config forever after first successful boot.* Silent wrong-token operation is indistinguishable from legitimate human action at the verification and loop-budget gates.
 
 ---
 

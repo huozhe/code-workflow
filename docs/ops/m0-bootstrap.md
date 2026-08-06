@@ -22,7 +22,15 @@ security add-generic-password -s agentd -a claude-bot -w '<pat>' -U
 security add-generic-password -s agentd -a grok-bot -w '<pat>' -U
 ```
 
-Dev fallback (not for production): `export AGENTD_SECRET_WEBHOOK_SECRET=...`
+**Test-only env override (not for production LaunchAgent):**
+
+```bash
+export AGENTD_SECRET_WEBHOOK_SECRET='...'   # webhook HMAC
+export AGENTD_SECRET_CLAUDE_BOT='...'       # optional PAT overrides
+export AGENTD_SECRET_GROK_BOT='...'
+```
+
+These bypass Keychain when set. The production plist must **not** set them; production loads only from Keychain at process start and **exits non-zero** if the webhook secret is missing (so a lagging login-keychain after FileVault unlock fails loud instead of 5xx-dropping GitHub deliveries).
 
 ## 3. Run gateway
 
