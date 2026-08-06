@@ -13,7 +13,11 @@ log = logging.getLogger("agentd.dispatcher")
 
 
 class Dispatcher:
-    """Scan ``status='queued'``; pause when the disk breaker is open."""
+    """Scan ``status='queued'``; pause when the disk breaker is open.
+
+    Unhandled events become ``deferred`` (not ``routed``). ``routed`` is
+    reserved for hand-off to a real session (M2+). See §15.1 M1 amendment.
+    """
 
     def __init__(
         self,
@@ -88,10 +92,11 @@ class Dispatcher:
         )
         if decision is not None:
             if decision.accepted:
-                # Session create is M2 — mark routed so queue_depth reflects work done.
-                self.store.set_delivery_status(delivery_id, "routed")
+                # Intake passed but session create is M2 — park as deferred.
+                # Do NOT use routed: that means handed to a sessions row.
+                self.store.set_delivery_status(delivery_id, "deferred")
                 log.info(
-                    "delivery routed id=%s event=%s action=%s (%s); session deferred to M2",
+                    "delivery deferred id=%s event=%s action=%s (%s); session create is M2",
                     delivery_id,
                     event,
                     action_s,
@@ -108,11 +113,11 @@ class Dispatcher:
                 )
             return
 
-        # Non-intake events (comments, PRs, …): leave for M2+ session FSM.
-        # Mark routed so the queue does not re-scan forever with no progress.
-        self.store.set_delivery_status(delivery_id, "routed")
+        # Non-intake events (comments, PRs, push, …): no M1 handler.
+        # deferred keeps them out of the hot scan without pretending they were routed.
+        self.store.set_delivery_status(delivery_id, "deferred")
         log.info(
-            "delivery routed id=%s event=%s action=%s (no M1 handler; awaiting sessions)",
+            "delivery deferred id=%s event=%s action=%s (no M1 handler; M2+ resumes)",
             delivery_id,
             event,
             action_s,

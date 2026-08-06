@@ -39,7 +39,12 @@ def _escape_applescript(s: str) -> str:
 
 
 class ResourceGovernor:
-    """Sample free disk every interval; trip below floor, reset above resume."""
+    """Sample free disk every interval; trip below floor, reset above resume.
+
+    Notification fires on TRIP only (not RESET). RESET is logged; the
+    authoritative operator signal on trip is also the durable SQLite latch
+    and (later) per-issue GitHub comments — macOS notify is best-effort.
+    """
 
     def __init__(
         self,

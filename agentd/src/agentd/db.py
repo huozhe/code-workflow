@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 import threading
 import time
@@ -9,6 +10,11 @@ import zlib
 from pathlib import Path
 from typing import Any
 
+log = logging.getLogger("agentd.db")
+
+# Bump when DDL changes require a rebuild. SQLite is a derived cache (ADR-2);
+# mismatch ⇒ wipe + recreate. GitHub remains source of truth (P1).
+SCHEMA_VERSION = 1
 
 # Schema DDL only — connection pragmas are set separately (see Store.__init__).
 SCHEMA = """
@@ -124,13 +130,54 @@ class Store:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.execute("PRAGMA foreign_keys=ON")
-        self._conn.executescript(SCHEMA)
+        self._apply_schema()
         row = self._conn.execute("PRAGMA integrity_check").fetchone()
         if row is None or row[0] != "ok":
             raise RuntimeError(f"SQLite integrity_check failed: {row}")
         fk = self._conn.execute("PRAGMA foreign_keys").fetchone()
         if not fk or int(fk[0]) != 1:
             raise RuntimeError("PRAGMA foreign_keys is not enabled")
+
+    def _schema_version(self) -> int:
+        row = self._conn.execute("PRAGMA user_version").fetchone()
+        return int(row[0]) if row else 0
+
+    def _apply_schema(self) -> None:
+        """Create/migrate schema. ADR-2: mismatch ⇒ destructive rebuild."""
+        ver = self._schema_version()
+        if ver == SCHEMA_VERSION:
+            # Still run IF NOT EXISTS so a partially-created file heals.
+            self._conn.executescript(SCHEMA)
+            return
+        if ver == 0:
+            # Fresh DB or pre-version M0 file: CREATE IF NOT EXISTS keeps rows.
+            self._conn.executescript(SCHEMA)
+            self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            log.info("schema stamped user_version=%s", SCHEMA_VERSION)
+            return
+        if ver > SCHEMA_VERSION:
+            raise RuntimeError(
+                f"state.db user_version={ver} is newer than agentd "
+                f"SCHEMA_VERSION={SCHEMA_VERSION}; upgrade the binary"
+            )
+        # ver < SCHEMA_VERSION and ver != 0: destructive rebuild (ADR-2).
+        log.warning(
+            "schema user_version=%s < SCHEMA_VERSION=%s; rebuilding derived "
+            "cache (ADR-2). Deliveries re-sync from GitHub via Reconciler.",
+            ver,
+            SCHEMA_VERSION,
+        )
+        self._rebuild_schema()
+
+    def _rebuild_schema(self) -> None:
+        tables = self._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+        ).fetchall()
+        for t in tables:
+            self._conn.execute(f'DROP TABLE IF EXISTS "{t[0]}"')
+        self._conn.executescript(SCHEMA)
+        self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        self._conn.commit()
 
     def close(self) -> None:
         with self._lock:

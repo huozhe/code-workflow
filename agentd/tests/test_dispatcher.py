@@ -37,7 +37,7 @@ def test_ping_marked_done(tmp_path: Path) -> None:
     store.close()
 
 
-def test_intake_drop_and_route(tmp_path: Path) -> None:
+def test_intake_drop_and_defer_session_work(tmp_path: Path) -> None:
     store = _store(tmp_path)
     drop_body = json.dumps(
         {
@@ -81,8 +81,40 @@ def test_intake_drop_and_route(tmp_path: Path) -> None:
     d.drain_once()
     by = store.count_by_status()
     assert by.get("dropped") == 1
-    assert by.get("routed") == 1
+    # Intake pass still cannot create a session in M1 → deferred, not routed.
+    assert by.get("deferred") == 1
+    assert by.get("routed") is None
     assert store.queue_depth() == 0
+    store.close()
+
+
+def test_unhandled_events_deferred_not_routed(tmp_path: Path) -> None:
+    """Fallthrough path: issue_comment / push / PR — evaluate_intake is None."""
+    store = _store(tmp_path)
+    for i, (event, action) in enumerate(
+        [
+            ("issue_comment", "created"),
+            ("push", None),
+            ("pull_request", "opened"),
+            ("pull_request_review", "submitted"),
+        ]
+    ):
+        store.insert_delivery(
+            delivery_id=f"u{i}",
+            event=event,
+            action=action,
+            repo="o/r",
+            issue_num=6 if event != "push" else None,
+            sender="huozhe",
+            payload=b"{}",
+        )
+    d = Dispatcher(store, _cfg(), threading.Event())
+    assert d.drain_once() == 4
+    by = store.count_by_status()
+    assert by == {"deferred": 4}
+    assert store.queue_depth() == 0
+    # Second drain must not re-touch deferred rows.
+    assert d.drain_once() == 0
     store.close()
 
 
