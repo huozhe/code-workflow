@@ -5,7 +5,16 @@
   Install: cp packaging/dev.agentd.plist ~/Library/LaunchAgents/
            launchctl load ~/Library/LaunchAgents/dev.agentd.plist
 
-  Adjust ProgramArguments paths after `uv sync` / venv install.
+  After `uv sync` in the agentd checkout, point ProgramArguments at the
+  installed venv binary (not `uv run`). Replace BOTH tokens — do not half-
+  substitute a plausible path under $HOME:
+    REPLACE_HOME          → home directory basename (e.g. alice)
+    REPLACE_CHECKOUT_PATH → path from $HOME to the code-workflow repo
+                            (e.g. claude_repos/code-workflow or grok_repos/code-workflow)
+
+  StandardOutPath / StandardErrorPath are crash/traceback sinks only
+  (no app INFO mirror). App + uvicorn access/error rotate in-process to
+  ~/.agentd/logs/agentd.log (uvicorn log_config=None → root handlers).
 -->
 <plist version="1.0">
 <dict>
@@ -18,12 +27,10 @@
   <key>ThrottleInterval</key>
   <integer>10</integer>
   <key>WorkingDirectory</key>
-  <string>/Users/REPLACE/grok_repos/code-workflow/agentd</string>
+  <string>/Users/REPLACE_HOME/.agentd</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/REPLACE/.local/bin/uv</string>
-    <string>run</string>
-    <string>agentd</string>
+    <string>/Users/REPLACE_HOME/REPLACE_CHECKOUT_PATH/agentd/.venv/bin/agentd</string>
     <string>serve</string>
     <string>--host</string>
     <string>127.0.0.1</string>
@@ -31,13 +38,13 @@
     <string>8787</string>
   </array>
   <key>StandardOutPath</key>
-  <string>/Users/REPLACE/.agentd/logs/gateway.log</string>
+  <string>/Users/REPLACE_HOME/.agentd/logs/gateway.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/REPLACE/.agentd/logs/gateway.err.log</string>
+  <string>/Users/REPLACE_HOME/.agentd/logs/gateway.err.log</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
-    <string>/Users/REPLACE/.local/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <string>/Users/REPLACE_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin</string>
   </dict>
 </dict>
 </plist>

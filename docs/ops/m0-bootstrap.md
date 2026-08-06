@@ -44,13 +44,33 @@ uv run agentctl status
 curl -s localhost:8787/healthz
 ```
 
+**Logs**
+
+| Path | Role |
+|---|---|
+| `~/.agentd/logs/agentd.log` | **Primary** (app + `uvicorn.access` / `uvicorn.error`) — in-process `RotatingFileHandler` (1 MiB × 5). `agentctl logs` tails this. `uvicorn.run(..., log_config=None)` so access traffic is not stranded on an uncapped stdout sink. |
+| `~/.agentd/logs/gateway.log` | LaunchAgent stdout crash/pre-config sink only — no INFO mirror (would re-unbound the loud path). |
+| `~/.agentd/logs/gateway.err.log` | LaunchAgent stderr sink for WARNING+ and hard crashes / uncaught tracebacks. |
+
+newsyslog cannot rotate LaunchAgent `StandardOutPath` files safely: launchd holds the inode open, so rename leaves the process writing unbounded data into `gateway.log.0`. Rotation is in-process on `agentd.log` only.
+
 ## 4. LaunchAgent
 
 ```bash
-# edit paths in packaging/dev.agentd.plist (REPLACE → your home)
+# After `uv sync`, edit packaging/dev.agentd.plist — replace BOTH tokens:
+#   REPLACE_HOME          → home basename (e.g. alice)
+#   REPLACE_CHECKOUT_PATH → path from $HOME to the code-workflow repo
+#                           (e.g. claude_repos/code-workflow — not a guess)
+# ProgramArguments must be the absolute .venv/bin/agentd (not `uv run`).
+# WorkingDirectory stays ~/.agentd (data root; not the git checkout).
+test -x /Users/"$USER"/REPLACE_CHECKOUT_PATH/agentd/.venv/bin/agentd   # before load
 cp packaging/dev.agentd.plist ~/Library/LaunchAgents/dev.agentd.plist
+# edit tokens in the installed copy if you prefer not to touch the template
 launchctl unload ~/Library/LaunchAgents/dev.agentd.plist 2>/dev/null || true
 launchctl load ~/Library/LaunchAgents/dev.agentd.plist
+launchctl list | grep dev.agentd
+# expect:  <pid>  0  dev.agentd
+# middle column non-zero (78/127) → ProgramArguments path wrong → silent respawn
 ```
 
 ## 5. Host power / OrbStack (NFR-1.1b)
@@ -66,10 +86,24 @@ sudo systemsetup -setrestartpowerfailure on
 
 Default design: Tailscale Funnel → `127.0.0.1:8787`.
 
+**Working Funnel form** (path must be on the *target*, not only `--set-path` alone — otherwise Funnel silently strips the path and every webhook 404s):
+
 ```bash
-# example
-tailscale funnel 8787
+# background so it survives reboot / terminal exit
+tailscale funnel --bg --set-path=/webhooks/github \
+  http://127.0.0.1:8787/webhooks/github
 ```
+
+Verify from the public hostname:
+
+```bash
+# 401 = Funnel path + HMAC gate OK (no signature)
+# 404 / 405 = path broken (often the silent strip from a bare --set-path)
+curl -sS -o /dev/null -w '%{http_code}\n' -X POST "https://<funnel-host>/webhooks/github"
+curl -sS -o /dev/null -w '%{http_code}\n' "https://<funnel-host>/readyz"   # expect 404
+```
+
+Exposing only `/webhooks/github` also keeps `/healthz` and `/readyz` (disk telemetry) off the public internet. That is tunnel-vendor behaviour verified empirically — not an app-layer guarantee.
 
 Alternatives: `cloudflared tunnel`, `ngrok http 8787`, `smee -u <url> -t http://127.0.0.1:8787/webhooks/github`.
 

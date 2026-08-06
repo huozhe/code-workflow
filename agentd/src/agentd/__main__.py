@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 import uvicorn
 
@@ -12,8 +14,45 @@ from agentd.config import load_config
 from agentd.db import Store
 from agentd.docker_wait import wait_for_docker
 from agentd.keychain import webhook_secret
-from agentd.paths import ensure_layout
+from agentd.paths import agentd_root, ensure_layout
 from agentd.server import create_app
+
+# App-owned log: rotates in-process (launchd StandardOutPath fds cannot).
+LOG_MAX_BYTES = 1 << 20  # 1 MiB
+LOG_BACKUP_COUNT = 5
+
+
+def configure_logging(level: str, log_dir: Path | None = None) -> Path:
+    """Configure root logging.
+
+    - Primary: RotatingFileHandler → ``{log_dir}/agentd.log`` (owns its fd;
+      caps scanner/access volume when uvicorn uses log_config=None).
+    - stderr WARNING+: LaunchAgent ``gateway.err.log`` crash/traceback sink only.
+      No stdout INFO mirror — that would re-unbound ``gateway.log``.
+    """
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.setLevel(getattr(logging, level))
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+
+    log_dir = Path(log_dir) if log_dir is not None else agentd_root() / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    file_path = log_dir / "agentd.log"
+    file_h = RotatingFileHandler(
+        file_path,
+        maxBytes=LOG_MAX_BYTES,
+        backupCount=LOG_BACKUP_COUNT,
+        encoding="utf-8",
+    )
+    file_h.setLevel(logging.DEBUG)
+    file_h.setFormatter(fmt)
+    root.addHandler(file_h)
+
+    err = logging.StreamHandler(sys.stderr)
+    err.setLevel(logging.WARNING)
+    err.setFormatter(fmt)
+    root.addHandler(err)
+    return file_path
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -43,10 +82,7 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     if args.cmd == "serve":
-        logging.basicConfig(
-            level=getattr(logging, args.log_level),
-            format="%(asctime)s %(levelname)s %(name)s %(message)s",
-        )
+        configure_logging(args.log_level)
         log = logging.getLogger("agentd")
         # B1: refuse to listen if we cannot verify signatures.
         secret = webhook_secret()
@@ -71,7 +107,15 @@ def main(argv: list[str] | None = None) -> None:
         app = create_app(config, store, secret)
         host, port = _listen(config.listen, args.host, args.port)
         log.info("listening on %s:%s db=%s", host, port, config.state_db)
-        uvicorn.run(app, host=host, port=port, log_level=args.log_level.lower())
+        # log_config=None: do not install uvicorn's own stdout/stderr handlers
+        # (propagate=False). Access/error then reach root RotatingFileHandler.
+        uvicorn.run(
+            app,
+            host=host,
+            port=port,
+            log_level=args.log_level.lower(),
+            log_config=None,
+        )
         return
 
     parser.error(f"unknown command {args.cmd}")
