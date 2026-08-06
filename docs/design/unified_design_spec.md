@@ -396,7 +396,9 @@ docker run -d \
   --label agentd.session='huozhe/code-workflow#42' \
   --restart unless-stopped \
   --memory 3g --memory-swap 3g --cpus 2 --pids-limit 1024 \
-  --cap-drop ALL --security-opt no-new-privileges \
+  --cap-drop ALL \
+  --cap-add CHOWN --cap-add FOWNER --cap-add SETUID --cap-add SETGID \
+  --security-opt no-new-privileges \
   --tmpfs /run/agent:rw,noexec,nosuid,size=1m,mode=0711 \
   -v ~/.agentd/repos/huozhe/code-workflow:/srv/repo \
   -v ~/.agentd/sessions/huozhe__code-workflow__42:/srv/session \
@@ -408,6 +410,7 @@ Non-obvious choices:
 - **No `/var/run/docker.sock`. Ever.** Mounting it would grant host root and the sibling role's credentials, dissolving every boundary in §13.
 - `--restart unless-stopped` lets containers survive an OrbStack or host restart on their own; the Reconciler then adopts or prunes them by label. This is the container half of NFR-1.1a.
 - The tmpfs at `mode=0711` lets each role traverse to its own token directory without listing the sibling's.
+- **Capabilities (M2 amendment).** `--cap-drop ALL` alone makes `chown` and `setuid` return EPERM even for UID 0 under OrbStack/Linux, which makes §5.2 token placement and §7.3 privilege drop impossible. Re-add only `CHOWN`, `FOWNER`, `SETUID`, `SETGID`. No `SYS_ADMIN`, no `NET_ADMIN`, no docker socket.
 - Egress is unrestricted by default (GitHub, model APIs, package registries). An allowlisting egress proxy is noted in §13.3 as hardening, not baseline.
 
 ### 7.3 Privilege Model
