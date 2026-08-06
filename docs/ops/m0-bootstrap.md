@@ -44,13 +44,29 @@ uv run agentctl status
 curl -s localhost:8787/healthz
 ```
 
+Application logs: DEBUG/INFO → stdout (`gateway.log` under LaunchAgent); WARNING+ → stderr (`gateway.err.log`).
+
 ## 4. LaunchAgent
 
 ```bash
-# edit paths in packaging/dev.agentd.plist (REPLACE → your home)
+# After `uv sync`, edit packaging/dev.agentd.plist:
+#   - REPLACE → your home directory basename (e.g. alice)
+#   - ProgramArguments[0] → absolute path to agentd/.venv/bin/agentd
+#     (not `uv run` — boot after power-cut must not re-resolve deps)
+#   - WorkingDirectory → ~/.agentd (data root; not the git checkout)
 cp packaging/dev.agentd.plist ~/Library/LaunchAgents/dev.agentd.plist
 launchctl unload ~/Library/LaunchAgents/dev.agentd.plist 2>/dev/null || true
 launchctl load ~/Library/LaunchAgents/dev.agentd.plist
+```
+
+### Log rotation (newsyslog)
+
+LaunchAgent writes unbounded files under `~/.agentd/logs/`. Install size-based rotation (1 MB × 5 archives):
+
+```bash
+# edit REPLACE in packaging/newsyslog.agentd.conf first
+sudo cp packaging/newsyslog.agentd.conf /etc/newsyslog.d/agentd.conf
+sudo newsyslog -nvv   # dry-run; should list both gateway paths
 ```
 
 ## 5. Host power / OrbStack (NFR-1.1b)
@@ -66,10 +82,24 @@ sudo systemsetup -setrestartpowerfailure on
 
 Default design: Tailscale Funnel → `127.0.0.1:8787`.
 
+**Working Funnel form** (path must be on the *target*, not only `--set-path` alone — otherwise Funnel silently strips the path and every webhook 404s):
+
 ```bash
-# example
-tailscale funnel 8787
+# background so it survives reboot / terminal exit
+tailscale funnel --bg --set-path=/webhooks/github \
+  http://127.0.0.1:8787/webhooks/github
 ```
+
+Verify from the public hostname:
+
+```bash
+# 401 = Funnel path + HMAC gate OK (no signature)
+# 404 / 405 = path broken (often the silent strip from a bare --set-path)
+curl -sS -o /dev/null -w '%{http_code}\n' -X POST "https://<funnel-host>/webhooks/github"
+curl -sS -o /dev/null -w '%{http_code}\n' "https://<funnel-host>/readyz"   # expect 404
+```
+
+Exposing only `/webhooks/github` also keeps `/healthz` and `/readyz` (disk telemetry) off the public internet. That is tunnel-vendor behaviour verified empirically — not an app-layer guarantee.
 
 Alternatives: `cloudflared tunnel`, `ngrok http 8787`, `smee -u <url> -t http://127.0.0.1:8787/webhooks/github`.
 

@@ -5,7 +5,9 @@
   Install: cp packaging/dev.agentd.plist ~/Library/LaunchAgents/
            launchctl load ~/Library/LaunchAgents/dev.agentd.plist
 
-  Adjust ProgramArguments paths after `uv sync` / venv install.
+  After `uv sync` in the agentd checkout, point ProgramArguments at the
+  installed venv binary (not `uv run`). Replace REPLACE with your home
+  directory basename and adjust the checkout path if needed.
 -->
 <plist version="1.0">
 <dict>
@@ -18,12 +20,10 @@
   <key>ThrottleInterval</key>
   <integer>10</integer>
   <key>WorkingDirectory</key>
-  <string>/Users/REPLACE/grok_repos/code-workflow/agentd</string>
+  <string>/Users/REPLACE/.agentd</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/REPLACE/.local/bin/uv</string>
-    <string>run</string>
-    <string>agentd</string>
+    <string>/Users/REPLACE/code-workflow/agentd/.venv/bin/agentd</string>
     <string>serve</string>
     <string>--host</string>
     <string>127.0.0.1</string>

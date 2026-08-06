@@ -16,6 +16,37 @@ from agentd.paths import ensure_layout
 from agentd.server import create_app
 
 
+class _MaxLevelFilter(logging.Filter):
+    """Pass records at or below max_level (so INFO stays off stderr)."""
+
+    def __init__(self, max_level: int) -> None:
+        super().__init__()
+        self.max_level = max_level
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.levelno <= self.max_level
+
+
+def configure_logging(level: str) -> None:
+    """Route DEBUG/INFO → stdout, WARNING+ → stderr (LaunchAgent log split)."""
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.setLevel(getattr(logging, level))
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+
+    out = logging.StreamHandler(sys.stdout)
+    out.setLevel(logging.DEBUG)
+    out.addFilter(_MaxLevelFilter(logging.INFO))
+    out.setFormatter(fmt)
+
+    err = logging.StreamHandler(sys.stderr)
+    err.setLevel(logging.WARNING)
+    err.setFormatter(fmt)
+
+    root.addHandler(out)
+    root.addHandler(err)
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="agentd")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -43,10 +74,7 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     if args.cmd == "serve":
-        logging.basicConfig(
-            level=getattr(logging, args.log_level),
-            format="%(asctime)s %(levelname)s %(name)s %(message)s",
-        )
+        configure_logging(args.log_level)
         log = logging.getLogger("agentd")
         # B1: refuse to listen if we cannot verify signatures.
         secret = webhook_secret()
