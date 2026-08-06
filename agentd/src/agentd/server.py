@@ -7,9 +7,9 @@ import logging
 import threading
 from typing import Any
 
-import anyio
 from fastapi import FastAPI, Header, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
+from starlette.concurrency import run_in_threadpool
 
 from agentd import __version__
 from agentd.config import Config
@@ -62,10 +62,10 @@ def create_app(config: Config, store: Store, webhook_secret: bytes) -> FastAPI:
         }
         return JSONResponse(body, status_code=200 if ok else 503)
 
-    # Sync def: FastAPI runs these in a threadpool so SQLite commits do not
-    # stall the event loop (B2). Secret is already in memory (B1).
+    # async def: native ASGI body stream for the 2 MiB cap (B3). SQLite commits
+    # are offloaded via run_in_threadpool so they do not stall the loop (B2).
     @app.post("/webhooks/github")
-    def github_webhook(
+    async def github_webhook(
         request: Request,
         x_hub_signature_256: str | None = Header(default=None),
         x_github_delivery: str | None = Header(default=None),
@@ -73,7 +73,9 @@ def create_app(config: Config, store: Store, webhook_secret: bytes) -> FastAPI:
         content_length: str | None = Header(default=None),
     ) -> Response:
         secret = state.webhook_secret
-        assert secret, "webhook secret missing after startup gate"
+        if not secret:
+            # create_app already rejects empty secrets; explicit for -O runs.
+            raise RuntimeError("webhook secret missing after startup gate")
 
         # Cap memory before buffering (B3): honor Content-Length when present.
         if content_length is not None:
@@ -84,7 +86,7 @@ def create_app(config: Config, store: Store, webhook_secret: bytes) -> FastAPI:
             if cl > MAX_BODY:
                 return PlainTextResponse("payload too large", status_code=413)
 
-        body = _read_body_capped(request, MAX_BODY)
+        body = await _read_body_capped(request, MAX_BODY)
         if body is None:
             return PlainTextResponse("payload too large", status_code=413)
 
@@ -98,7 +100,8 @@ def create_app(config: Config, store: Store, webhook_secret: bytes) -> FastAPI:
         action, repo, issue_num, sender = _parse_meta(body)
 
         # Persist even when breaker is open — dispatcher pauses, not ingress.
-        inserted = store.insert_delivery(
+        inserted = await run_in_threadpool(
+            store.insert_delivery,
             delivery_id=x_github_delivery,
             event=event,
             action=action,
@@ -126,21 +129,16 @@ def create_app(config: Config, store: Store, webhook_secret: bytes) -> FastAPI:
     return app
 
 
-def _read_body_capped(request: Request, max_bytes: int) -> bytes | None:
+async def _read_body_capped(request: Request, max_bytes: int) -> bytes | None:
     """Stream the body with a hard byte cap. Returns None if over limit."""
-
-    async def _stream() -> bytes | None:
-        total = 0
-        parts: list[bytes] = []
-        async for chunk in request.stream():
-            total += len(chunk)
-            if total > max_bytes:
-                return None
-            parts.append(chunk)
-        return b"".join(parts)
-
-    # Handler runs in a worker thread; hop to the event loop for ASGI stream.
-    return anyio.from_thread.run(_stream)
+    total = 0
+    parts: list[bytes] = []
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > max_bytes:
+            return None
+        parts.append(chunk)
+    return b"".join(parts)
 
 
 def _parse_meta(body: bytes) -> tuple[str | None, str | None, int | None, str | None]:
