@@ -44,29 +44,33 @@ uv run agentctl status
 curl -s localhost:8787/healthz
 ```
 
-Application logs: DEBUG/INFO → stdout (`gateway.log` under LaunchAgent); WARNING+ → stderr (`gateway.err.log`).
+**Logs**
+
+| Path | Role |
+|---|---|
+| `~/.agentd/logs/agentd.log` | Primary app log — in-process `RotatingFileHandler` (1 MiB × 5). `agentctl logs` tails this. |
+| `~/.agentd/logs/gateway.log` | LaunchAgent stdout sink (crash/pre-config noise + mirrored INFO). Not rotated by the app. |
+| `~/.agentd/logs/gateway.err.log` | LaunchAgent stderr sink. Not warnings-only: uvicorn's `uvicorn.error` INFO (`Uvicorn running on…`) lands here too — a non-empty err log is not by itself a fault signal. |
+
+newsyslog cannot rotate LaunchAgent `StandardOutPath` files safely: launchd holds the inode open, so rename leaves the process writing unbounded data into `gateway.log.0`. Rotation is in-process on `agentd.log` only.
 
 ## 4. LaunchAgent
 
 ```bash
-# After `uv sync`, edit packaging/dev.agentd.plist:
-#   - REPLACE → your home directory basename (e.g. alice)
-#   - ProgramArguments[0] → absolute path to agentd/.venv/bin/agentd
-#     (not `uv run` — boot after power-cut must not re-resolve deps)
-#   - WorkingDirectory → ~/.agentd (data root; not the git checkout)
+# After `uv sync`, edit packaging/dev.agentd.plist — replace BOTH tokens:
+#   REPLACE_HOME          → home basename (e.g. alice)
+#   REPLACE_CHECKOUT_PATH → path from $HOME to the code-workflow repo
+#                           (e.g. claude_repos/code-workflow — not a guess)
+# ProgramArguments must be the absolute .venv/bin/agentd (not `uv run`).
+# WorkingDirectory stays ~/.agentd (data root; not the git checkout).
+test -x /Users/"$USER"/REPLACE_CHECKOUT_PATH/agentd/.venv/bin/agentd   # before load
 cp packaging/dev.agentd.plist ~/Library/LaunchAgents/dev.agentd.plist
+# edit tokens in the installed copy if you prefer not to touch the template
 launchctl unload ~/Library/LaunchAgents/dev.agentd.plist 2>/dev/null || true
 launchctl load ~/Library/LaunchAgents/dev.agentd.plist
-```
-
-### Log rotation (newsyslog)
-
-LaunchAgent writes unbounded files under `~/.agentd/logs/`. Install size-based rotation (1 MB × 5 archives):
-
-```bash
-# edit REPLACE in packaging/newsyslog.agentd.conf first
-sudo cp packaging/newsyslog.agentd.conf /etc/newsyslog.d/agentd.conf
-sudo newsyslog -nvv   # dry-run; should list both gateway paths
+launchctl list | grep dev.agentd
+# expect:  <pid>  0  dev.agentd
+# middle column non-zero (78/127) → ProgramArguments path wrong → silent respawn
 ```
 
 ## 5. Host power / OrbStack (NFR-1.1b)

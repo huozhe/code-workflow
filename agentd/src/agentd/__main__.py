@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 import uvicorn
 
@@ -12,8 +14,12 @@ from agentd.config import load_config
 from agentd.db import Store
 from agentd.docker_wait import wait_for_docker
 from agentd.keychain import webhook_secret
-from agentd.paths import ensure_layout
+from agentd.paths import agentd_root, ensure_layout
 from agentd.server import create_app
+
+# App-owned log: rotates in-process (launchd StandardOutPath fds cannot).
+LOG_MAX_BYTES = 1 << 20  # 1 MiB
+LOG_BACKUP_COUNT = 5
 
 
 class _MaxLevelFilter(logging.Filter):
@@ -27,12 +33,31 @@ class _MaxLevelFilter(logging.Filter):
         return record.levelno <= self.max_level
 
 
-def configure_logging(level: str) -> None:
-    """Route DEBUG/INFO → stdout, WARNING+ → stderr (LaunchAgent log split)."""
+def configure_logging(level: str, log_dir: Path | None = None) -> Path:
+    """Configure root logging.
+
+    - Primary: RotatingFileHandler → ``{log_dir}/agentd.log`` (owns its fd).
+    - Mirror: DEBUG/INFO → stdout, WARNING+ → stderr (LaunchAgent sinks /
+      crash path; not size-capped — keep them quiet, do not treat non-empty
+      err as a fault: uvicorn.error INFO still lands on stderr).
+    """
     root = logging.getLogger()
     root.handlers.clear()
     root.setLevel(getattr(logging, level))
     fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+
+    log_dir = Path(log_dir) if log_dir is not None else agentd_root() / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    file_path = log_dir / "agentd.log"
+    file_h = RotatingFileHandler(
+        file_path,
+        maxBytes=LOG_MAX_BYTES,
+        backupCount=LOG_BACKUP_COUNT,
+        encoding="utf-8",
+    )
+    file_h.setLevel(logging.DEBUG)
+    file_h.setFormatter(fmt)
+    root.addHandler(file_h)
 
     out = logging.StreamHandler(sys.stdout)
     out.setLevel(logging.DEBUG)
@@ -45,6 +70,7 @@ def configure_logging(level: str) -> None:
 
     root.addHandler(out)
     root.addHandler(err)
+    return file_path
 
 
 def main(argv: list[str] | None = None) -> None:

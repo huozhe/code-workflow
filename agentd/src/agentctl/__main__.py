@@ -18,7 +18,7 @@ def main(argv: list[str] | None = None) -> None:
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("status", help="Queue depth and host readiness snapshot")
     sub.add_parser("sessions", help="List sessions (M0: empty until M2)")
-    p_logs = sub.add_parser("logs", help="Tail gateway log file if present")
+    p_logs = sub.add_parser("logs", help="Tail rotating app log (~/.agentd/logs/agentd.log)")
     p_logs.add_argument("-n", type=int, default=50)
     args = parser.parse_args(argv)
 
@@ -39,7 +39,7 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     if args.cmd == "logs":
-        log_path = agentd_root() / "logs" / "gateway.log"
+        log_path = agentd_root() / "logs" / "agentd.log"
         if not log_path.exists():
             print(f"no log at {log_path}", file=sys.stderr)
             sys.exit(1)
