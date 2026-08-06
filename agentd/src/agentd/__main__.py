@@ -1,0 +1,82 @@
+"""CLI entry: agentd init-layout | serve."""
+
+from __future__ import annotations
+
+import argparse
+import logging
+import sys
+
+import uvicorn
+
+from agentd.config import load_config
+from agentd.db import Store
+from agentd.docker_wait import wait_for_docker
+from agentd.paths import ensure_layout
+from agentd.server import create_app
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(prog="agentd")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("init-layout", help="Create ~/.agentd layout and default config")
+
+    p_serve = sub.add_parser("serve", help="Run webhook gateway")
+    p_serve.add_argument("--host", default=None)
+    p_serve.add_argument("--port", type=int, default=None)
+    p_serve.add_argument(
+        "--skip-docker-wait",
+        action="store_true",
+        help="Do not block on Docker socket (dev/test)",
+    )
+    p_serve.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+    )
+
+    args = parser.parse_args(argv)
+    if args.cmd == "init-layout":
+        root = ensure_layout()
+        print(f"layout ready: {root}")
+        return
+
+    if args.cmd == "serve":
+        logging.basicConfig(
+            level=getattr(logging, args.log_level),
+            format="%(asctime)s %(levelname)s %(name)s %(message)s",
+        )
+        config = load_config()
+        if not args.skip_docker_wait:
+            ok = wait_for_docker(
+                config.docker_socket,
+                timeout_s=config.docker_wait_timeout_s,
+            )
+            if not ok:
+                logging.getLogger("agentd").warning(
+                    "continuing without Docker socket; /readyz will report not ready"
+                )
+        store = Store(config.state_db)
+        app = create_app(config, store)
+        host, port = _listen(config.listen, args.host, args.port)
+        logging.getLogger("agentd").info(
+            "listening on %s:%s db=%s", host, port, config.state_db
+        )
+        uvicorn.run(app, host=host, port=port, log_level=args.log_level.lower())
+        return
+
+    parser.error(f"unknown command {args.cmd}")
+    sys.exit(2)
+
+
+def _listen(
+    listen: str, host_override: str | None, port_override: int | None
+) -> tuple[str, int]:
+    host, _, port_s = listen.partition(":")
+    host = host_override or host or "127.0.0.1"
+    port = port_override if port_override is not None else int(port_s or "8787")
+    return host, port
+
+
+if __name__ == "__main__":
+    main()

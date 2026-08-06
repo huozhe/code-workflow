@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LaunchAgent for agentd (NFR-1.1a / §11.1).
+  Install: cp packaging/dev.agentd.plist ~/Library/LaunchAgents/
+           launchctl load ~/Library/LaunchAgents/dev.agentd.plist
+
+  Adjust ProgramArguments paths after `uv sync` / venv install.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.agentd</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>WorkingDirectory</key>
+  <string>/Users/REPLACE/grok_repos/code-workflow/agentd</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/REPLACE/.local/bin/uv</string>
+    <string>run</string>
+    <string>agentd</string>
+    <string>serve</string>
+    <string>--host</string>
+    <string>127.0.0.1</string>
+    <string>--port</string>
+    <string>8787</string>
+  </array>
+  <key>StandardOutPath</key>
+  <string>/Users/REPLACE/.agentd/logs/gateway.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/REPLACE/.agentd/logs/gateway.err.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/REPLACE/.local/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+</dict>
+</plist>

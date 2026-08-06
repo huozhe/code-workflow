@@ -1,0 +1,67 @@
+"""Load ~/.agentd/config.yaml."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from agentd.paths import agentd_root, ensure_layout
+
+
+@dataclass
+class Config:
+    raw: dict[str, Any] = field(default_factory=dict)
+    root: Path = field(default_factory=agentd_root)
+
+    @property
+    def owner(self) -> str:
+        return str(self.raw.get("host", {}).get("owner", "huozhe"))
+
+    @property
+    def listen(self) -> str:
+        return str(self.raw.get("host", {}).get("listen", "127.0.0.1:8787"))
+
+    @property
+    def disk_floor_gb(self) -> float:
+        return float(self.raw.get("host", {}).get("disk_floor_gb", 15))
+
+    @property
+    def disk_resume_gb(self) -> float:
+        return float(self.raw.get("host", {}).get("disk_resume_gb", 20))
+
+    @property
+    def docker_socket(self) -> str:
+        return str(
+            self.raw.get("gateway", {}).get("docker_socket", "unix:///var/run/docker.sock")
+        )
+
+    @property
+    def docker_wait_timeout_s(self) -> int:
+        return int(self.raw.get("gateway", {}).get("docker_wait_timeout_s", 300))
+
+    @property
+    def state_db(self) -> Path:
+        return self.root / "state.db"
+
+    def agent_login(self, agent_id: str) -> str | None:
+        agents = self.raw.get("agents") or {}
+        entry = agents.get(agent_id) or {}
+        return entry.get("login")
+
+    def all_bot_logins(self) -> set[str]:
+        agents = self.raw.get("agents") or {}
+        return {str(v["login"]) for v in agents.values() if isinstance(v, dict) and "login" in v}
+
+
+def load_config(root: Path | None = None) -> Config:
+    root = ensure_layout(root)
+    path = root / "config.yaml"
+    data: dict[str, Any] = {}
+    if path.exists():
+        loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        if isinstance(loaded, dict):
+            data = loaded
+    return Config(raw=data, root=root)

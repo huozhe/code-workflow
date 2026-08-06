@@ -224,6 +224,10 @@ Consequences: no token material on the host filesystem, in the image, in `docker
 
 **The boundary this creates is precise, and the ADR states it plainly: the two-UID split protects _credentials_, not _data_.** Both roles can read each other's worktrees and transcripts. That is accepted — both roles are already trusted with the repository. What must not cross is the ability of the Developer identity to produce an approval that branch protection accepts on its own PR.
 
+**Identity preflight (added M0 — ADR-11).** Cross-role isolation inside the container does not stop an operator from mapping the *wrong* PAT to a role in config/Keychain. A wrong-identity token silently defeats §9.1 (owner login resets turn budgets), §10.2 (owner-only checkbox), and §8.4 (Architect approval). On every `session.init` and `session.resume`, **before any turn is dispatched**, the runner calls `GET /user` with each delivered token and asserts `login == the configured GitHub identity for that role`. Mismatch ⇒ fail the session loudly, escalate to `@owner` (§8.5), dispatch nothing.
+
+**Inbound detection net:** the gateway rejects and escalates any event where `sender.login == config.gateway.owner` **and** the body carries an `agentd:turn` provenance footer — a combination that is impossible under correct operation and is the signature of an agent acting with the owner token.
+
 ### 5.3 Role Binding (FR-1.2)
 
 Precedence, highest first:
@@ -799,7 +803,14 @@ Recorded so reviewers can see these were considered and consciously deferred: ou
 
 **JSON-RPC 2.0, NDJSON-framed.** Both Phase 1 drafts that specified an IPC mechanism arrived at JSON-RPC 2.0 independently, so it is treated as settled. The SRS framed NDJSON *versus* JSON-RPC; they are orthogonal — framing versus semantics — so this design takes both. JSON-RPC supplies request/response correlation, typed errors, and notifications (turns are long-running and emit progress); NDJSON framing supplies `tail`-ability and `nc`-debuggability at zero cost over `Content-Length` framing.
 
-**Transport: Unix domain socket preferred, loopback TCP + bearer token as fallback**, pending spike OQ-1 (§17). Long-lived `docker exec` stdio is rejected outright: it ties session liveness to a pipe held by the gateway process, so every gateway restart would kill every session — directly contradicting NFR-1.1a.
+**Transport: loopback TCP + bearer token (default).** Spike OQ-1 (2026-08-06, OrbStack) **failed**: a UDS path on a bind mount is visible on both macOS host and Linux container (`S_ISSOCK` true) but `connect()` returns Connection refused — the accept queue is not shared across the VM boundary. UDS across a bind mount is therefore **out** as a host↔container transport. Long-lived `docker exec` stdio remains rejected: it ties session liveness to a pipe held by the gateway process, so every gateway restart would kill every session — directly contradicting NFR-1.1a.
+
+**Bearer token requirements (mandatory — TCP has no second ACL layer):**
+
+- ≥ 256 bits from a CSPRNG, unique per runner session
+- Compared in constant time (`hmac.compare_digest` or equivalent)
+- Never written to logs, transcripts, or GitHub
+- Listener bound to `127.0.0.1` only (Docker publish form `-p 127.0.0.1:0:7000`), never `0.0.0.0`
 
 First frame after connect must be `session.attach` carrying the bearer token; anything else closes the connection.
 
@@ -810,8 +821,8 @@ First frame after connect must be `session.attach` carrying the bearer token; an
 | Method | Purpose |
 |---|---|
 | `session.attach` | Authenticate the connection |
-| `session.init` | First-time setup: role cards, identities, **tokens**, workspace paths, budgets |
-| `session.resume` | Post-restart rehydration with a digest of missed activity; re-delivers tokens |
+| `session.init` | First-time setup: role cards, identities, **tokens**, workspace paths, budgets; **identity preflight** (`GET /user` per token) before any turn |
+| `session.resume` | Post-restart rehydration with a digest of missed activity; re-delivers tokens; **repeats identity preflight** |
 | `turn.dispatch` | Run one turn against one normalized event |
 | `turn.resume` | Re-enter an interrupted turn; runner re-derives state from the workspace |
 | `session.snapshot` | Force a transcript checkpoint and context compaction |
@@ -975,11 +986,15 @@ CREATE TABLE escalations (
 
 The stance matters more than the engine, and it was unanimous across all three Phase 1 drafts. Because GitHub holds truth (P1), the schema stays small, migrations can be destructive in the worst case, and recovery is a re-read rather than a repair. Postgres would add a second daemon to keep alive across reboots for no benefit; flat files would lose the atomicity that the idempotency ledger genuinely depends on.
 
-### ADR-3: JSON-RPC 2.0 over NDJSON, UDS Preferred
+### ADR-3: JSON-RPC 2.0 over NDJSON on Loopback TCP + Bearer
 
-*Resolves SRS §5.3.* See §14.1. Transport default is decided by spike OQ-1; both outcomes are specified, so the spike cannot block implementation.
+*Resolves SRS §5.3.* See §14.1.
+
+*Spike OQ-1 (resolved 2026-08-06):* UDS across an OrbStack bind mount **fails** (inode visible both sides; `connect` refused). **Default transport is loopback TCP + bearer token.** UDS remains a possible *intra*-container or pure-Linux future option but is not used for host↔container control plane on this host.
 
 *Rejected: long-lived `docker exec` stdio.* Ties session liveness to a gateway-held pipe, so every gateway restart kills every session. Contradicts NFR-1.1a.
+
+*Security consequence of TCP default:* the bearer is the sole authz layer on the RPC channel (including credential delivery at `session.init`). Requirements are normative in §14.1.
 
 ### ADR-4: One Container per Issue, Two OS UIDs
 
@@ -989,7 +1004,7 @@ This is **not** any Phase 1 proposal. Two drafts proposed one container per issu
 
 *Why not two containers:* fewer cgroups and one admission unit per issue. Note the honest sizing: with serialized turns and COLD demotion, the steady-state memory premium of two containers is roughly one idle runner (~150–250 MB), **not** ~2 GB — an earlier claim that `docker pause` frees RAM was wrong and is corrected in §6.5. The stronger argument is robustness: two containers cost ~2× cgroup reservations whenever demotion is late or both roles are warm, so the single-container option **fails safe where the dual-container option fails expensive**.
 
-*Documented fallback:* if spike M2-A shows container-internal tmpfs cannot enforce per-UID ownership under OrbStack, or if a future requirement demands cross-role *data* confidentiality (§13.2), switch to one container per role with mandatory COLD demotion of the idle role. That fallback is fully specified and requires no redesign.
+*Documented fallback:* if spike M2-B had shown container-internal tmpfs cannot enforce per-UID ownership under OrbStack (it **passed** 2026-08-06), or if a future requirement demands cross-role *data* confidentiality (§13.2), switch to one container per role with mandatory COLD demotion of the idle role. That fallback is fully specified and requires no redesign.
 
 *Rejected outright: a container per event.* Re-ingests and re-clones by definition.
 
@@ -1007,7 +1022,17 @@ Worktree paths are relative (`worktree.useRelativePaths`, git ≥ 2.48 pinned in
 
 Credentials are delivered in `session.init` and written to container-internal tmpfs by the in-container root supervisor.
 
-*Rejected: host-provisioned `0400` token files on a bind mount.* This was the original specification and it does not work: POSIX ownership does not survive the macOS→Linux bind-mount boundary, so a host-side `0400 uid_architect` file arrives readable by both roles. Since the entire two-UID model rests on that ownership being real, the mechanism had to move inside the namespace that enforces it. Spike M2-A exists to confirm the failure rather than assume it, but tmpfs is the **baseline**, not the fallback.
+*Rejected: host-provisioned `0400` token files on a bind mount.* Confirmed by spike M2-A (2026-08-06): bind-mounted files surface as `root` inside OrbStack; both role UIDs read them; in-container `chown` does not stick. Tmpfs is the **only** working mechanism, not merely preferred.
+
+### ADR-11: Identity Preflight on Token Delivery
+
+*Added during M0 dry-run after a wrong-account `gh` post attributed agent work to the owner.* §5.2 prevents cross-agent token confusion *inside* the container but not operator mis-mapping of PATs in Keychain/config.
+
+**Rule:** before any turn after `session.init` / `session.resume`, assert `GET /user` login matches the configured identity for each role token. Fail closed + escalate on mismatch.
+
+**Complement:** gateway escalates on `sender.login == owner` combined with an `agentd:turn` provenance footer.
+
+*Rejected: trust config forever after first successful boot.* Silent wrong-token operation is indistinguishable from legitimate human action at the verification and loop-budget gates.
 
 ### ADR-7: Machine Users, Not a GitHub App
 
@@ -1041,13 +1066,13 @@ None of these block drafting or M0–M1; each has both outcomes specified.
 
 | # | Spike | Cost | Decides |
 |---|---|---|---|
-| **OQ-1** | Unix domain socket across an OrbStack bind mount | ~10 min | IPC transport default (§14.1). TCP fallback already specified. |
-| **M2-A** | macOS bind-mount UID/mode enforcement | ~15 min | Expected **fail**. Confirms container tmpfs is required, not merely preferred (ADR-6). |
-| **M2-B** | Container-internal tmpfs UID/mode enforcement under OrbStack | ~15 min | **Load-bearing (A5).** Failure ⇒ ADR-4 dual-container fallback. |
+| **OQ-1** | Unix domain socket across an OrbStack bind mount | ~10 min | **RESOLVED 2026-08-06: FAIL.** Loopback TCP + bearer is default (ADR-3, §14.1). |
+| **M2-A** | macOS bind-mount UID/mode enforcement | ~15 min | **RESOLVED 2026-08-06: FAIL isolation (expected).** ADR-6 confirmed. |
+| **M2-B** | Container-internal tmpfs UID/mode enforcement under OrbStack | ~15 min | **RESOLVED 2026-08-06: PASS.** A5 holds; ADR-4 dual-container fallback not triggered. |
 | **M4-A** | Branch-protection integration test: Developer identity cannot produce a satisfying approval on its own PR | M4 | Proves FR-1.3 rather than asserting it |
 | **OQ-4** | Vendor CLI headless behaviour per adapter | M3 | Adapter implementation only (ADR-9) |
 
-M2-B was added during drafting: the review established that host-bind ownership fails, but nobody has yet demonstrated that the tmpfs path *succeeds*. Asserting the replacement works because the original did not would repeat the error being corrected.
+**M2 residual checks (acceptance, not topology):** (1) production image has **no setuid/setgid binaries** — `find / -xdev \( -perm -4000 -o -perm -2000 \) -print` empty; privilege drop via `setuid`/`setgid` after `fork`, never `su`. (2) **tmpfs wipe on restart** — `docker stop` → `docker start` → `/run/agent` empty (tokens re-delivered on `session.resume`).
 
 ---
 
