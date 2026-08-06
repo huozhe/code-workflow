@@ -36,20 +36,24 @@ def _init_bare_source(tmp: Path) -> Path:
 
 
 def test_worktree_add_under_two_seconds_warm(tmp_path: Path) -> None:
+    """Warm worktree timing.
+
+    Uses a tiny fixture repo so CI stays offline. This does **not** stress the
+    §21 budget against a large working tree (node_modules / language-server
+    indexes). Architect-measured ~30 ms on this repo (48 files) — still not a
+    scale proof. Note on #10 if/when a large checkout is available.
+    """
     src = _init_bare_source(tmp_path)
     root = tmp_path / "agentd-root"
-    # Clone from local path
     clone = ensure_shared_clone(
         root,
         "local/testrepo",
         clone_url=str(src),
     )
-    # Warm: second worktree on same object store
     wt1 = root / "sessions" / "a" / "worktrees" / "w1"
     elapsed1 = worktree_add(clone, wt1, "branch-w1")
     wt2 = root / "sessions" / "a" / "worktrees" / "w2"
     elapsed2 = worktree_add(clone, wt2, "branch-w2")
     assert elapsed2 < 2.0, f"warm worktree add took {elapsed2:.3f}s (limit 2s)"
     assert (wt2 / "README").exists()
-    # first add may be cold-ish but still should be fast on tiny repo
     assert elapsed1 < 5.0

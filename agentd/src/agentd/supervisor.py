@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import secrets
+import stat
 import subprocess
 import time
 from dataclasses import dataclass
@@ -25,6 +27,8 @@ log = logging.getLogger("agentd.supervisor")
 
 IMAGE = "agentd/session-runner:1.0.0"
 RPC_CONTAINER_PORT = 7000
+# Bearer lives on the session bind mount — not docker Env (§5.2 docker inspect).
+BEARER_REL = Path(".runner") / "bearer"
 
 
 @dataclass
@@ -74,6 +78,17 @@ def assert_no_docker_sock_mount(container_id: str) -> None:
             )
 
 
+def assert_bearer_not_in_inspect_env(container_id: str) -> None:
+    """§5.2: no token material in docker inspect Env."""
+    r = _docker("inspect", container_id, "--format", "{{json .Config.Env}}")
+    env_list = json.loads(r.stdout or "[]")
+    for entry in env_list:
+        if str(entry).startswith("AGENTD_RUNNER_BEARER="):
+            raise RuntimeError(
+                f"FORBIDDEN: RPC bearer present in docker inspect Env on {container_id}"
+            )
+
+
 def _host_port_from_inspect(container_id: str) -> int:
     r = _docker(
         "inspect",
@@ -85,6 +100,15 @@ def _host_port_from_inspect(container_id: str) -> int:
     if not port_s:
         raise RuntimeError(f"no host port published for {container_id}")
     return int(port_s)
+
+
+def write_bearer_file(sess_host: Path, bearer: str) -> Path:
+    """Place bearer on session mount at 0600 — not in container env."""
+    path = sess_host / BEARER_REL
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(bearer, encoding="utf-8")
+    os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)  # 0600
+    return path
 
 
 class SessionSupervisor:
@@ -100,14 +124,17 @@ class SessionSupervisor:
         issue_num: int,
         architect_login: str | None = None,
         developer_login: str | None = None,
-        skip_preflight: bool = False,
         clone_url: str | None = None,
+        github_api_base: str | None = None,
     ) -> SessionHandle:
-        """Create or resume HOT session: clone, worktree, container, init RPC."""
+        """Create or resume HOT session: clone, worktree, container, init RPC.
+
+        ``github_api_base`` is for integration tests only (stub GitHub API).
+        Production never sets it; ordinary creation path has no preflight bypass.
+        """
         existing = self.store.get_session(session_key)
         if existing and existing.get("container_id"):
             cid = str(existing["container_id"])
-            # Try re-attach
             try:
                 handle = self._handle_from_row(existing)
                 with RunnerClient("127.0.0.1", handle.host_port, handle.bearer) as cli:
@@ -123,18 +150,25 @@ class SessionSupervisor:
             except Exception:
                 log.warning("existing session unreachable; recreating %s", session_key)
 
+        # Fail closed before any container work if PATs are missing (ADR-11 / B1).
+        tokens = self._load_tokens()
+
         architect = architect_login or self.config.agent_login("claude") or "huozheclaude"
         developer = developer_login or self.config.agent_login("grok") or "huozhegrok"
 
-        # Layout
         sess_host = self.config.root / "sessions" / session_dir_name(session_key)
+        # Leave home/tmp/xdg for the runner to create *as the role UID* (§7.3).
+        # Host only prepares shared work product paths (bind-mount-friendly).
         for role in ("architect", "developer"):
-            for sub in ("home", "tmp", "xdg", "worktrees", "context", "scratch"):
+            for sub in ("worktrees", "context", "scratch"):
                 (sess_host / role / sub).mkdir(parents=True, exist_ok=True)
+            try:
+                os.chmod(sess_host / role, 0o755)
+            except OSError:
+                pass
             (sess_host / role / "transcript.jsonl").touch(exist_ok=True)
 
         clone = ensure_shared_clone(self.config.root, repo, clone_url=clone_url)
-        # One worktree per role for the issue (shared object store)
         wt_arch = sess_host / "architect" / "worktrees" / f"issue-{issue_num}"
         wt_dev = sess_host / "developer" / "worktrees" / f"issue-{issue_num}"
         sn = session_dir_name(session_key)
@@ -142,17 +176,18 @@ class SessionSupervisor:
         worktree_add(clone, wt_dev, f"agentd/{sn}/developer")
 
         bearer = generate_bearer()
+        write_bearer_file(sess_host, bearer)
+
         name = container_name(session_key)
-        # Remove any prior container with same name
         _docker("rm", "-f", name, check=False)
 
-        env = {
-            "AGENTD_RUNNER_BEARER": bearer,
+        env: dict[str, str] = {
             "AGENTD_RPC_HOST": "0.0.0.0",
             "AGENTD_RPC_PORT": str(RPC_CONTAINER_PORT),
         }
-        if skip_preflight:
-            env["AGENTD_SKIP_PREFLIGHT"] = "1"
+        # Test-only stub API — never set on the ordinary production path.
+        if github_api_base:
+            env["AGENTD_GITHUB_API_BASE"] = github_api_base
 
         run_args = [
             "run",
@@ -173,10 +208,6 @@ class SessionSupervisor:
             "2",
             "--pids-limit",
             "1024",
-            # Drop everything, then re-add the minimum for §5.2/§7.3:
-            # CHOWN/FOWNER — write 0400 role-owned tokens on tmpfs as PID1 root
-            # SETUID/SETGID — fork → setuid(role) before exec (turn path)
-            # (pure --cap-drop ALL makes chown/setuid EPERM under OrbStack.)
             "--cap-drop",
             "ALL",
             "--cap-add",
@@ -202,19 +233,18 @@ class SessionSupervisor:
             run_args.extend(["-e", f"{k}={v}"])
         run_args.append(IMAGE)
 
-        # Never pass docker.sock
-        assert not any("docker.sock" in a for a in run_args)
+        if any("docker.sock" in a for a in run_args):
+            raise RuntimeError("FORBIDDEN: docker.sock must not appear in run args")
 
         r = _docker(*run_args)
         cid = r.stdout.strip()
         assert_no_docker_sock_mount(cid)
+        assert_bearer_not_in_inspect_env(cid)
         host_port = _host_port_from_inspect(cid)
         endpoint = f"127.0.0.1:{host_port}"
 
-        # Wait for RPC
         self._wait_rpc(host_port, bearer, timeout_s=30)
 
-        tokens = self._load_tokens()
         with RunnerClient("127.0.0.1", host_port, bearer) as cli:
             cli.call(
                 "session.init",
@@ -312,35 +342,47 @@ class SessionSupervisor:
         )
 
     def adversarial_token_check(self, handle: SessionHandle) -> dict[str, Any]:
-        """As uid_developer, attempt to read architect token — must fail."""
-        # Run inside container: su to developer and cat architect token
-        script = (
-            "set -e; "
-            "if [ -r /run/agent/architect/token ]; then echo READABLE; cat /run/agent/architect/token; exit 0; "
-            "else echo DENIED; exit 1; fi"
-        )
-        r = _docker(
-            "exec",
-            "-u",
-            "1002:1002",
-            handle.container_id,
-            "bash",
-            "-c",
-            script,
-            check=False,
-        )
-        readable = "READABLE" in (r.stdout or "") or r.returncode == 0
+        """Cross-role token reads must fail both directions (§5.2)."""
+
+        def _try(uid: str, path: str) -> bool:
+            script = (
+                f"if [ -r {path} ]; then echo READABLE; exit 0; "
+                f"else echo DENIED; exit 1; fi"
+            )
+            r = _docker(
+                "exec",
+                "-u",
+                uid,
+                handle.container_id,
+                "bash",
+                "-c",
+                script,
+                check=False,
+            )
+            return "READABLE" in (r.stdout or "") or r.returncode == 0
+
+        dev_reads_arch = _try("1002:1002", "/run/agent/architect/token")
+        arch_reads_dev = _try("1001:1001", "/run/agent/developer/token")
         return {
-            "developer_can_read_architect_token": readable,
-            "returncode": r.returncode,
-            "stdout": (r.stdout or "").strip()[:200],
-            "stderr": (r.stderr or "").strip()[:200],
+            "developer_can_read_architect_token": dev_reads_arch,
+            "architect_can_read_developer_token": arch_reads_dev,
         }
 
     def _load_tokens(self) -> dict[str, str]:
-        # Keychain accounts from config credentials or defaults
-        claude = get_password("claude-bot") or "test-claude-pat"
-        grok = get_password("grok-bot") or "test-grok-pat"
+        """Keychain PATs only — fail closed on miss (ADR-11 / B1 shape)."""
+        claude = get_password("claude-bot")
+        grok = get_password("grok-bot")
+        missing = []
+        if not claude:
+            missing.append("claude-bot")
+        if not grok:
+            missing.append("grok-bot")
+        if missing:
+            raise RuntimeError(
+                "PAT(s) missing from Keychain/env: "
+                + ", ".join(missing)
+                + "; refusing session start (ADR-11 fail-closed)"
+            )
         return {"architect": claude, "developer": grok}
 
     def _wait_rpc(self, port: int, bearer: str, timeout_s: float) -> None:

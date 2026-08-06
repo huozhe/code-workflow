@@ -37,13 +37,17 @@ class RunnerClient:
 
     def connect(self) -> None:
         self.close()
-        s = socket.create_connection((self.host, self.port), timeout=self.timeout_s)
-        s.settimeout(self.timeout_s)
-        self._sock = s
-        self._rfile = s.makefile("rb")
-        self._wfile = s.makefile("wb")
-        # First frame must be session.attach
-        self.call("session.attach", {"bearer": self.bearer})
+        try:
+            s = socket.create_connection((self.host, self.port), timeout=self.timeout_s)
+            s.settimeout(self.timeout_s)
+            self._sock = s
+            self._rfile = s.makefile("rb")
+            self._wfile = s.makefile("wb")
+            # First frame must be session.attach
+            self.call("session.attach", {"bearer": self.bearer})
+        except Exception:
+            self.close()
+            raise
 
     def close(self) -> None:
         for f in (self._rfile, self._wfile):

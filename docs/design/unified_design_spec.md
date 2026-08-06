@@ -411,6 +411,7 @@ Non-obvious choices:
 - `--restart unless-stopped` lets containers survive an OrbStack or host restart on their own; the Reconciler then adopts or prunes them by label. This is the container half of NFR-1.1a.
 - The tmpfs at `mode=0711` lets each role traverse to its own token directory without listing the sibling's.
 - **Capabilities (M2 amendment).** `--cap-drop ALL` alone makes `chown` and `setuid` return EPERM even for UID 0 under OrbStack/Linux, which makes §5.2 token placement and §7.3 privilege drop impossible. Re-add only `CHOWN`, `FOWNER`, `SETUID`, `SETGID`. No `SYS_ADMIN`, no `NET_ADMIN`, no docker socket.
+- **RPC bearer delivery (M2 amendment).** The bearer is **not** passed via container env (visible in `docker inspect`). The host writes it to the session bind mount at `…/sessions/<key>/.runner/bearer` (mode `0600`); the runner reads that path at start and **refuses to bind** if missing (fail-closed, same shape as B1). PATs still never land on the host filesystem or in inspect — only the session-scoped control-channel bearer lives under the session dir.
 - Egress is unrestricted by default (GitHub, model APIs, package registries). An allowlisting egress proxy is noted in §13.3 as hardening, not baseline.
 
 ### 7.3 Privilege Model

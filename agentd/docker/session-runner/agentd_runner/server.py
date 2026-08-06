@@ -7,9 +7,9 @@ import json
 import logging
 import os
 import resource
-import secrets
 import socket
 import socketserver
+import sys
 import threading
 from pathlib import Path
 from typing import Any
@@ -64,25 +64,71 @@ def write_role_token(role: str, token: str) -> Path:
     return path
 
 
+def _run_as_role(uid: int, fn_name: str, paths: list[str]) -> int:
+    """Fork, setuid(role), create 0700 dirs. Returns child exit code."""
+    pid = os.fork()
+    if pid == 0:
+        try:
+            os.setgid(uid)
+            os.setuid(uid)
+            for p in paths:
+                Path(p).mkdir(parents=True, exist_ok=True)
+                os.chmod(p, 0o700)
+            # write probe in tmp (last path is tmp)
+            probe = Path(paths[-1]) / f".agentd-write-probe-{os.getpid()}"
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink(missing_ok=True)
+            os._exit(0)
+        except Exception as exc:  # noqa: BLE001
+            sys.stderr.write(f"{fn_name}: {exc}\n")
+            os._exit(1)
+    _, status = os.waitpid(pid, 0)
+    if os.WIFEXITED(status):
+        return os.WEXITSTATUS(status)
+    return 1
+
+
 def ensure_role_layout(role: str) -> dict[str, str]:
-    """HOME / TMPDIR / XDG under /srv/session/<role>/ at 0700."""
+    """HOME / TMPDIR / XDG under /srv/session/<role>/ at 0700.
+
+    Directories are created *as the role UID* so ownership is real on the
+    container filesystem view. Host must leave base role dir traversable (0755).
+    §7.3: fail if the role cannot write its TMPDIR.
+    """
     base = Path("/srv/session") / role
     home = base / "home"
     tmp = base / "tmp"
     xdg = base / "xdg"
-    for p in (home, tmp, xdg, base / "worktrees", base / "context", base / "scratch"):
+    # Root ensures parent exists and is traversable so the role can mkdir children.
+    base.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(base, 0o755)
+    except OSError as exc:
+        log.warning("chmod base %s: %s", base, exc)
+    for p in (base / "worktrees", base / "context", base / "scratch"):
         p.mkdir(parents=True, exist_ok=True)
+
     uid = ROLE_UIDS[role]
-    for p in (base, home, tmp, xdg):
-        try:
-            os.chown(p, uid, uid)
-            os.chmod(p, 0o700)
-        except OSError:
-            # Host bind mounts may not allow chown; still set mode best-effort.
-            try:
-                os.chmod(p, 0o700)
-            except OSError:
-                pass
+    rc = _run_as_role(
+        uid,
+        f"ensure_role_layout({role})",
+        [str(home), str(tmp), str(xdg), str(xdg / "cache"), str(xdg / "config"), str(xdg / "data")],
+    )
+    if rc != 0:
+        st = tmp.stat() if tmp.exists() else None
+        raise RuntimeError(
+            f"role {role} cannot establish TMPDIR {tmp} "
+            f"(stat={None if st is None else (st.st_uid, oct(st.st_mode))}); "
+            "§7.3 requires a writable 0700 per-role temp path"
+        )
+    log.info(
+        "role layout ok role=%s tmp=%s uid=%s mode=%s",
+        role,
+        tmp,
+        tmp.stat().st_uid,
+        oct(tmp.stat().st_mode),
+    )
+
     return {
         "HOME": str(home),
         "TMPDIR": str(tmp),
@@ -103,15 +149,17 @@ def rss_bytes() -> int:
 def identity_preflight(tokens: dict[str, str], expected: dict[str, str]) -> list[str]:
     """GET /user per token; return list of mismatch descriptions (empty = ok).
 
-    expected: role -> github login
-    tokens: role -> pat
+    Always hits the API (or AGENTD_GITHUB_API_BASE for integration tests against
+    a local stub). No production-token shape skips the check — ADR-11 fail-closed.
     """
     errors: list[str] = []
     try:
-        import urllib.error
         import urllib.request
     except ImportError:
         return ["urllib unavailable"]
+
+    base = os.environ.get("AGENTD_GITHUB_API_BASE", "https://api.github.com").rstrip("/")
+    user_url = f"{base}/user"
 
     for role, pat in tokens.items():
         want = expected.get(role)
@@ -121,12 +169,8 @@ def identity_preflight(tokens: dict[str, str], expected: dict[str, str]) -> list
         if not pat:
             errors.append(f"{role}: empty token")
             continue
-        # Skip real GitHub when using test placeholders
-        if pat.startswith("test-") or os.environ.get("AGENTD_SKIP_PREFLIGHT") == "1":
-            log.info("identity preflight skipped for %s (test mode)", role)
-            continue
         req = urllib.request.Request(
-            "https://api.github.com/user",
+            user_url,
             headers={
                 "Authorization": f"Bearer {pat}",
                 "Accept": "application/vnd.github+json",
@@ -316,12 +360,29 @@ class _ThreadedTCPServer(socketserver.ThreadingTCPServer):
     daemon_threads = True
 
 
+# Host writes bearer here (bind-mounted session volume) — not docker Env (§5.2).
+BEARER_PATH = Path("/srv/session/.runner/bearer")
+
+
+def load_bearer() -> str:
+    """Load RPC bearer from the session mount. Fail closed if missing (B1 shape)."""
+    if BEARER_PATH.is_file():
+        raw = BEARER_PATH.read_text(encoding="utf-8").strip()
+        if raw:
+            return raw
+    env = os.environ.get("AGENTD_RUNNER_BEARER")
+    if env:
+        # Legacy/dev only — production host path is the file. Never invent a token.
+        log.warning("bearer loaded from env (prefer %s; env is visible in docker inspect)", BEARER_PATH)
+        return env
+    raise SystemExit(
+        f"RPC bearer missing at {BEARER_PATH}; refusing to bind "
+        "(host must place bearer before start — fail closed, same shape as B1)"
+    )
+
+
 def serve(host: str, port: int) -> None:
-    # Bearer from env at start (host injects via docker -e); never log the value.
-    bearer = os.environ.get("AGENTD_RUNNER_BEARER")
-    if not bearer:
-        bearer = secrets.token_urlsafe(32)
-        log.warning("AGENTD_RUNNER_BEARER unset; generated ephemeral bearer (host must know it)")
+    bearer = load_bearer()
     STATE.set_bearer(bearer)
     # Ensure token root exists (tmpfs mount)
     TOKEN_ROOT.mkdir(parents=True, exist_ok=True)
