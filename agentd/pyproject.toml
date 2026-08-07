@@ -1,7 +1,7 @@
 [project]
 name = "agentd"
 version = "0.1.0"
-description = "Local orchestrator for async multi-agent AI coding (M0–M2)"
+description = "Local orchestrator for async multi-agent AI coding (M0–M3)"
 readme = "README.md"
 authors = [
     { name = "huozhegrok", email = "huozhe.grok@users.noreply.github.com" }

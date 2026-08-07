@@ -569,20 +569,19 @@ Human input resets the consecutive-turn counter; agent activity never does. Defa
 
 Two agents can burn budget while converging on nothing, and this is the characteristic failure mode of the architecture. Two complementary signals, because each misses what the other catches:
 
-**Fingerprint** — recomputed each turn:
+**Fingerprint** — recomputed each turn from *progress state*, **not** including `head_sha` in the hash (M3 amendment — including head made "identical after head change" unreachable):
 
 ```
-sha256( head_sha
-      ‖ sorted(open_review_thread_ids)
+sha256( sorted(open_review_thread_ids)
       ‖ unresolved_comment_count
       ‖ sha256(git diff --stat <base>..<head>) )
 ```
 
-Identical 3 times → escalate. Counted only after a non-trivial `head_sha` change, to avoid firing on legitimately slow convergence.
+Identical 3 **consecutive turns** → escalate, but only **after the session has seen at least one non-trivial `head_sha` change** (arms the counter). That avoids firing on legitimately slow initial convergence, while still catching cosmetic re-pushes that move head without changing review/diff state. A static head never advances this counter — that is intentional; other signals cover it.
 
 **Zero-thread-progress** — 3 consecutive review rounds in which no review thread is resolved → escalate. Catches agents that make cosmetic changes each round, which the fingerprint's diff component alone can miss.
 
-**Coverage note for implementers.** The fingerprint's "count only after a non-trivial `head_sha` change" guard exists to avoid firing on legitimately slow convergence — it does **not** mean stalls with an unchanged head go undetected. Comment-only loops before any code exists (two agents negotiating an RFC without pushing) are caught by the **turn budgets** and the **zero-thread-progress** signal, both of which are head-agnostic. Do not "fix" the guard by disabling fingerprint counting whenever the head is static; the two mechanisms are deliberately layered so that each covers the other's blind spot.
+**Coverage note for implementers.** The "arm after first head change" guard is **not** "only sample when head changes this turn." Once armed, count every turn's fingerprint. Do not re-introduce `head_sha` into the hash material: that makes identical progress after a cosmetic push impossible to observe. Comment-only loops before any code exists (two agents negotiating an RFC without pushing) are caught by the **turn budgets** and the **zero-thread-progress** signal, both of which are head-agnostic. The mechanisms are deliberately layered so that each covers the other's blind spot.
 
 Spurious escalation is the preferred failure direction; all signals escalate to the human rather than aborting work.
 

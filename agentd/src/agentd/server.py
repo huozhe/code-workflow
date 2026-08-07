@@ -69,7 +69,22 @@ def create_app(
             if notify is not None:
                 gov_kw["notify"] = notify
             state.governor = ResourceGovernor(store, config.root, **gov_kw)
-            state.dispatcher = Dispatcher(store, config, state.nudge)
+            # Design loop: session/turn orchestration (M3). Supervisor is
+            # optional at process start — attach when docker image is ready.
+            design_loop = None
+            try:
+                from agentd.design_loop import DesignLoop
+                from agentd.supervisor import SessionSupervisor, image_present
+
+                sup = SessionSupervisor(store, config) if image_present() else None
+                design_loop = DesignLoop(
+                    store, config, sup, dispatch_turns=sup is not None
+                )
+            except Exception:
+                log.exception("design_loop init failed; deferred deliveries stay parked")
+            state.dispatcher = Dispatcher(
+                store, config, state.nudge, design_loop=design_loop
+            )
             state.governor.start()
             state.dispatcher.start()
             log.info("governor + dispatcher started")

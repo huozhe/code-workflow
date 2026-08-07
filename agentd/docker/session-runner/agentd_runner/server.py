@@ -57,10 +57,21 @@ def write_role_token(role: str, token: str) -> Path:
     role_dir.mkdir(parents=True, exist_ok=True)
     path = role_dir / "token"
     path.write_text(token, encoding="utf-8")
-    os.chown(path, uid, uid)
-    os.chmod(path, 0o400)
-    os.chown(role_dir, uid, uid)
-    os.chmod(role_dir, 0o700)
+    try:
+        os.chown(path, uid, uid)
+        os.chmod(path, 0o400)
+        os.chown(role_dir, uid, uid)
+        os.chmod(role_dir, 0o700)
+    except OSError as exc:
+        if os.geteuid() == 0:
+            raise
+        # Unprivileged test host: leave file owned by current euid.
+        log.warning("chown token for %s failed on euid=%s: %s", role, os.geteuid(), exc)
+        try:
+            os.chmod(path, 0o600)
+            os.chmod(role_dir, 0o700)
+        except OSError:
+            pass
     return path
 
 
@@ -126,18 +137,30 @@ def ensure_role_layout(role: str) -> dict[str, str]:
         p.mkdir(parents=True, exist_ok=True)
 
     uid = ROLE_UIDS[role]
-    rc = _run_as_role(
-        uid,
-        f"ensure_role_layout({role})",
-        [str(home), str(tmp), str(xdg), str(xdg / "cache"), str(xdg / "config"), str(xdg / "data")],
-    )
+    paths = [str(home), str(tmp), str(xdg), str(xdg / "cache"), str(xdg / "config"), str(xdg / "data")]
+    rc = _run_as_role(uid, f"ensure_role_layout({role})", paths)
     if rc != 0:
-        st = tmp.stat() if tmp.exists() else None
-        raise RuntimeError(
-            f"role {role} cannot establish TMPDIR {tmp} "
-            f"(stat={None if st is None else (st.st_uid, oct(st.st_mode))}); "
-            "§7.3 requires a writable 0700 per-role temp path"
-        )
+        # Unit tests on macOS cannot setuid(1001); create as current euid with warning.
+        # Production containers run as root with CAP_SETUID — setuid path must work there.
+        if os.geteuid() != 0:
+            for p in paths:
+                Path(p).mkdir(parents=True, exist_ok=True)
+                try:
+                    os.chmod(p, 0o700)
+                except OSError:
+                    pass
+            log.warning(
+                "setuid role layout failed for %s on euid=%s; using unprivileged fallback (test host)",
+                role,
+                os.geteuid(),
+            )
+        else:
+            st = tmp.stat() if tmp.exists() else None
+            raise RuntimeError(
+                f"role {role} cannot establish TMPDIR {tmp} "
+                f"(stat={None if st is None else (st.st_uid, oct(st.st_mode))}); "
+                "§7.3 requires a writable 0700 per-role temp path"
+            )
     log.info(
         "role layout ok role=%s tmp=%s uid=%s mode=%s",
         role,
@@ -241,6 +264,8 @@ def handle_request(req: dict[str, Any], authed: bool) -> dict[str, Any]:
         )
 
     if method in ("session.init", "session.resume"):
+        from agentd_runner.turn import load_rehydration
+
         session_key = str(params.get("session_key") or STATE.session_key or "")
         roles = params.get("roles") or {}
         tokens = params.get("tokens") or {}
@@ -266,12 +291,24 @@ def handle_request(req: dict[str, Any], authed: bool) -> dict[str, Any]:
             return err(-32010, "identity preflight failed: " + "; ".join(mismatches))
 
         STATE.initialized = True
+        rehydrated = {}
+        if method == "session.resume":
+            # §6.3 continuity by persistence — load transcript/summary for both roles
+            rehydrated = {
+                role: load_rehydration(role) for role in ROLE_UIDS
+            }
+            log.info(
+                "session.resume rehydrated transcripts arch=%s dev=%s",
+                rehydrated.get("architect", {}).get("transcript_lines"),
+                rehydrated.get("developer", {}).get("transcript_lines"),
+            )
         return ok(
             {
                 "session_key": session_key,
                 "initialized": True,
                 "method": method,
                 "roles": STATE.roles,
+                "rehydrated": rehydrated,
             }
         )
 
@@ -287,18 +324,31 @@ def handle_request(req: dict[str, Any], authed: bool) -> dict[str, Any]:
         STATE.initialized = False
         return ok({"torn_down": True})
 
-    if method == "turn.dispatch":
-        # M2: runner stands up; adapters arrive in M3. Refuse real work as root path.
+    if method in ("turn.dispatch", "turn.resume"):
+        from agentd_runner.turn import exec_turn_as_role
+
         if not STATE.initialized:
             return err(-32002, "session not initialized")
         role = str(params.get("role") or "")
         if role not in ROLE_UIDS:
             return err(-32602, f"unknown role {role}")
+        # turn.resume: runner re-derives from workspace; same exec path with flag
+        if method == "turn.resume":
+            params = dict(params)
+            params["resuming"] = True
+        result = exec_turn_as_role(params)
+        return ok(result)
+
+    if method == "escalate.human":
+        # Runner-side record; gateway pauses session on seeing needs_human / escalate
+        reason = str(params.get("reason") or "unspecified")
+        question = str(params.get("question") or "")
+        log.warning("escalate.human reason=%s question=%s", reason, question)
         return ok(
             {
-                "status": "not_implemented",
-                "note": "turn.dispatch adapters are M3; M2 validates channel only",
-                "role": role,
+                "status": "needs_human",
+                "reason": reason,
+                "question": question,
             }
         )
 

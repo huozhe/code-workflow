@@ -337,17 +337,36 @@ class Store:
         created_at: int,
         updated_at: int,
         paused_reason: str | None = None,
+        roles_locked: int | None = None,
+        design_pr: int | None = None,
+        turn_count: int | None = None,
+        consec_agent_turns: int | None = None,
+        review_rounds: int | None = None,
+        progress_fp: str | None = None,
+        progress_repeat: int | None = None,
+        zero_thread_rounds: int | None = None,
     ) -> None:
         with self._lock:
             self._conn.execute(
                 """
                 INSERT INTO sessions(
                   session_key, repo, issue_num, state, paused_reason,
-                  architect, developer, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  architect, developer, roles_locked, design_pr,
+                  turn_count, consec_agent_turns, review_rounds,
+                  progress_fp, progress_repeat, zero_thread_rounds,
+                  created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_key) DO UPDATE SET
                   state = excluded.state,
-                  paused_reason = excluded.paused_reason,
+                  paused_reason = COALESCE(excluded.paused_reason, sessions.paused_reason),
+                  roles_locked = COALESCE(excluded.roles_locked, sessions.roles_locked),
+                  design_pr = COALESCE(excluded.design_pr, sessions.design_pr),
+                  turn_count = COALESCE(excluded.turn_count, sessions.turn_count),
+                  consec_agent_turns = COALESCE(excluded.consec_agent_turns, sessions.consec_agent_turns),
+                  review_rounds = COALESCE(excluded.review_rounds, sessions.review_rounds),
+                  progress_fp = COALESCE(excluded.progress_fp, sessions.progress_fp),
+                  progress_repeat = COALESCE(excluded.progress_repeat, sessions.progress_repeat),
+                  zero_thread_rounds = COALESCE(excluded.zero_thread_rounds, sessions.zero_thread_rounds),
                   updated_at = excluded.updated_at
                 """,
                 (
@@ -358,11 +377,141 @@ class Store:
                     paused_reason,
                     architect,
                     developer,
+                    0 if roles_locked is None else roles_locked,
+                    design_pr,
+                    0 if turn_count is None else turn_count,
+                    0 if consec_agent_turns is None else consec_agent_turns,
+                    0 if review_rounds is None else review_rounds,
+                    progress_fp,
+                    0 if progress_repeat is None else progress_repeat,
+                    0 if zero_thread_rounds is None else zero_thread_rounds,
                     created_at,
                     updated_at,
                 ),
             )
             self._conn.commit()
+
+    def update_session_fields(self, session_key: str, **fields: Any) -> None:
+        if not fields:
+            return
+        allowed = {
+            "state",
+            "paused_reason",
+            "roles_locked",
+            "design_pr",
+            "feature_pr",
+            "turn_count",
+            "consec_agent_turns",
+            "review_rounds",
+            "progress_fp",
+            "progress_repeat",
+            "zero_thread_rounds",
+            "updated_at",
+        }
+        cols = []
+        vals: list[Any] = []
+        for k, v in fields.items():
+            if k not in allowed:
+                raise ValueError(f"disallowed session field {k}")
+            cols.append(f"{k} = ?")
+            vals.append(v)
+        if "updated_at" not in fields:
+            cols.append("updated_at = ?")
+            vals.append(int(time.time()))
+        vals.append(session_key)
+        with self._lock:
+            self._conn.execute(
+                f"UPDATE sessions SET {', '.join(cols)} WHERE session_key = ?",
+                vals,
+            )
+            self._conn.commit()
+
+    def list_deferred(self, limit: int = 100) -> list[sqlite3.Row]:
+        with self._lock:
+            return list(
+                self._conn.execute(
+                    """
+                    SELECT delivery_id, event, action, repo, issue_num, sender,
+                           received_at, payload, status
+                    FROM deliveries
+                    WHERE status = 'deferred'
+                    ORDER BY received_at ASC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+            )
+
+    def insert_turn(
+        self,
+        *,
+        turn_id: str,
+        session_key: str,
+        role: str,
+        delivery_id: str | None,
+        started_at: int,
+        ended_at: int | None,
+        status: str | None,
+        summary: str | None,
+    ) -> None:
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO turns(
+                  turn_id, session_key, role, delivery_id,
+                  started_at, ended_at, status, summary
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    turn_id,
+                    session_key,
+                    role,
+                    delivery_id,
+                    started_at,
+                    ended_at,
+                    status,
+                    summary,
+                ),
+            )
+            self._conn.commit()
+
+    def register_artifact(
+        self,
+        *,
+        session_key: str,
+        role: str,
+        kind: str,
+        ref: str,
+        created_at: int | None = None,
+    ) -> None:
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO artifacts(session_key, role, kind, ref, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (session_key, role, kind, ref, created_at or int(time.time())),
+            )
+            self._conn.commit()
+
+    def open_escalation(
+        self,
+        *,
+        session_key: str,
+        role: str | None,
+        reason: str,
+        comment_id: int | None = None,
+    ) -> int:
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                INSERT INTO escalations(session_key, role, reason, comment_id, opened_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (session_key, role, reason, comment_id, int(time.time())),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid or 0)
 
     def get_runner(self, session_key: str) -> dict[str, Any] | None:
         with self._lock:
