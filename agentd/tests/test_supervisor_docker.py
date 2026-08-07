@@ -62,27 +62,6 @@ class _GitHubStub(BaseHTTPRequestHandler):
         return
 
 
-@pytest.fixture(scope="module")
-def built_image() -> None:
-    # Always build so Dockerfile changes are validated (layer cache keeps it cheap).
-    root = Path(__file__).resolve().parents[1]
-    r = subprocess.run(
-        [
-            "docker",
-            "build",
-            "-t",
-            IMAGE,
-            "-f",
-            str(root / "docker" / "session-runner" / "Dockerfile"),
-            str(root / "docker" / "session-runner"),
-        ],
-        capture_output=True,
-        text=True,
-    )
-    if r.returncode != 0:
-        pytest.skip(f"image build failed: {r.stderr[-800:]}")
-
-
 @pytest.fixture()
 def github_stub() -> tuple[str, dict[str, str]]:
     tokens = {
@@ -102,7 +81,7 @@ def github_stub() -> tuple[str, dict[str, str]]:
 
 def test_session_health_ping_and_token_boundary(
     tmp_path: Path,
-    built_image: None,
+    session_runner_image: str,
     monkeypatch: pytest.MonkeyPatch,
     github_stub: tuple[str, dict[str, str]],
 ) -> None:
