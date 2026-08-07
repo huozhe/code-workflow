@@ -46,6 +46,45 @@ def test_quarantine_deferred_moves_all(tmp_path: Path) -> None:
     store.close()
 
 
+def test_count_deferred_respects_before(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.db")
+    # insert_delivery stamps received_at=now; force two eras via SQL
+    for i in range(3):
+        store.insert_delivery(
+            delivery_id=f"old-{i}",
+            event="push",
+            action=None,
+            repo="o/r",
+            issue_num=None,
+            sender="u",
+            payload=b"{}",
+            status="deferred",
+        )
+    store._conn.execute(
+        "UPDATE deliveries SET received_at = 1000 WHERE delivery_id LIKE 'old-%'"
+    )
+    for i in range(2):
+        store.insert_delivery(
+            delivery_id=f"new-{i}",
+            event="push",
+            action=None,
+            repo="o/r",
+            issue_num=None,
+            sender="u",
+            payload=b"{}",
+            status="deferred",
+        )
+    store._conn.execute(
+        "UPDATE deliveries SET received_at = 5000 WHERE delivery_id LIKE 'new-%'"
+    )
+    store._conn.commit()
+    assert store.count_deferred() == 5
+    assert store.count_deferred(before_received_at=3000) == 3
+    assert store.quarantine_deferred(before_received_at=3000) == 3
+    assert store.count_deferred() == 2
+    store.close()
+
+
 def test_deferred_backlog_creates_zero_sessions_without_intake_issues(
     tmp_path: Path,
 ) -> None:

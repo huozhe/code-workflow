@@ -418,6 +418,9 @@ class SessionSupervisor:
         log.info("session %s → COLD (docker stop)", session_key)
 
     def promote_hot(self, session_key: str) -> SessionHandle:
+        # §6.5/§6.6: promotion is the intended path to HOT for COLD sessions.
+        # Admission (max_hot_containers) is enforced in ensure_session today;
+        # wire the same check here before docker start when tiering goes live.
         row = self.store.get_session(session_key)
         runner = self.store.get_runner(session_key)
         if not row or not runner:

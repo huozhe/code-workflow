@@ -91,13 +91,14 @@ def main(argv: list[str] | None = None) -> None:
         store = Store(config.state_db)
         pending = store.count_by_status().get("deferred", 0)
         if args.dry_run:
+            would = store.count_deferred(before_received_at=args.before)
             print(
                 json.dumps(
                     {
                         "dry_run": True,
                         "deferred": pending,
                         "before_received_at": args.before,
-                        "would_quarantine": pending if args.before is None else "filtered",
+                        "would_quarantine": would,
                     },
                     indent=2,
                 )

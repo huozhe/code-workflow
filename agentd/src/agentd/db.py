@@ -442,6 +442,23 @@ class Store:
                 ).fetchall()
             )
 
+    def count_deferred(self, *, before_received_at: int | None = None) -> int:
+        """Count deferred deliveries (optional upper bound on received_at)."""
+        with self._lock:
+            if before_received_at is not None:
+                row = self._conn.execute(
+                    """
+                    SELECT COUNT(*) AS n FROM deliveries
+                    WHERE status = 'deferred' AND received_at < ?
+                    """,
+                    (before_received_at,),
+                ).fetchone()
+            else:
+                row = self._conn.execute(
+                    "SELECT COUNT(*) AS n FROM deliveries WHERE status = 'deferred'"
+                ).fetchone()
+            return int(row["n"]) if row else 0
+
     def quarantine_deferred(
         self,
         *,

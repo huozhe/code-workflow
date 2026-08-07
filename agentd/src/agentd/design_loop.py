@@ -100,6 +100,18 @@ class DesignLoop:
                     architect_login=default_arch,
                     developer_login=default_dev,
                 )
+            except RuntimeError as e:
+                # Capacity refusal: leave deferred for retry when a HOT slot frees.
+                # Warning only — no traceback every ~5s drain cycle.
+                if "max_hot_containers" in str(e):
+                    log.warning(
+                        "ensure_session deferred (capacity): %s — %s",
+                        session_key,
+                        e,
+                    )
+                    return
+                log.exception("ensure_session failed %s", session_key)
+                return
             except Exception:
                 log.exception("ensure_session failed %s", session_key)
                 return
