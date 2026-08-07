@@ -611,10 +611,14 @@ Before the final merge, the Architect writes a sentinel-delimited block into the
 **Not covered:** SSO login path (no test account available)
 
 - [ ] Human Verification Complete
+
+*Tick this box before closing the issue — closing with it unticked records the session as `ABANDONED` (§10.3).*
 <!-- /agentd:verification -->
 ```
 
 Sentinels exist so agents can rewrite the block idempotently across multiple PRs without touching the human's prose. `agentd` parses only between sentinels; a stray checkbox elsewhere in the body is ignored.
+
+**The ordering line is part of the block, not decoration.** Ticking and closing are two separate human acts, and the natural order — close the issue, tick later — silently produces the wrong terminal classification, because `issues.closed` is evaluated against the checkbox state *at that moment* (§10.3). The block therefore states the required order where the human is already reading. Found by hand-running this block against M2 (#10), which closed unticked and so recorded as `ABANDONED`.
 
 ### 10.2 Checkbox Semantics (FR-3.2)
 
@@ -638,6 +642,8 @@ The checkbox's only remaining job is to classify the terminal state:
 | Checkbox absent or unverified | `ABANDONED` | Full, reason recorded, no summary |
 
 Both tear down completely. There is no timer, no hold, and no attempt to reopen an issue the owner closed — a close without verification is a meaningful human act ("won't fix", "fixed another way"), and the system records it rather than arguing with it.
+
+**Ordering is normative: tick, then close** (`@huozhe`'s call, 2026-08-07). The classification is evaluated against the checkbox state at `issues.closed` and is never revised afterwards — a tick arriving after closure changes nothing. The alternative considered was making a late tick promote `ABANDONED` → `VERIFIED`, and it was rejected: it would reopen the terminal state after teardown has already run, which is precisely the "no timer, no hold" property above. The cost is that the ordering must be *communicated*, which is why §10.1's block carries it inline rather than leaving it to the runbook.
 
 ### 10.4 `AWAITING_VERIFICATION` Retention
 
