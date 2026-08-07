@@ -160,11 +160,12 @@ def test_session_health_ping_and_token_boundary(
             assert "docker.sock" not in str(m.get("Source", ""))
             assert "docker.sock" not in str(m.get("Destination", ""))
 
-        # Bearer must not sit on the session bind mount either
-        sess = tmp_path / "sessions" / "test__repo__1"
-        assert not (sess / ".runner" / "bearer").exists()
+        # Bearer must not sit on the project bind mount either
+        proj = tmp_path / "projects" / "test__repo"
+        assert not (proj / ".runner" / "bearer").exists()
+        assert handle.project_key == "test/repo"
 
-        # W2: state.db / config.yaml not visible (no full-root mount)
+        # W2: state.db / config.yaml not visible (single project mount)
         assert_host_secrets_not_mounted(handle.container_id)
         ls = subprocess.run(
             ["docker", "exec", "-u", "1001:1001", handle.container_id, "ls", "-1", "/srv/agentd"],
@@ -172,11 +173,11 @@ def test_session_health_ping_and_token_boundary(
             text=True,
             check=True,
         )
-        assert set(ls.stdout.split()) == {"repos", "sessions"}
+        assert set(ls.stdout.split()) == {"repo", "sessions", "home"}
 
         # W1: role can run git in its worktree (topology preserved)
         wt = (
-            f"/srv/agentd/sessions/test__repo__1/architect/worktrees/issue-1"
+            f"/srv/agentd/sessions/1/architect/worktrees/issue-1"
         )
         git_st = subprocess.run(
             [
@@ -218,12 +219,12 @@ def test_session_health_ping_and_token_boundary(
         assert boundary["developer_can_read_architect_token"] is False, boundary
         assert boundary["architect_can_read_developer_token"] is False, boundary
 
-        sup.demote_cold(key)
+        sup.demote_cold("test/repo")
         handle2 = sup.promote_hot(key)
         assert handle2.tier == "hot"
     finally:
         subprocess.run(
-            ["docker", "rm", "-f", f"agentd-{key.replace('/', '-').replace('#', '-')}"],
+            ["docker", "rm", "-f", "agentd-test-repo"],
             capture_output=True,
         )
         store.close()

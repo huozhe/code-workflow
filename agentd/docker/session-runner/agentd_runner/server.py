@@ -27,9 +27,15 @@ class RunnerState:
         self.bearer: bytes | None = None
         self.attached = False
         self.session_key: str | None = None
+        self.project_key: str | None = None
         self.roles: dict[str, str] = {}  # role -> github login
         self.initialized = False
         self._lock = threading.Lock()
+        # One CLI conversation per role — serialize turns project-wide (#20).
+        self._role_locks: dict[str, threading.Lock] = {
+            "architect": threading.Lock(),
+            "developer": threading.Lock(),
+        }
 
     def set_bearer(self, token: str) -> None:
         self.bearer = token.encode("utf-8")
@@ -336,7 +342,9 @@ def handle_request(req: dict[str, Any], authed: bool) -> dict[str, Any]:
         if method == "turn.resume":
             params = dict(params)
             params["resuming"] = True
-        result = exec_turn_as_role(params)
+        # Serialize per role so concurrent issues cannot interleave one conversation.
+        with STATE._role_locks[role]:
+            result = exec_turn_as_role(params)
         return ok(result)
 
     if method == "escalate.human":

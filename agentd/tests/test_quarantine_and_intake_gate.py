@@ -192,13 +192,14 @@ def test_max_hot_containers_enforced(tmp_path: Path, monkeypatch) -> None:
 
     store = Store(tmp_path / "state.db")
     cfg = _cfg(tmp_path, max_hot_containers=2)
-    # Seed two hot runners
-    for i in range(2):
-        sk = f"o/r#{i}"
+    # Seed two HOT **projects** (admission unit is project, #20)
+    for i, repo in enumerate(("o/a", "o/b")):
+        sk = f"{repo}#1"
         store.upsert_session(
             session_key=sk,
-            repo="o/r",
-            issue_num=i,
+            project_key=repo,
+            repo=repo,
+            issue_num=1,
             state="PLANNING",
             architect="a",
             developer="d",
@@ -206,12 +207,13 @@ def test_max_hot_containers_enforced(tmp_path: Path, monkeypatch) -> None:
             updated_at=1,
         )
         store.upsert_runner(
-            sk, container_id=f"c{i}", endpoint="127.0.0.1:1", token="t", tier="hot"
+            repo, container_id=f"c{i}", endpoint="127.0.0.1:1", token="t", tier="hot"
         )
     sup = SessionSupervisor(store, cfg)
     monkeypatch.setattr(sup, "_load_tokens", lambda: {"architect": "x", "developer": "y"})
     try:
-        sup.ensure_session(session_key="o/r#9", repo="o/r", issue_num=9)
+        # Third project should be refused
+        sup.ensure_session(session_key="o/c#1", repo="o/c", issue_num=1)
         raise AssertionError("should have refused")
     except RuntimeError as e:
         assert "max_hot_containers" in str(e)

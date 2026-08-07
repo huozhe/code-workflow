@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -13,7 +14,7 @@ from agentd.config import Config
 from agentd.db import Store, decompress_payload
 from agentd.digest import build_digest, digest_to_markdown
 from agentd.fsm import transition
-from agentd.gitops import session_dir_name
+from agentd.gitops import project_key_from_repo, project_path
 from agentd.intake import evaluate_intake
 from agentd.loop_safety import BudgetState, StallTracker, progress_fingerprint
 from agentd.routing import RouteAction, provenance_footer, route_for_recipient
@@ -21,6 +22,18 @@ from agentd.rpc_client import RunnerClient
 from agentd.supervisor import SessionSupervisor
 
 log = logging.getLogger("agentd.design_loop")
+
+# Serialize turns per (project, role) — one CLI conversation per role (#20).
+_role_locks: dict[str, threading.Lock] = {}
+_role_locks_guard = threading.Lock()
+
+
+def _lock_for_project_role(project_key: str, role: str) -> threading.Lock:
+    key = f"{project_key}::{role}"
+    with _role_locks_guard:
+        if key not in _role_locks:
+            _role_locks[key] = threading.Lock()
+        return _role_locks[key]
 
 
 def _payload_dict(raw: bytes) -> dict[str, Any]:
@@ -294,18 +307,35 @@ class DesignLoop:
         dig: dict[str, Any],
         issue_num: int,
     ) -> None:
-        runner = self.store.get_runner(session_key)
+        sess = self.store.get_session(session_key) or {}
+        repo = str(sess.get("repo") or "")
+        project_key = str(sess.get("project_key") or project_key_from_repo(repo))
+        runner = self.store.get_runner(project_key) or self.store.get_runner_for_session(
+            session_key
+        )
         if not runner:
             return
         endpoint = str(runner["endpoint"])
         host, _, port_s = endpoint.partition(":")
         bearer = str(runner["token"])
-        sn = session_dir_name(session_key)
-        role_base = self.config.root / "sessions" / sn / role
+        # Project layout: sessions/<issue>/<role>/…
+        role_base = (
+            project_path(self.config.root, repo or project_key)
+            / "sessions"
+            / str(int(issue_num))
+            / role
+        )
         digest_path = role_base / "context" / f"digest-{turn_id}.md"
         digest_path.parent.mkdir(parents=True, exist_ok=True)
-        digest_path.write_text(digest_to_markdown(dig), encoding="utf-8")
-        wt = role_base / "worktrees" / f"issue-{issue_num}"
+        # Per-issue framing for multi-issue single CLI conversation (#20).
+        dig_md = digest_to_markdown(dig)
+        framed = (
+            f"# Active issue: {session_key}\n"
+            f"# Project: {project_key}\n"
+            f"# Role: {role}\n\n"
+            f"{dig_md}"
+        )
+        digest_path.write_text(framed, encoding="utf-8")
 
         started = int(time.time())
         self.store.insert_turn(
@@ -318,23 +348,33 @@ class DesignLoop:
             status=None,
             summary=None,
         )
+        lock = _lock_for_project_role(project_key, role)
         try:
-            with RunnerClient(host, int(port_s), bearer, timeout_s=120) as cli:
-                # Adapter: mock in tests via AGENTD_ADAPTER; production uses role default
-                result = cli.call(
-                    "turn.dispatch",
-                    {
-                        "turn_id": turn_id,
-                        "role": role,
-                        "deadline_s": 900,
-                        "event": dig,
-                        "context": {
-                            "worktree": f"/srv/agentd/sessions/{sn}/{role}/worktrees/issue-{issue_num}",
-                            "digest": f"/srv/agentd/sessions/{sn}/{role}/context/digest-{turn_id}.md",
+            with lock:
+                with RunnerClient(host, int(port_s), bearer, timeout_s=120) as cli:
+                    result = cli.call(
+                        "turn.dispatch",
+                        {
+                            "turn_id": turn_id,
+                            "role": role,
+                            "deadline_s": 900,
+                            "event": dig,
+                            "context": {
+                                "worktree": (
+                                    f"/srv/agentd/sessions/{int(issue_num)}/"
+                                    f"{role}/worktrees/issue-{int(issue_num)}"
+                                ),
+                                "digest": (
+                                    f"/srv/agentd/sessions/{int(issue_num)}/"
+                                    f"{role}/context/digest-{turn_id}.md"
+                                ),
+                                "session_key": session_key,
+                                "project_key": project_key,
+                                "issue_num": int(issue_num),
+                            },
+                            "budget": {},
                         },
-                        "budget": {},
-                    },
-                )
+                    )
         except Exception as exc:
             log.exception("turn.dispatch failed: %s", exc)
             self.store.insert_turn(
@@ -352,7 +392,6 @@ class DesignLoop:
         ended = int(time.time())
         status = str((result or {}).get("status") or "done")
         summary = str((result or {}).get("summary") or "")[:2000]
-        # Update turn row — schema has no upsert; insert completion as update via new write
         with self.store._lock:
             self.store._conn.execute(
                 "UPDATE turns SET ended_at=?, status=?, summary=? WHERE turn_id=?",

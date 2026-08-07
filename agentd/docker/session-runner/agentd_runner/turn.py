@@ -15,11 +15,29 @@ from agentd_runner.server import ROLE_UIDS, session_base
 log = logging.getLogger("agentd_runner.turn")
 
 
+def project_root() -> Path:
+    """Project tree mount point (#20) — durable homes live here."""
+    import os
+
+    return Path(
+        os.environ.get("AGENTD_PROJECT_ROOT")
+        or os.environ.get("AGENTD_HOST_ROOT")
+        or "/srv/agentd"
+    )
+
+
 def role_paths(role: str) -> dict[str, Path]:
+    """Issue-scoped work dirs + durable project HOME for auth (Option D)."""
     base = session_base() / role
+    # Prefer durable project home for CLI credentials (Grok auth.json etc.).
+    durable = project_root() / "home" / role
+    if durable.is_dir() or (project_root() / "home").exists():
+        home = durable
+    else:
+        home = base / "home"
     return {
         "base": base,
-        "home": base / "home",
+        "home": home,
         "tmp": base / "tmp",
         "xdg": base / "xdg",
         "context": base / "context",
@@ -129,6 +147,9 @@ def exec_turn_as_role(params: dict[str, Any]) -> dict[str, Any]:
         if token_file.is_file():
             env["GH_TOKEN"] = token_file.read_text(encoding="utf-8").strip()
             env["GITHUB_TOKEN"] = env["GH_TOKEN"]
+        # Claude subscription long-lived token (#19) — pass through if host injected.
+        if os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
+            env["CLAUDE_CODE_OAUTH_TOKEN"] = os.environ["CLAUDE_CODE_OAUTH_TOKEN"]
         cwd = Path(str((params.get("context") or {}).get("worktree") or paths["base"]))
         if not cwd.is_dir():
             cwd = paths["base"]

@@ -23,13 +23,43 @@ def _lock_for(repo_path: Path) -> threading.Lock:
 
 
 def session_dir_name(session_key: str) -> str:
-    """huozhe/code-workflow#42 → huozhe__code-workflow__42"""
+    """huozhe/code-workflow#42 → huozhe__code-workflow__42 (legacy flat layout)."""
     owner_repo, _, num = session_key.partition("#")
     owner, _, repo = owner_repo.partition("/")
     return f"{owner}__{repo}__{num}"
 
 
+def project_key_from_repo(repo_full: str) -> str:
+    """owner/repo → project key (also used as runners PK)."""
+    return repo_full.strip()
+
+
+def project_key_from_session(session_key: str) -> str:
+    owner_repo, _, _ = session_key.partition("#")
+    return project_key_from_repo(owner_repo)
+
+
+def project_dir_name(repo_full: str) -> str:
+    """owner/repo → owner__repo (§6.2 project tree)."""
+    owner, _, repo = repo_full.partition("/")
+    return f"{owner}__{repo}"
+
+
+def project_path(root: Path, repo_full: str) -> Path:
+    return root / "projects" / project_dir_name(repo_full)
+
+
+def issue_session_rel(issue_num: int) -> str:
+    """Relative path under project for one issue's session dirs."""
+    return f"sessions/{int(issue_num)}"
+
+
 def shared_clone_path(root: Path, repo_full: str) -> Path:
+    """Shared clone lives under the project tree (§6.2)."""
+    return project_path(root, repo_full) / "repo"
+
+
+def legacy_shared_clone_path(root: Path, repo_full: str) -> Path:
     owner, _, repo = repo_full.partition("/")
     return root / "repos" / owner / repo
 
@@ -40,8 +70,20 @@ def ensure_shared_clone(
     *,
     clone_url: str | None = None,
 ) -> Path:
-    """Ensure ~/.agentd/repos/<owner>/<repo> exists with gc.auto=0 + relative worktrees."""
+    """Ensure project clone exists with gc.auto=0 + relative worktrees.
+
+    Migrates a legacy ``repos/<owner>/<repo>`` clone into the project tree
+    when present and the project clone is missing.
+    """
     path = shared_clone_path(root, repo_full)
+    legacy = legacy_shared_clone_path(root, repo_full)
+    if not (path / ".git").exists() and not (path / "HEAD").exists():
+        if (legacy / ".git").exists() or (legacy / "HEAD").exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if not path.exists():
+                log.info("migrating legacy clone %s → %s", legacy, path)
+                legacy.rename(path)
+
     with _lock_for(path):
         if not (path / ".git").exists() and not (path / "HEAD").exists():
             path.parent.mkdir(parents=True, exist_ok=True)
