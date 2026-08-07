@@ -301,7 +301,10 @@ def handle_request(req: dict[str, Any], authed: bool) -> dict[str, Any]:
         for role, pat in tokens.items():
             if role in ROLE_UIDS and pat:
                 write_role_token(str(role), str(pat))
-        # Claude oauth: per-role copy so either adapter can read without Env.
+        # Claude oauth is account-wide and may be used by either role when
+        # §5.3 swaps adapter (role/architect:grok etc.). Deliberately write a
+        # copy into *both* role tmpfs dirs — not a bug; select by adapter at
+        # turn time, not by which role "owns" the provider.
         claude_oauth = str(model_creds.get("claude_oauth_token") or "").strip()
         if claude_oauth:
             for role in ROLE_UIDS:
