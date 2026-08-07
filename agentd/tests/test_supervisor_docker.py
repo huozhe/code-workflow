@@ -17,6 +17,7 @@ from agentd.supervisor import (
     SessionSupervisor,
     assert_bearer_not_in_inspect_env,
     assert_bearer_not_readable_by_roles,
+    assert_host_secrets_not_mounted,
     assert_no_docker_sock_mount,
 )
 
@@ -163,6 +164,16 @@ def test_session_health_ping_and_token_boundary(
         sess = tmp_path / "sessions" / "test__repo__1"
         assert not (sess / ".runner" / "bearer").exists()
 
+        # W2: state.db / config.yaml not visible (no full-root mount)
+        assert_host_secrets_not_mounted(handle.container_id)
+        ls = subprocess.run(
+            ["docker", "exec", "-u", "1001:1001", handle.container_id, "ls", "-1", "/srv/agentd"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert set(ls.stdout.split()) == {"repos", "sessions"}
+
         # W1: role can run git in its worktree (topology preserved)
         wt = (
             f"/srv/agentd/sessions/test__repo__1/architect/worktrees/issue-1"
@@ -184,6 +195,24 @@ def test_session_health_ping_and_token_boundary(
             text=True,
         )
         assert git_st.returncode == 0, git_st.stderr
+
+        # W2: cannot read runners.token from state.db
+        db_probe = subprocess.run(
+            [
+                "docker",
+                "exec",
+                "-u",
+                "1001:1001",
+                handle.container_id,
+                "python3",
+                "-c",
+                "import os; print('db', os.path.exists('/srv/agentd/state.db'))",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert "db False" in db_probe.stdout
 
         boundary = sup.adversarial_token_check(handle)
         assert boundary["developer_can_read_architect_token"] is False, boundary

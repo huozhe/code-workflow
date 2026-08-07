@@ -164,6 +164,34 @@ def assert_worktree_usable(
     log.info("worktree ok role=%s gitdir=%s", role, gitdir)
 
 
+def assert_host_secrets_not_mounted(container_id: str) -> None:
+    """W2: state.db / config.yaml must not be visible inside the container.
+
+    The RPC bearer is stored in runners.token; a full-root mount re-opens R1.
+    """
+    r = _docker(
+        "exec",
+        "-u",
+        "1001:1001",
+        container_id,
+        "bash",
+        "-c",
+        "for p in /srv/agentd/state.db /srv/agentd/config.yaml; do "
+        "if [ -e \"$p\" ]; then echo VISIBLE:$p; fi; done; "
+        "ls -1 /srv/agentd 2>/dev/null || true",
+        check=False,
+    )
+    out = (r.stdout or "") + (r.stderr or "")
+    if "VISIBLE:" in out:
+        raise RuntimeError(f"FORBIDDEN: host secrets visible in container: {out!r}")
+    listed = [ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()]
+    for name in listed:
+        if name not in ("repos", "sessions"):
+            raise RuntimeError(
+                f"FORBIDDEN: unexpected path under /srv/agentd: {name!r} (full={out!r})"
+            )
+
+
 class SessionSupervisor:
     def __init__(self, store: Store, config: Config) -> None:
         self.store = store
@@ -280,10 +308,13 @@ class SessionSupervisor:
             "no-new-privileges",
             "--tmpfs",
             "/run/agent:rw,noexec,nosuid,size=1m,mode=0711",
-            # One mount of the agentd root — not separate /srv/repo + /srv/session
-            # (those flatten topology and break relative worktree gitdirs).
+            # Nested mounts keep repos/ and sessions/<key> as siblings under
+            # /srv/agentd (relative worktree gitdirs) WITHOUT mounting state.db
+            # or config.yaml (W2: full-root mount re-exposed runners.token).
             "-v",
-            f"{self.config.root}:/srv/agentd",
+            f"{self.config.root / 'repos'}:/srv/agentd/repos",
+            "-v",
+            f"{sess_host}:{session_dir_in_container}",
             "-p",
             f"127.0.0.1:0:{RPC_CONTAINER_PORT}",
         ]
@@ -308,6 +339,7 @@ class SessionSupervisor:
         assert_no_docker_sock_mount(cid)
         assert_bearer_not_in_inspect_env(cid)
         assert_bearer_not_readable_by_roles(cid)
+        assert_host_secrets_not_mounted(cid)
         # Worktree topology must resolve for both roles before we hand off.
         assert_worktree_usable(
             cid, session_key=session_key, issue_num=issue_num, role="architect", uid="1001:1001"
