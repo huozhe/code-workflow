@@ -17,9 +17,15 @@ NotifyFn = Callable[[str, str], None]
 
 
 def macos_notify(message: str, title: str = "agentd: storage circuit breaker") -> None:
-    """Best-effort osascript notification (NFR-2.2). Failures are ignored."""
+    """Best-effort osascript notification (NFR-2.2).
+
+    Always logs the *attempt* at INFO with return code. Exit 0 does not prove
+    Notification Center showed a banner (TCC may suppress); the log correlates
+    LaunchAgent trip → notify call site for host verification.
+    """
+    log.info("macos_notify attempt title=%r (launchd/osascript path)", title)
     try:
-        subprocess.run(
+        proc = subprocess.run(
             [
                 "osascript",
                 "-e",
@@ -30,8 +36,13 @@ def macos_notify(message: str, title: str = "agentd: storage circuit breaker") -
             capture_output=True,
             timeout=5,
         )
+        log.info(
+            "macos_notify osascript rc=%s stderr=%r",
+            proc.returncode,
+            (proc.stderr or b"")[:200],
+        )
     except (OSError, subprocess.SubprocessError) as exc:
-        log.debug("notification failed: %s", exc)
+        log.info("macos_notify failed: %s", exc)
 
 
 def _escape_applescript(s: str) -> str:

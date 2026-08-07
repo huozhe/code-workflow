@@ -46,15 +46,14 @@ def main(argv: list[str] | None = None) -> None:
     if args.cmd == "sessions":
         store = Store(config.state_db)
         rows = store.list_sessions()
-        print(
-            json.dumps(
-                {
-                    "sessions": rows,
-                    "note": "rows empty until M2 creates sessions",
-                },
-                indent=2,
-            )
-        )
+        enriched = []
+        for r in rows:
+            full = store.get_session(str(r["session_key"])) or r
+            # Never print runner bearer tokens
+            full.pop("runner_token", None)
+            full.pop("token", None)
+            enriched.append(full)
+        print(json.dumps({"sessions": enriched}, indent=2))
         store.close()
         return
 

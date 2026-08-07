@@ -312,6 +312,93 @@ class Store:
             ).fetchall()
             return [dict(r) for r in rows]
 
+    def get_session(self, session_key: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT s.*, r.container_id, r.endpoint, r.token AS runner_token, r.tier
+                FROM sessions s
+                LEFT JOIN runners r ON r.session_key = s.session_key
+                WHERE s.session_key = ?
+                """,
+                (session_key,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def upsert_session(
+        self,
+        *,
+        session_key: str,
+        repo: str,
+        issue_num: int,
+        state: str,
+        architect: str,
+        developer: str,
+        created_at: int,
+        updated_at: int,
+        paused_reason: str | None = None,
+    ) -> None:
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO sessions(
+                  session_key, repo, issue_num, state, paused_reason,
+                  architect, developer, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(session_key) DO UPDATE SET
+                  state = excluded.state,
+                  paused_reason = excluded.paused_reason,
+                  updated_at = excluded.updated_at
+                """,
+                (
+                    session_key,
+                    repo,
+                    issue_num,
+                    state,
+                    paused_reason,
+                    architect,
+                    developer,
+                    created_at,
+                    updated_at,
+                ),
+            )
+            self._conn.commit()
+
+    def get_runner(self, session_key: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM runners WHERE session_key = ?",
+                (session_key,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def upsert_runner(
+        self,
+        session_key: str,
+        *,
+        container_id: str,
+        endpoint: str,
+        token: str,
+        tier: str,
+    ) -> None:
+        now = int(time.time())
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO runners(
+                  session_key, container_id, endpoint, token, tier, last_seen_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(session_key) DO UPDATE SET
+                  container_id = excluded.container_id,
+                  endpoint = excluded.endpoint,
+                  token = excluded.token,
+                  tier = excluded.tier,
+                  last_seen_at = excluded.last_seen_at
+                """,
+                (session_key, container_id, endpoint, token, tier, now),
+            )
+            self._conn.commit()
+
     def status_snapshot(self) -> dict[str, Any]:
         with self._lock:
             total = self._conn.execute(
