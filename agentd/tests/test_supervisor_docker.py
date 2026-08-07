@@ -16,6 +16,7 @@ from agentd.supervisor import (
     IMAGE,
     SessionSupervisor,
     assert_bearer_not_in_inspect_env,
+    assert_bearer_not_readable_by_roles,
     assert_no_docker_sock_mount,
     image_present,
 )
@@ -148,6 +149,7 @@ def test_session_health_ping_and_token_boundary(
         assert handle.tier == "hot"
         assert_no_docker_sock_mount(handle.container_id)
         assert_bearer_not_in_inspect_env(handle.container_id)
+        assert_bearer_not_readable_by_roles(handle.container_id)
 
         insp = subprocess.run(
             ["docker", "inspect", handle.container_id, "--format", "{{json .Mounts}}"],
@@ -158,6 +160,10 @@ def test_session_health_ping_and_token_boundary(
         for m in json.loads(insp.stdout):
             assert "docker.sock" not in str(m.get("Source", ""))
             assert "docker.sock" not in str(m.get("Destination", ""))
+
+        # Bearer must not sit on the session bind mount either
+        sess = tmp_path / "sessions" / "test__repo__1"
+        assert not (sess / ".runner" / "bearer").exists()
 
         boundary = sup.adversarial_token_check(handle)
         assert boundary["developer_can_read_architect_token"] is False, boundary

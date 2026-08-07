@@ -80,7 +80,12 @@ def _run_as_role(uid: int, fn_name: str, paths: list[str]) -> int:
             probe.unlink(missing_ok=True)
             os._exit(0)
         except Exception as exc:  # noqa: BLE001
-            sys.stderr.write(f"{fn_name}: {exc}\n")
+            # os.write is async-signal/fork-safe; sys.stderr can deadlock if
+            # another thread holds the stream lock at fork time.
+            try:
+                os.write(2, f"{fn_name}: {exc}\n".encode())
+            except OSError:
+                pass
             os._exit(1)
     _, status = os.waitpid(pid, 0)
     if os.WIFEXITED(status):
@@ -360,24 +365,29 @@ class _ThreadedTCPServer(socketserver.ThreadingTCPServer):
     daemon_threads = True
 
 
-# Host writes bearer here (bind-mounted session volume) — not docker Env (§5.2).
-BEARER_PATH = Path("/srv/session/.runner/bearer")
+# Host injects via: docker create → docker cp → docker start.
+# Container-local rootfs (NOT bind mount — roles can read bind mounts, §5.2).
+BEARER_PATH = Path("/etc/agentd/rpc.bearer")
 
 
 def load_bearer() -> str:
-    """Load RPC bearer from the session mount. Fail closed if missing (B1 shape)."""
+    """Load RPC bearer from container-local rootfs. Fail closed if missing."""
     if BEARER_PATH.is_file():
         raw = BEARER_PATH.read_text(encoding="utf-8").strip()
         if raw:
             return raw
     env = os.environ.get("AGENTD_RUNNER_BEARER")
     if env:
-        # Legacy/dev only — production host path is the file. Never invent a token.
-        log.warning("bearer loaded from env (prefer %s; env is visible in docker inspect)", BEARER_PATH)
+        # Dev-only fallback (unit tests). Supervisor never sets this in production
+        # and asserts its absence from inspect Env.
+        log.warning(
+            "bearer loaded from env (dev only; production uses docker cp to %s)",
+            BEARER_PATH,
+        )
         return env
     raise SystemExit(
         f"RPC bearer missing at {BEARER_PATH}; refusing to bind "
-        "(host must place bearer before start — fail closed, same shape as B1)"
+        "(host: docker create → docker cp → docker start — fail closed, B1 shape)"
     )
 
 

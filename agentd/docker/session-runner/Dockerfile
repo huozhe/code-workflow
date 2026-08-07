@@ -33,12 +33,20 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
     && rm -rf /var/lib/apt/lists/* \
     || echo "gh install skipped"
 
+# Root-owned dir for host-injected RPC bearer (docker create → docker cp → start).
+# Not on a bind mount — §5.2: credentials only on container-local FS / tmpfs.
+RUN mkdir -p /etc/agentd && chmod 0755 /etc/agentd
+
 WORKDIR /opt/agentd-runner
 COPY agentd_runner/ /opt/agentd-runner/agentd_runner/
+COPY entrypoint.sh /opt/agentd-runner/entrypoint.sh
+RUN chmod 0755 /opt/agentd-runner/entrypoint.sh
 ENV PYTHONPATH=/opt/agentd-runner
+# 0.0.0.0 required for Docker port publish to the host; agents inside the
+# container can also reach it — auth is the bearer on a root-only path.
 ENV AGENTD_RPC_HOST=0.0.0.0
 ENV AGENTD_RPC_PORT=7000
 
 # Runner is PID 1 as root; never runs agent tool code as root (§7.3)
 EXPOSE 7000
-ENTRYPOINT ["python3", "-m", "agentd_runner"]
+ENTRYPOINT ["/opt/agentd-runner/entrypoint.sh"]

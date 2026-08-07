@@ -8,6 +8,7 @@ import os
 import secrets
 import stat
 import subprocess
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,8 +28,8 @@ log = logging.getLogger("agentd.supervisor")
 
 IMAGE = "agentd/session-runner:1.0.0"
 RPC_CONTAINER_PORT = 7000
-# Bearer lives on the session bind mount — not docker Env (§5.2 docker inspect).
-BEARER_REL = Path(".runner") / "bearer"
+# Container-local rootfs path (docker cp after create). Not bind mount, not Env.
+BEARER_IN_CONTAINER = "/etc/agentd/rpc.bearer"
 
 
 @dataclass
@@ -90,25 +91,41 @@ def assert_bearer_not_in_inspect_env(container_id: str) -> None:
 
 
 def _host_port_from_inspect(container_id: str) -> int:
-    r = _docker(
-        "inspect",
-        container_id,
-        "--format",
-        f'{{{{(index (index .NetworkSettings.Ports "{RPC_CONTAINER_PORT}/tcp") 0).HostPort}}}}',
-    )
-    port_s = (r.stdout or "").strip()
-    if not port_s:
-        raise RuntimeError(f"no host port published for {container_id}")
-    return int(port_s)
+    """Resolve published host port (retry — OrbStack can lag right after start)."""
+    last = ""
+    for _ in range(30):
+        r = _docker(
+            "port",
+            container_id,
+            f"{RPC_CONTAINER_PORT}/tcp",
+            check=False,
+        )
+        last = (r.stdout or "").strip()
+        # e.g. "127.0.0.1:32784"
+        if r.returncode == 0 and ":" in last:
+            return int(last.rsplit(":", 1)[-1])
+        time.sleep(0.1)
+    raise RuntimeError(f"no host port published for {container_id}: {last!r}")
 
 
-def write_bearer_file(sess_host: Path, bearer: str) -> Path:
-    """Place bearer on session mount at 0600 — not in container env."""
-    path = sess_host / BEARER_REL
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(bearer, encoding="utf-8")
-    os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)  # 0600
-    return path
+def assert_bearer_not_readable_by_roles(container_id: str) -> None:
+    """Bearer must not be readable as either role UID (same shape as token check)."""
+    for uid, label in (("1001:1001", "architect"), ("1002:1002", "developer")):
+        r = _docker(
+            "exec",
+            "-u",
+            uid,
+            container_id,
+            "bash",
+            "-c",
+            f"if [ -r {BEARER_IN_CONTAINER} ]; then echo READABLE; exit 0; "
+            f"else echo DENIED; exit 1; fi",
+            check=False,
+        )
+        if "READABLE" in (r.stdout or "") or r.returncode == 0:
+            raise RuntimeError(
+                f"FORBIDDEN: RPC bearer readable as {label} ({uid}) on {container_id}"
+            )
 
 
 class SessionSupervisor:
@@ -176,12 +193,11 @@ class SessionSupervisor:
         worktree_add(clone, wt_dev, f"agentd/{sn}/developer")
 
         bearer = generate_bearer()
-        write_bearer_file(sess_host, bearer)
-
         name = container_name(session_key)
         _docker("rm", "-f", name, check=False)
 
         env: dict[str, str] = {
+            # 0.0.0.0 required for published port; auth is root-only bearer file.
             "AGENTD_RPC_HOST": "0.0.0.0",
             "AGENTD_RPC_PORT": str(RPC_CONTAINER_PORT),
         }
@@ -189,9 +205,10 @@ class SessionSupervisor:
         if github_api_base:
             env["AGENTD_GITHUB_API_BASE"] = github_api_base
 
-        run_args = [
-            "run",
-            "-d",
+        # create (not run) so we can docker cp the bearer onto container rootfs
+        # before start — never bind mount, never Env (§5.2 / R1).
+        create_args = [
+            "create",
             "--name",
             name,
             "--label",
@@ -230,16 +247,26 @@ class SessionSupervisor:
             f"127.0.0.1:0:{RPC_CONTAINER_PORT}",
         ]
         for k, v in env.items():
-            run_args.extend(["-e", f"{k}={v}"])
-        run_args.append(IMAGE)
+            create_args.extend(["-e", f"{k}={v}"])
+        create_args.append(IMAGE)
 
-        if any("docker.sock" in a for a in run_args):
-            raise RuntimeError("FORBIDDEN: docker.sock must not appear in run args")
+        if any("docker.sock" in a for a in create_args):
+            raise RuntimeError("FORBIDDEN: docker.sock must not appear in create args")
 
-        r = _docker(*run_args)
+        r = _docker(*create_args)
         cid = r.stdout.strip()
+
+        # Inject bearer onto container-local rootfs as root-owned 0400.
+        with tempfile.TemporaryDirectory(prefix="agentd-bearer-") as td:
+            host_bearer = Path(td) / "rpc.bearer"
+            host_bearer.write_text(bearer, encoding="utf-8")
+            os.chmod(host_bearer, stat.S_IRUSR)  # 0400; docker cp → root in container
+            _docker("cp", str(host_bearer), f"{cid}:{BEARER_IN_CONTAINER}")
+
+        _docker("start", cid)
         assert_no_docker_sock_mount(cid)
         assert_bearer_not_in_inspect_env(cid)
+        assert_bearer_not_readable_by_roles(cid)
         host_port = _host_port_from_inspect(cid)
         endpoint = f"127.0.0.1:{host_port}"
 
