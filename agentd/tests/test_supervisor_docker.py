@@ -18,7 +18,6 @@ from agentd.supervisor import (
     assert_bearer_not_in_inspect_env,
     assert_bearer_not_readable_by_roles,
     assert_no_docker_sock_mount,
-    image_present,
 )
 
 
