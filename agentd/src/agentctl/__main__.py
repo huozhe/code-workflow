@@ -1,25 +1,44 @@
-"""agentctl status | sessions | logs."""
+"""agentctl status | sessions | logs | quarantine-deferred."""
 
 from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
-from pathlib import Path
+import time
 
 from agentd.config import load_config
 from agentd.db import Store
 from agentd.docker_wait import docker_socket_ready
 from agentd.paths import agentd_root
 
+log = logging.getLogger("agentctl")
+
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="agentctl")
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("status", help="Queue depth and host readiness snapshot")
-    sub.add_parser("sessions", help="List sessions (M0: empty until M2)")
+    sub.add_parser("sessions", help="List sessions")
     p_logs = sub.add_parser("logs", help="Tail rotating app log (~/.agentd/logs/agentd.log)")
     p_logs.add_argument("-n", type=int, default=50)
+    p_q = sub.add_parser(
+        "quarantine-deferred",
+        help="Move deferred deliveries to dropped (one-shot historical backlog purge)",
+    )
+    p_q.add_argument(
+        "--before",
+        type=int,
+        default=None,
+        metavar="UNIX_TS",
+        help="Only quarantine deliveries with received_at < this timestamp (default: all)",
+    )
+    p_q.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print how many rows would be updated without changing the DB",
+    )
     args = parser.parse_args(argv)
 
     config = load_config()
@@ -34,6 +53,8 @@ def main(argv: list[str] | None = None) -> None:
         snap["disk_free_gb"] = disk_free_gb(config.root)
         snap["disk_floor_gb"] = config.disk_floor_gb
         snap["disk_resume_gb"] = config.disk_resume_gb
+        snap["max_hot_containers"] = config.max_hot_containers
+        snap["hot_sessions"] = store.count_hot_sessions()
         snap["intake"] = {
             "mode": config.intake_mode,
             "label": config.intake_label,
@@ -49,7 +70,6 @@ def main(argv: list[str] | None = None) -> None:
         enriched = []
         for r in rows:
             full = store.get_session(str(r["session_key"])) or r
-            # Never print runner bearer tokens
             full.pop("runner_token", None)
             full.pop("token", None)
             enriched.append(full)
@@ -65,6 +85,52 @@ def main(argv: list[str] | None = None) -> None:
         lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
         for line in lines[-args.n :]:
             print(line)
+        return
+
+    if args.cmd == "quarantine-deferred":
+        store = Store(config.state_db)
+        pending = store.count_by_status().get("deferred", 0)
+        if args.dry_run:
+            print(
+                json.dumps(
+                    {
+                        "dry_run": True,
+                        "deferred": pending,
+                        "before_received_at": args.before,
+                        "would_quarantine": pending if args.before is None else "filtered",
+                    },
+                    indent=2,
+                )
+            )
+            store.close()
+            return
+        n = store.quarantine_deferred(before_received_at=args.before)
+        after = store.count_by_status()
+        msg = (
+            f"quarantine-deferred: moved {n} deferred → dropped "
+            f"(reason=historical-backlog-pre-m3; before={args.before})"
+        )
+        print(msg, file=sys.stderr)
+        print(
+            json.dumps(
+                {
+                    "quarantined": n,
+                    "before_received_at": args.before,
+                    "deliveries_by_status": after,
+                    "at": int(time.time()),
+                },
+                indent=2,
+            )
+        )
+        # Also append to agentd.log if present so host verification is greppable
+        log_path = agentd_root() / "logs" / "agentd.log"
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with log_path.open("a", encoding="utf-8") as f:
+                f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} INFO agentctl {msg}\n")
+        except OSError:
+            pass
+        store.close()
         return
 
     parser.error(f"unknown {args.cmd}")

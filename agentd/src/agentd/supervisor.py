@@ -231,6 +231,15 @@ class SessionSupervisor:
             except Exception:
                 log.warning("existing session unreachable; recreating %s", session_key)
 
+        # §6.6 admission: never exceed max HOT containers (any code path).
+        hot = self.store.count_hot_sessions()
+        cap = self.config.max_hot_containers
+        if hot >= cap:
+            raise RuntimeError(
+                f"max_hot_containers={cap} reached (hot={hot}); refusing new session "
+                f"{session_key}"
+            )
+
         # Fail closed before any container work if PATs are missing (ADR-11 / B1).
         tokens = self._load_tokens()
 

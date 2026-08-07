@@ -31,6 +31,7 @@ host:
   listen: 127.0.0.1:8787
   disk_floor_gb: 15
   disk_resume_gb: 20
+  max_hot_containers: 4
   owner: huozhe
 
 gateway:
