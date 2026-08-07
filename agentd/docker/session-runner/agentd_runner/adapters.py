@@ -143,8 +143,9 @@ def _run_claude(prompt: str, cwd: Path, env: dict[str, str], deadline_s: int) ->
 
 def _run_grok(prompt: str, cwd: Path, env: dict[str, str], deadline_s: int) -> dict[str, Any]:
     binary = shutil.which("grok") or env.get("GROK_BIN") or "grok"
-    # Headless: non-interactive prompt as positional; --always-approve for tools
-    cmd = [binary, "--always-approve", "--cwd", str(cwd), prompt]
+    # Headless single-turn: -p/--single (positional prompt opens the TUI and
+    # fails with ENXIO when there is no controlling terminal — #24 B1).
+    cmd = [binary, "-p", prompt, "--always-approve", "--cwd", str(cwd)]
     try:
         proc = subprocess.run(
             cmd,

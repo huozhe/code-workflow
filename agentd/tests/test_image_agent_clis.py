@@ -1,7 +1,8 @@
-"""#23: session-runner image ships pinned claude + grok on PATH for role UIDs."""
+"""#23: session-runner image ships pinned claude + grok; adapters are runnable."""
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -10,6 +11,10 @@ import pytest
 from agentd.supervisor import IMAGE
 
 _RUNNER_ROOT = Path(__file__).resolve().parents[1] / "docker" / "session-runner"
+
+# Expected pins — must match Dockerfile ARG / LABEL (single source in image).
+_EXPECTED_CLAUDE = "2.1.224"
+_EXPECTED_GROK = "1.0.0"
 
 
 def _docker_ok() -> bool:
@@ -23,29 +28,26 @@ def _docker_ok() -> bool:
 pytestmark = pytest.mark.skipif(not _docker_ok(), reason="docker not available")
 
 
-@pytest.fixture(scope="module")
-def built_image() -> str:
-    """Build session-runner; may take several minutes (git + CLI installs)."""
+def _image_labels(image: str) -> dict[str, str]:
     r = subprocess.run(
-        [
-            "docker",
-            "build",
-            "-t",
-            IMAGE,
-            "-f",
-            str(_RUNNER_ROOT / "Dockerfile"),
-            str(_RUNNER_ROOT),
-        ],
+        ["docker", "inspect", image, "--format", "{{json .Config.Labels}}"],
         capture_output=True,
         text=True,
+        check=True,
     )
-    if r.returncode != 0:
-        pytest.skip(f"image build failed: {r.stderr[-1500:]}")
-    return IMAGE
+    data = json.loads(r.stdout or "{}") or {}
+    return {str(k): str(v) for k, v in data.items()}
 
 
-def test_clis_on_path_as_role_uids(built_image: str) -> None:
+def test_image_labels_match_pins(session_runner_image: str) -> None:
+    labels = _image_labels(session_runner_image)
+    assert labels.get("agentd.claude_code_version") == _EXPECTED_CLAUDE, labels
+    assert labels.get("agentd.grok_cli_version") == _EXPECTED_GROK, labels
+
+
+def test_clis_on_path_as_role_uids(session_runner_image: str) -> None:
     """Exit condition #1: claude and grok resolve as 1001 and 1002 (not only root)."""
+    labels = _image_labels(session_runner_image)
     for uid in ("1001:1001", "1002:1002"):
         r = subprocess.run(
             [
@@ -54,9 +56,9 @@ def test_clis_on_path_as_role_uids(built_image: str) -> None:
                 "--rm",
                 "--entrypoint",
                 "bash",
-                "-u",
+                "--user",
                 uid,
-                built_image,
+                session_runner_image,
                 "-c",
                 "command -v claude && command -v grok && claude --version && grok --version",
             ],
@@ -65,54 +67,103 @@ def test_clis_on_path_as_role_uids(built_image: str) -> None:
             timeout=60,
         )
         assert r.returncode == 0, f"uid={uid} stderr={r.stderr!r} out={r.stdout!r}"
-        assert "2.1.224" in r.stdout, r.stdout
-        assert "1.0.0" in r.stdout or "1.0.0" in r.stderr, r.stdout + r.stderr
-        # Must not be "CLI not found"
-        assert "not found" not in r.stdout.lower()
-        assert "not found" not in r.stderr.lower()
+        assert labels["agentd.claude_code_version"] in r.stdout, r.stdout
+        assert labels["agentd.grok_cli_version"] in (r.stdout + r.stderr), r.stdout + r.stderr
 
 
-def test_vendor_adapter_not_cli_missing_as_role_uid(built_image: str) -> None:
-    """Exit condition #2: vendor adapter runs inside image as role UID.
+def test_run_adapter_grok_uses_headless_not_tui(session_runner_image: str) -> None:
+    """#24 B1: production adapter path must use -p/--single, not positional TUI.
 
-    Without real subscription auth the CLI may exit non-zero (login required).
-    That still proves the binary is on PATH and executable after setuid-equivalent
-    ``-u 1001``. Evidence boundary: failure must not be 'CLI not found in PATH'.
+    Invokes agentd_runner.adapters.run_adapter inside the image as role UID.
+    Without auth, exit may be non-zero — but must not be ENXIO / TTY / CLI missing.
     """
-    # Invoke adapters.py path: which + one-shot -p (same binary adapters use)
     script = r"""
-set -e
-export PATH=/usr/local/bin:/usr/bin:/bin
-python3 - <<'PY'
-import shutil, subprocess, os
+import json, os, sys
+sys.path.insert(0, "/opt/agentd-runner")
 from pathlib import Path
-assert shutil.which("claude"), "claude CLI not found in PATH"
-assert shutil.which("grok"), "grok CLI not found in PATH"
-# Claude: smallest non-interactive invoke (will fail auth without token — OK)
-r = subprocess.run(
-    ["claude", "-p", "Reply with exactly: SMOKE", "--output-format", "text",
-     "--dangerously-skip-permissions"],
-    capture_output=True, text=True, timeout=60,
-    env={**os.environ, "HOME": "/tmp/home-arch", "CLAUDE_CODE_OAUTH_TOKEN": "invalid"},
+from agentd_runner.adapters import run_adapter
+
+home = Path("/tmp/home-dev")
+home.mkdir(parents=True, exist_ok=True)
+cwd = Path("/tmp/work")
+cwd.mkdir(parents=True, exist_ok=True)
+env = {
+    **os.environ,
+    "HOME": str(home),
+    "PATH": "/usr/local/bin:/usr/bin:/bin",
+}
+result = run_adapter(
+    adapter="grok-cli",
+    role="developer",
+    prompt="Reply with exactly: GROK_HEADLESS",
+    cwd=cwd,
+    env=env,
+    deadline_s=45,
 )
-out = (r.stdout or "") + (r.stderr or "")
-print("claude_exit", r.returncode)
-print("claude_out_head", out[:500])
-assert "CLI not found" not in out
-assert "not found in PATH" not in out
-# Grok similarly
-r2 = subprocess.run(
-    ["grok", "-p", "Reply with exactly: SMOKE", "--always-approve"],
-    capture_output=True, text=True, timeout=60,
-    env={**os.environ, "HOME": "/tmp/home-dev"},
+print(json.dumps(result))
+summary = str(result.get("summary") or "")
+# Broken positional TUI path:
+assert "No such device or address" not in summary, summary
+assert "os error 6" not in summary.lower(), summary
+assert "CLI not found" not in summary, summary
+assert "not found in PATH" not in summary, summary
+# Headless path reaches auth or model (either is fine for this PR):
+print("GROK_ADAPTER_OK")
+"""
+    r = subprocess.run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--user",
+            "1002:1002",
+            "--entrypoint",
+            "python3",
+            session_runner_image,
+            "-c",
+            script,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    combined = r.stdout + r.stderr
+    assert "GROK_ADAPTER_OK" in combined, combined[-2500:]
+    assert "No such device or address" not in combined
+    assert "CLI not found" not in combined
+
+
+def test_run_adapter_claude_not_cli_missing(session_runner_image: str) -> None:
+    """Vendor claude adapter reachable as role UID (auth may fail without token)."""
+    script = r"""
+import json, os, sys
+sys.path.insert(0, "/opt/agentd-runner")
+from pathlib import Path
+from agentd_runner.adapters import run_adapter
+
+home = Path("/tmp/home-arch")
+home.mkdir(parents=True, exist_ok=True)
+cwd = Path("/tmp/work")
+cwd.mkdir(parents=True, exist_ok=True)
+env = {
+    **os.environ,
+    "HOME": str(home),
+    "PATH": "/usr/local/bin:/usr/bin:/bin",
+    "CLAUDE_CODE_OAUTH_TOKEN": "invalid-for-path-test",
+}
+result = run_adapter(
+    adapter="claude-code",
+    role="architect",
+    prompt="Reply with exactly: CLAUDE_HEADLESS",
+    cwd=cwd,
+    env=env,
+    deadline_s=45,
 )
-out2 = (r2.stdout or "") + (r2.stderr or "")
-print("grok_exit", r2.returncode)
-print("grok_out_head", out2[:500])
-assert "CLI not found" not in out2
-assert "not found in PATH" not in out2
-print("ADAPTER_PATH_OK")
-PY
+print(json.dumps(result))
+summary = str(result.get("summary") or "")
+assert "CLI not found" not in summary, summary
+assert "not found in PATH" not in summary, summary
+print("CLAUDE_ADAPTER_OK")
 """
     r = subprocess.run(
         [
@@ -122,20 +173,14 @@ PY
             "--user",
             "1001:1001",
             "--entrypoint",
-            "bash",
-            built_image,
+            "python3",
+            session_runner_image,
             "-c",
-            "mkdir -p /tmp/home-arch /tmp/home-dev && " + script,
+            script,
         ],
         capture_output=True,
         text=True,
-        timeout=180,
+        timeout=120,
     )
-    # Script may fail if claude refuses --dangerously-skip-permissions for non-root
-    # without other flags; still require ADAPTER_PATH_OK or explicit PATH success.
     combined = r.stdout + r.stderr
-    assert "ADAPTER_PATH_OK" in combined or (
-        r.returncode == 0 and "claude CLI not found" not in combined
-    ), combined[-2000:]
-    assert "claude CLI not found" not in combined
-    assert "grok CLI not found" not in combined
+    assert "CLAUDE_ADAPTER_OK" in combined, combined[-2500:]

@@ -1,5 +1,5 @@
 # agentd/session-runner — §7.1
-# Build: docker build -t agentd/session-runner:1.0.0 -f docker/session-runner/Dockerfile .
+# Build: docker build -t agentd/session-runner:1.1.0 -f docker/session-runner/Dockerfile .
 FROM debian:bookworm-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -59,6 +59,9 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
 # Install as root into a system prefix so role UIDs (1001/1002) share PATH.
 ARG CLAUDE_CODE_VERSION=2.1.224
 ARG GROK_CLI_VERSION=1.0.0
+# Labels so tests can read pins from docker inspect (single source of truth).
+LABEL agentd.claude_code_version="${CLAUDE_CODE_VERSION}" \
+      agentd.grok_cli_version="${GROK_CLI_VERSION}"
 RUN set -eux; \
     export HOME=/root; \
     curl -fsSL https://claude.ai/install.sh | bash -s "${CLAUDE_CODE_VERSION}"; \
@@ -81,14 +84,17 @@ RUN set -eux; \
     else \
       echo "grok install failed: binary not found" >&2; exit 1; \
     fi; \
-    # Pin assertions (must match ARG pins)
+    # Drop installer caches (~400 MB second copy of the same binaries).
+    rm -rf /root/.local /root/.claude /root/.grok; \
+    # Pin assertions (literal match — dots are not regex wildcards)
     claude --version | tee /tmp/claude-ver.txt; \
-    grep -F "${CLAUDE_CODE_VERSION}" /tmp/claude-ver.txt; \
+    grep -Fq "${CLAUDE_CODE_VERSION}" /tmp/claude-ver.txt; \
     grok --version | tee /tmp/grok-ver.txt; \
-    grep -E "${GROK_CLI_VERSION}" /tmp/grok-ver.txt; \
+    grep -Fq "${GROK_CLI_VERSION}" /tmp/grok-ver.txt; \
     # Role UIDs must resolve the same PATH entries (turns run after setuid)
     su -s /bin/bash uid_architect -c 'command -v claude && command -v grok && claude --version && grok --version'; \
     su -s /bin/bash uid_developer -c 'command -v claude && command -v grok && claude --version && grok --version'
+
 # Root-owned dir for host-injected RPC bearer (docker create → docker cp → start).
 RUN mkdir -p /etc/agentd && chmod 0755 /etc/agentd
 
@@ -97,7 +103,7 @@ COPY agentd_runner/ /opt/agentd-runner/agentd_runner/
 COPY entrypoint.sh /opt/agentd-runner/entrypoint.sh
 RUN chmod 0755 /opt/agentd-runner/entrypoint.sh
 ENV PYTHONPATH=/opt/agentd-runner
-ENV PATH=/usr/local/bin:/usr/bin:/bin
+# Default PATH from debian includes sbin; keep it (no need to narrow for agents).
 # 0.0.0.0 required for Docker port publish to the host; agents inside the
 # container can also reach it — auth is the bearer on a root-only path.
 ENV AGENTD_RPC_HOST=0.0.0.0
@@ -111,7 +117,6 @@ RUN find / -xdev \( -perm -4000 -o -perm -2000 \) -type f -print -delete 2>/dev/
     && ! find / -xdev \( -perm -4000 -o -perm -2000 \) -type f 2>/dev/null | grep -q . \
     && command -v claude && command -v grok \
     && claude --version && grok --version
-
 # Runner is PID 1 as root; never runs agent tool code as root (§7.3)
 EXPOSE 7000
 ENTRYPOINT ["/opt/agentd-runner/entrypoint.sh"]
