@@ -467,7 +467,7 @@ docker run -d \
   -v ~/.agentd/repos:/srv/agentd/repos \
   -v ~/.agentd/sessions/huozhe__code-workflow__42:/srv/agentd/sessions/huozhe__code-workflow__42 \
   -e AGENTD_SESSION_DIR=/srv/agentd/sessions/huozhe__code-workflow__42 \
-  agentd/session-runner:1.0.0
+  agentd/session-runner:1.1.0
 ```
 
 Non-obvious choices:
