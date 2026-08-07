@@ -147,9 +147,10 @@ def exec_turn_as_role(params: dict[str, Any]) -> dict[str, Any]:
         if token_file.is_file():
             env["GH_TOKEN"] = token_file.read_text(encoding="utf-8").strip()
             env["GITHUB_TOKEN"] = env["GH_TOKEN"]
-        # Claude subscription long-lived token (#19) — pass through if host injected.
-        if os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
-            env["CLAUDE_CODE_OAUTH_TOKEN"] = os.environ["CLAUDE_CODE_OAUTH_TOKEN"]
+        # Claude subscription token from control-channel tmpfs (#21 R1) — never Env.
+        oauth_file = Path(f"/run/agent/{role}/claude_oauth_token")
+        if oauth_file.is_file():
+            env["CLAUDE_CODE_OAUTH_TOKEN"] = oauth_file.read_text(encoding="utf-8").strip()
         cwd = Path(str((params.get("context") or {}).get("worktree") or paths["base"]))
         if not cwd.is_dir():
             cwd = paths["base"]

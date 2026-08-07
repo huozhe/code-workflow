@@ -83,16 +83,82 @@ def assert_no_docker_sock_mount(container_id: str) -> None:
             )
 
 
-def assert_bearer_not_in_inspect_env(container_id: str) -> None:
-    """§5.2: no token material in docker inspect Env."""
+# Env keys allowed on the container (allowlist — never put secrets here).
+_INSPECT_ENV_ALLOWLIST = frozenset(
+    {
+        "PATH",
+        "HOSTNAME",
+        "HOME",
+        "TERM",
+        "LANG",
+        "LC_ALL",
+        "DEBIAN_FRONTEND",
+        "AGENTD_RPC_HOST",
+        "AGENTD_RPC_PORT",
+        "AGENTD_HOST_ROOT",
+        "AGENTD_PROJECT_ROOT",
+        "AGENTD_SESSION_DIR",
+        "AGENTD_GITHUB_API_BASE",  # test-only stub
+        "AGENTD_ADAPTER",  # test/mock adapter name
+    }
+)
+
+
+def assert_no_secrets_in_inspect_env(container_id: str) -> None:
+    """§5.2 / #11 R1 / #21 R1: no credential material in docker inspect Env.
+
+    Allowlist of expected non-secret keys. Denylist-by-one-name is how the
+    Claude oauth token slipped past the old bearer-only check.
+    """
     r = _docker("inspect", container_id, "--format", "{{json .Config.Env}}")
     env_list = json.loads(r.stdout or "[]")
+    forbidden: list[str] = []
     for entry in env_list:
-        if str(entry).startswith("AGENTD_RUNNER_BEARER="):
-            raise RuntimeError(
-                f"FORBIDDEN: RPC bearer present in docker inspect Env on {container_id}"
+        s = str(entry)
+        key = s.split("=", 1)[0] if "=" in s else s
+        # Docker / image noise: skip empty and well-known non-secret prefixes
+        if key in _INSPECT_ENV_ALLOWLIST:
+            continue
+        if key.startswith("GPG_") or key in ("PWD", "SHLVL", "_"):
+            continue
+        # Anything else is unexpected — secrets must never appear as keys either.
+        lower = key.lower()
+        # Substring match — avoid short stems like "pat" (false-positives PATH).
+        if any(
+            part in lower
+            for part in (
+                "token",
+                "secret",
+                "password",
+                "bearer",
+                "credential",
+                "api_key",
+                "apikey",
+                "oauth",
             )
+        ):
+            forbidden.append(key)
+            continue
+        if key in (
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "XAI_API_KEY",
+            "AGENTD_RUNNER_BEARER",
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
+        ):
+            forbidden.append(key)
+        # Image may inject non-secret keys (PYTHONPATH, etc.) — leave those alone.
+    if forbidden:
+        raise RuntimeError(
+            f"FORBIDDEN: secret or credential-shaped env in docker inspect on "
+            f"{container_id}: {sorted(set(forbidden))}"
+        )
 
+
+# Back-compat name used by tests
+assert_bearer_not_in_inspect_env = assert_no_secrets_in_inspect_env
 
 def _host_port_from_inspect(container_id: str) -> int:
     """Resolve published host port (retry — OrbStack can lag right after start)."""
@@ -299,10 +365,7 @@ class SessionSupervisor:
             # Issue-scoped role dirs still used for context/scratch; HOME is durable.
             "AGENTD_SESSION_DIR": f"/srv/agentd/sessions/{int(issue_num)}",
         }
-        # Claude subscription long-lived token (#19) — env inject, not file copy.
-        oauth = get_password("claude-oauth-token")
-        if oauth:
-            env["CLAUDE_CODE_OAUTH_TOKEN"] = oauth
+        # Model credentials go over session.init → tmpfs (#21 R1), never -e.
         if github_api_base:
             env["AGENTD_GITHUB_API_BASE"] = github_api_base
 
@@ -384,6 +447,8 @@ class SessionSupervisor:
                     "project_key": project_key,
                     "roles": {"architect": architect, "developer": developer},
                     "tokens": tokens,
+                    # Model creds over control channel → tmpfs (#21 R1), never Env.
+                    "model_credentials": self._load_model_credentials(),
                 },
             )
             ping = cli.call("health.ping")
@@ -475,6 +540,7 @@ class SessionSupervisor:
                         "developer": row["developer"],
                     },
                     "tokens": tokens,
+                    "model_credentials": self._load_model_credentials(),
                 },
             )
             cli.call("health.ping")
@@ -573,6 +639,16 @@ class SessionSupervisor:
             )
         return {"architect": claude, "developer": grok}
 
+    def _load_model_credentials(self) -> dict[str, str]:
+        """Subscription model credentials (optional at create; empty if unset).
+
+        Delivered via session.init → container tmpfs, never docker Env (§5.2).
+        """
+        out: dict[str, str] = {}
+        oauth = get_password("claude-oauth-token")
+        if oauth:
+            out["claude_oauth_token"] = oauth
+        return out
     def _wait_rpc(self, port: int, bearer: str, timeout_s: float) -> None:
         deadline = time.time() + timeout_s
         last: Exception | None = None

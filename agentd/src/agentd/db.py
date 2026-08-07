@@ -147,14 +147,18 @@ class Store:
         return int(row[0]) if row else 0
 
     def _apply_schema(self) -> None:
-        """Create/migrate schema. ADR-2: mismatch ⇒ destructive rebuild."""
+        """Create/migrate schema.
+
+        Prefer incremental migrations that preserve the deliveries ledger
+        (§12.3 idempotency). Destructive rebuild only when no path exists
+        (ADR-2 worst case) — and the log must not claim a Reconciler that
+        is not implemented yet (M6).
+        """
         ver = self._schema_version()
         if ver == SCHEMA_VERSION:
-            # Still run IF NOT EXISTS so a partially-created file heals.
             self._conn.executescript(SCHEMA)
             return
         if ver == 0:
-            # Fresh DB or pre-version M0 file: CREATE IF NOT EXISTS keeps rows.
             self._conn.executescript(SCHEMA)
             self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             log.info("schema stamped user_version=%s", SCHEMA_VERSION)
@@ -164,14 +168,117 @@ class Store:
                 f"state.db user_version={ver} is newer than agentd "
                 f"SCHEMA_VERSION={SCHEMA_VERSION}; upgrade the binary"
             )
-        # ver < SCHEMA_VERSION and ver != 0: destructive rebuild (ADR-2).
+        if ver == 1 and SCHEMA_VERSION == 2:
+            self._migrate_v1_to_v2()
+            return
         log.warning(
-            "schema user_version=%s < SCHEMA_VERSION=%s; rebuilding derived "
-            "cache (ADR-2). Deliveries re-sync from GitHub via Reconciler.",
+            "schema user_version=%s < SCHEMA_VERSION=%s; no incremental "
+            "migration path — rebuilding state tables (ADR-2 worst case). "
+            "Deliveries/idempotency ledger will be wiped; re-ingest is "
+            "manual (Reconciler is not implemented until M6).",
             ver,
             SCHEMA_VERSION,
         )
         self._rebuild_schema()
+
+    def _table_columns(self, table: str) -> list[str]:
+        rows = self._conn.execute(f'PRAGMA table_info("{table}")').fetchall()
+        return [str(r[1]) for r in rows]
+
+    def _migrate_v1_to_v2(self) -> None:
+        """Additive #20 migration: sessions.project_key; runners keyed by project.
+
+        Preserves deliveries (and other tables). Runners rows are rewritten;
+        multiple session-level runners for the same project collapse to one
+        (last-write wins).
+        """
+        log.info("migrating schema v1 → v2 (preserve deliveries ledger)")
+        # sessions.project_key
+        sess_cols = self._table_columns("sessions")
+        if sess_cols and "project_key" not in sess_cols:
+            self._conn.execute(
+                "ALTER TABLE sessions ADD COLUMN project_key TEXT NOT NULL DEFAULT ''"
+            )
+        if sess_cols or "sessions" in {
+            r[0]
+            for r in self._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }:
+            self._conn.execute(
+                """
+                UPDATE sessions
+                SET project_key = repo
+                WHERE project_key = '' OR project_key IS NULL
+                """
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_sessions_project ON sessions(project_key)"
+            )
+
+        # runners: session_key PK → project_key PK
+        runner_cols = self._table_columns("runners")
+        if "session_key" in runner_cols and "project_key" not in runner_cols:
+            self._conn.execute("ALTER TABLE runners RENAME TO runners_v1")
+            self._conn.execute(
+                """
+                CREATE TABLE runners (
+                  project_key TEXT PRIMARY KEY,
+                  container_id TEXT,
+                  endpoint TEXT,
+                  token TEXT,
+                  tier TEXT NOT NULL,
+                  last_seen_at INTEGER
+                )
+                """
+            )
+            rows = self._conn.execute(
+                """
+                SELECT r.session_key, r.container_id, r.endpoint, r.token,
+                       r.tier, r.last_seen_at, s.repo
+                FROM runners_v1 r
+                LEFT JOIN sessions s ON s.session_key = r.session_key
+                """
+            ).fetchall()
+            for row in rows:
+                sk = str(row[0] or "")
+                repo = str(row[6] or "")
+                if repo:
+                    pk = repo
+                elif "#" in sk:
+                    pk = sk.partition("#")[0]
+                else:
+                    pk = sk
+                if not pk:
+                    continue
+                self._conn.execute(
+                    """
+                    INSERT INTO runners(
+                      project_key, container_id, endpoint, token, tier, last_seen_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(project_key) DO UPDATE SET
+                      container_id = excluded.container_id,
+                      endpoint = excluded.endpoint,
+                      token = excluded.token,
+                      tier = excluded.tier,
+                      last_seen_at = excluded.last_seen_at
+                    """,
+                    (
+                        pk,
+                        row[1],
+                        row[2],
+                        row[3],
+                        row[4] or "cold",
+                        row[5],
+                    ),
+                )
+            self._conn.execute("DROP TABLE runners_v1")
+
+        # Ensure full schema objects exist (IF NOT EXISTS).
+        self._conn.executescript(SCHEMA)
+        self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        self._conn.commit()
+        log.info("schema migration v1 → v2 complete; user_version=%s", SCHEMA_VERSION)
 
     def _rebuild_schema(self) -> None:
         tables = self._conn.execute(

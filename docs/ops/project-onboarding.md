@@ -23,7 +23,8 @@ Host `state.db` / `config.yaml` stay at `~/.agentd/` and are **never** mounted i
    ```bash
    security add-generic-password -s agentd -a claude-oauth-token -w -U
    ```
-3. agentd injects `CLAUDE_CODE_OAUTH_TOKEN` into the project container at create time.
+3. agentd delivers the token over `session.init` → container tmpfs (not `docker
+   inspect` Env). The turn process sets `CLAUDE_CODE_OAUTH_TOKEN` from that file.
    Do **not** copy `~/.claude/.credentials.json` or Keychain interactive dumps.
 
 ## Grok (subscription, Option D)

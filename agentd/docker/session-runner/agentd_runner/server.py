@@ -49,20 +49,28 @@ class RunnerState:
 STATE = RunnerState()
 
 
-def write_role_token(role: str, token: str) -> Path:
-    """Write token to container-internal tmpfs at 0400 owned by role UID.
+def write_role_secret(role: str, name: str, value: str) -> Path:
+    """Write a secret file under /run/agent/<role>/ at 0400 owned by role UID.
 
-    Order matters under ``--cap-drop ALL`` (no CAP_DAC_OVERRIDE): write while
-    the directory is still root-owned, then chown/chmod. Chowning the dir to
-    0700 first makes root unable to create the file.
+    Order matters under ``--cap-drop ALL`` (no CAP_DAC_OVERRIDE): the role
+    dir must be root-owned and writable when creating the file. If a prior
+    secret already set the dir to role 0700, re-open it as root first.
     """
     if role not in ROLE_UIDS:
         raise ValueError(f"unknown role {role}")
+    if not name or "/" in name or name in (".", ".."):
+        raise ValueError(f"invalid secret name {name!r}")
     uid = ROLE_UIDS[role]
     role_dir = TOKEN_ROOT / role
     role_dir.mkdir(parents=True, exist_ok=True)
-    path = role_dir / "token"
-    path.write_text(token, encoding="utf-8")
+    try:
+        # Reclaim dir so a second secret can be written after the first chown.
+        os.chown(role_dir, 0, 0)
+        os.chmod(role_dir, 0o755)
+    except OSError:
+        pass
+    path = role_dir / name
+    path.write_text(value, encoding="utf-8")
     try:
         os.chown(path, uid, uid)
         os.chmod(path, 0o400)
@@ -72,13 +80,17 @@ def write_role_token(role: str, token: str) -> Path:
         if os.geteuid() == 0:
             raise
         # Unprivileged test host: leave file owned by current euid.
-        log.warning("chown token for %s failed on euid=%s: %s", role, os.geteuid(), exc)
+        log.warning("chown secret %s for %s failed on euid=%s: %s", name, role, os.geteuid(), exc)
         try:
             os.chmod(path, 0o600)
             os.chmod(role_dir, 0o700)
         except OSError:
             pass
     return path
+
+def write_role_token(role: str, token: str) -> Path:
+    """Write GitHub PAT to container-internal tmpfs at 0400 owned by role UID."""
+    return write_role_secret(role, "token", token)
 
 
 def _run_as_role(uid: int, fn_name: str, paths: list[str]) -> int:
@@ -275,19 +287,27 @@ def handle_request(req: dict[str, Any], authed: bool) -> dict[str, Any]:
         session_key = str(params.get("session_key") or STATE.session_key or "")
         roles = params.get("roles") or {}
         tokens = params.get("tokens") or {}
+        model_creds = params.get("model_credentials") or {}
         if not isinstance(roles, dict) or not isinstance(tokens, dict):
             return err(-32602, "roles and tokens must be objects")
+        if not isinstance(model_creds, dict):
+            return err(-32602, "model_credentials must be an object")
         STATE.session_key = session_key
         STATE.roles = {str(k): str(v) for k, v in roles.items()}
 
-        # Layout + tokens on tmpfs only
+        # Layout + GitHub PATs + model credentials on tmpfs only (§5.2 / #21 R1)
         for role in ROLE_UIDS:
             ensure_role_layout(role)
         for role, pat in tokens.items():
             if role in ROLE_UIDS and pat:
                 write_role_token(str(role), str(pat))
+        # Claude oauth: per-role copy so either adapter can read without Env.
+        claude_oauth = str(model_creds.get("claude_oauth_token") or "").strip()
+        if claude_oauth:
+            for role in ROLE_UIDS:
+                write_role_secret(role, "claude_oauth_token", claude_oauth)
 
-        # ADR-11 identity preflight before any turn
+        # ADR-11 identity preflight before any turn (GitHub PATs only)
         mismatches = identity_preflight(
             {str(k): str(v) for k, v in tokens.items()},
             STATE.roles,
@@ -319,10 +339,12 @@ def handle_request(req: dict[str, Any], authed: bool) -> dict[str, Any]:
         )
 
     if method == "session.teardown":
-        # Best-effort: wipe tokens from tmpfs
+        # Best-effort: wipe secrets from tmpfs
         for role in ROLE_UIDS:
-            p = TOKEN_ROOT / role / "token"
-            if p.exists():
+            role_dir = TOKEN_ROOT / role
+            if not role_dir.is_dir():
+                continue
+            for p in role_dir.iterdir():
                 try:
                     p.unlink()
                 except OSError:
