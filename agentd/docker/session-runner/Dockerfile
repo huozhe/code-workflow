@@ -40,12 +40,11 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && rm -rf /var/lib/apt/lists/* \
     && node --version && npm --version
 
-# Role UIDs per §7.1; strip setuid/setgid from the image rootfs
+# Role UIDs per §7.1 (setuid sweep runs last — after all install layers)
 RUN groupadd -g 1001 uid_architect \
     && useradd -u 1001 -g 1001 -m -d /home/uid_architect -s /bin/bash uid_architect \
     && groupadd -g 1002 uid_developer \
-    && useradd -u 1002 -g 1002 -m -d /home/uid_developer -s /bin/bash uid_developer \
-    && find / -xdev \( -perm -4000 -o -perm -2000 \) -type f -print -delete 2>/dev/null || true
+    && useradd -u 1002 -g 1002 -m -d /home/uid_developer -s /bin/bash uid_developer
 
 # gh CLI
 RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
@@ -56,6 +55,40 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
     && rm -rf /var/lib/apt/lists/* \
     || echo "gh install skipped"
 
+# Agent CLIs (§7.1 / #23) — Linux binaries, versions pinned (#19 exercised these).
+# Install as root into a system prefix so role UIDs (1001/1002) share PATH.
+ARG CLAUDE_CODE_VERSION=2.1.224
+ARG GROK_CLI_VERSION=1.0.0
+RUN set -eux; \
+    export HOME=/root; \
+    curl -fsSL https://claude.ai/install.sh | bash -s "${CLAUDE_CODE_VERSION}"; \
+    # Native installer lands under ~/.local; promote to /usr/local for all UIDs.
+    install -d /usr/local/lib/claude /usr/local/bin; \
+    if [ -L /root/.local/bin/claude ] || [ -f /root/.local/bin/claude ]; then \
+      CLAUDE_REAL=$(readlink -f /root/.local/bin/claude); \
+      install -m 0755 "${CLAUDE_REAL}" /usr/local/lib/claude/claude; \
+      ln -sfn /usr/local/lib/claude/claude /usr/local/bin/claude; \
+    else \
+      echo "claude install failed: binary not found" >&2; exit 1; \
+    fi; \
+    curl -fsSL https://x.ai/cli/install.sh | bash -s "${GROK_CLI_VERSION}"; \
+    if [ -L /root/.grok/bin/grok ] || [ -f /root/.grok/bin/grok ]; then \
+      GROK_REAL=$(readlink -f /root/.grok/bin/grok); \
+      install -m 0755 "${GROK_REAL}" /usr/local/bin/grok; \
+    elif [ -f /root/.local/bin/grok ]; then \
+      GROK_REAL=$(readlink -f /root/.local/bin/grok); \
+      install -m 0755 "${GROK_REAL}" /usr/local/bin/grok; \
+    else \
+      echo "grok install failed: binary not found" >&2; exit 1; \
+    fi; \
+    # Pin assertions (must match ARG pins)
+    claude --version | tee /tmp/claude-ver.txt; \
+    grep -F "${CLAUDE_CODE_VERSION}" /tmp/claude-ver.txt; \
+    grok --version | tee /tmp/grok-ver.txt; \
+    grep -E "${GROK_CLI_VERSION}" /tmp/grok-ver.txt; \
+    # Role UIDs must resolve the same PATH entries (turns run after setuid)
+    su -s /bin/bash uid_architect -c 'command -v claude && command -v grok && claude --version && grok --version'; \
+    su -s /bin/bash uid_developer -c 'command -v claude && command -v grok && claude --version && grok --version'
 # Root-owned dir for host-injected RPC bearer (docker create → docker cp → start).
 RUN mkdir -p /etc/agentd && chmod 0755 /etc/agentd
 
@@ -64,12 +97,20 @@ COPY agentd_runner/ /opt/agentd-runner/agentd_runner/
 COPY entrypoint.sh /opt/agentd-runner/entrypoint.sh
 RUN chmod 0755 /opt/agentd-runner/entrypoint.sh
 ENV PYTHONPATH=/opt/agentd-runner
+ENV PATH=/usr/local/bin:/usr/bin:/bin
 # 0.0.0.0 required for Docker port publish to the host; agents inside the
 # container can also reach it — auth is the bearer on a root-only path.
 ENV AGENTD_RPC_HOST=0.0.0.0
 ENV AGENTD_RPC_PORT=7000
-# Host mounts ~/.agentd at this path so repos/ and sessions/ keep topology (§6.4).
+# Host mounts project tree at this path (§6.2 / #20).
 ENV AGENTD_HOST_ROOT=/srv/agentd
+
+# Final layer: strip setuid/setgid from the full image rootfs (§7.1 NO setuid).
+# Must run after every package/CLI install so nothing reintroduces bits.
+RUN find / -xdev \( -perm -4000 -o -perm -2000 \) -type f -print -delete 2>/dev/null || true \
+    && ! find / -xdev \( -perm -4000 -o -perm -2000 \) -type f 2>/dev/null | grep -q . \
+    && command -v claude && command -v grok \
+    && claude --version && grok --version
 
 # Runner is PID 1 as root; never runs agent tool code as root (§7.3)
 EXPOSE 7000

@@ -29,7 +29,7 @@ from agentd.rpc_client import RunnerClient
 
 log = logging.getLogger("agentd.supervisor")
 
-IMAGE = "agentd/session-runner:1.0.0"
+IMAGE = "agentd/session-runner:1.1.0"
 RPC_CONTAINER_PORT = 7000
 # Container-local rootfs path (docker cp after create). Not bind mount, not Env.
 BEARER_IN_CONTAINER = "/etc/agentd/rpc.bearer"
