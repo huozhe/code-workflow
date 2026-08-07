@@ -1,13 +1,17 @@
-"""Dispatcher skeleton — drain queued deliveries (M1: intake + status only)."""
+"""Dispatcher — intake gate + design-loop drain (M1/M3)."""
 
 from __future__ import annotations
 
 import logging
 import threading
+from typing import TYPE_CHECKING
 
 from agentd.config import Config
 from agentd.db import Store, decompress_payload
 from agentd.intake import evaluate_intake
+
+if TYPE_CHECKING:
+    from agentd.design_loop import DesignLoop
 
 log = logging.getLogger("agentd.dispatcher")
 
@@ -15,8 +19,8 @@ log = logging.getLogger("agentd.dispatcher")
 class Dispatcher:
     """Scan ``status='queued'``; pause when the disk breaker is open.
 
-    Unhandled events become ``deferred`` (not ``routed``). ``routed`` is
-    reserved for hand-off to a real session (M2+). See §15.1 M1 amendment.
+    Unhandled events become ``deferred`` (not ``routed``). ``routed`` means
+    handed to a sessions row (M3 design loop). See §15.1.
     """
 
     def __init__(
@@ -26,11 +30,13 @@ class Dispatcher:
         nudge: threading.Event,
         *,
         idle_wait_s: float = 5.0,
+        design_loop: DesignLoop | None = None,
     ) -> None:
         self.store = store
         self.config = config
         self.nudge = nudge
         self.idle_wait_s = idle_wait_s
+        self.design_loop = design_loop
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -61,6 +67,12 @@ class Dispatcher:
                 break
             self._handle(row)
             n += 1
+        # M3: promote deferred deliveries into sessions / turns
+        if self.design_loop is not None and not self.store.is_disk_paused():
+            try:
+                n += self.design_loop.process_deferred_batch(limit=20)
+            except Exception:
+                log.exception("design_loop batch failed")
         return n
 
     def _loop(self) -> None:
