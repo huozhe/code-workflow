@@ -59,6 +59,10 @@ class Config:
         return float(self.raw.get("gateway", {}).get("governor_interval_s", 30))
 
     @property
+    def max_hot_containers(self) -> int:
+        return int(self.raw.get("host", {}).get("max_hot_containers", 4))
+
+    @property
     def state_db(self) -> Path:
         return self.root / "state.db"
 

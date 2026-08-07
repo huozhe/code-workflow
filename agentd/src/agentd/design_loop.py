@@ -14,6 +14,7 @@ from agentd.db import Store, decompress_payload
 from agentd.digest import build_digest, digest_to_markdown
 from agentd.fsm import transition
 from agentd.gitops import session_dir_name
+from agentd.intake import evaluate_intake
 from agentd.loop_safety import BudgetState, StallTracker, progress_fingerprint
 from agentd.routing import RouteAction, provenance_footer, route_for_recipient
 from agentd.rpc_client import RunnerClient
@@ -77,6 +78,17 @@ class DesignLoop:
 
         sess = self.store.get_session(session_key)
         if sess is None:
+            # §4.3: only an intake-passing *issues* event may create a session.
+            # issue_comment / PR / push on a non-session issue must not conjure one
+            # (#16 — deferred backlog must not spawn 9 containers).
+            if not self._may_create_session(event, action, raw):
+                self.store.set_delivery_status(delivery_id, "dropped")
+                log.info(
+                    "drop id=%s: no session for %s and event is not intake-passing issues",
+                    delivery_id,
+                    session_key,
+                )
+                return
             if self.supervisor is None:
                 log.warning("no supervisor; cannot create session %s", session_key)
                 return
@@ -88,6 +100,18 @@ class DesignLoop:
                     architect_login=default_arch,
                     developer_login=default_dev,
                 )
+            except RuntimeError as e:
+                # Capacity refusal: leave deferred for retry when a HOT slot frees.
+                # Warning only — no traceback every ~5s drain cycle.
+                if "max_hot_containers" in str(e):
+                    log.warning(
+                        "ensure_session deferred (capacity): %s — %s",
+                        session_key,
+                        e,
+                    )
+                    return
+                log.exception("ensure_session failed %s", session_key)
+                return
             except Exception:
                 log.exception("ensure_session failed %s", session_key)
                 return
@@ -393,6 +417,18 @@ class DesignLoop:
             if sender.lower() == self.config.owner.lower():
                 return "owner_reply"
         return f"{event}.{action or 'none'}"
+
+    def _may_create_session(
+        self, event: str, action: str | None, payload: bytes
+    ) -> bool:
+        """True only for §4.3 intake-passing issues open/reopen/labeled."""
+        decision = evaluate_intake(
+            event=event,
+            action=action,
+            payload=payload,
+            config=self.config,
+        )
+        return decision is not None and decision.accepted
 
     def _pick_recipient(
         self,

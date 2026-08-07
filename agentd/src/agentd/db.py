@@ -442,6 +442,63 @@ class Store:
                 ).fetchall()
             )
 
+    def count_deferred(self, *, before_received_at: int | None = None) -> int:
+        """Count deferred deliveries (optional upper bound on received_at)."""
+        with self._lock:
+            if before_received_at is not None:
+                row = self._conn.execute(
+                    """
+                    SELECT COUNT(*) AS n FROM deliveries
+                    WHERE status = 'deferred' AND received_at < ?
+                    """,
+                    (before_received_at,),
+                ).fetchone()
+            else:
+                row = self._conn.execute(
+                    "SELECT COUNT(*) AS n FROM deliveries WHERE status = 'deferred'"
+                ).fetchone()
+            return int(row["n"]) if row else 0
+
+    def quarantine_deferred(
+        self,
+        *,
+        before_received_at: int | None = None,
+        reason: str = "quarantine",
+    ) -> int:
+        """Move deferred rows to terminal ``dropped`` (one-shot backlog purge).
+
+        Returns number of rows updated. ``before_received_at`` if set only
+        touches deliveries received strictly before that unix timestamp.
+        """
+        with self._lock:
+            if before_received_at is not None:
+                cur = self._conn.execute(
+                    """
+                    UPDATE deliveries
+                    SET status = 'dropped'
+                    WHERE status = 'deferred' AND received_at < ?
+                    """,
+                    (before_received_at,),
+                )
+            else:
+                cur = self._conn.execute(
+                    """
+                    UPDATE deliveries
+                    SET status = 'dropped'
+                    WHERE status = 'deferred'
+                    """
+                )
+            self._conn.commit()
+            n = int(cur.rowcount or 0)
+        return n
+
+    def count_hot_sessions(self) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM runners WHERE tier = 'hot'"
+            ).fetchone()
+            return int(row["n"]) if row else 0
+
     def insert_turn(
         self,
         *,
