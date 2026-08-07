@@ -71,12 +71,12 @@ class DesignLoop:
             return
 
         session_key = f"{repo}#{int(issue_num)}"
-        architect = self.config.agent_login("claude") or "huozheclaude"
-        developer = self.config.agent_login("grok") or "huozhegrok"
+        # Defaults until session row exists; after that session bindings win (§5.3)
+        default_arch = self.config.agent_login("claude") or "huozheclaude"
+        default_dev = self.config.agent_login("grok") or "huozhegrok"
 
         sess = self.store.get_session(session_key)
         if sess is None:
-            # Create session on first design-relevant delivery
             if self.supervisor is None:
                 log.warning("no supervisor; cannot create session %s", session_key)
                 return
@@ -85,8 +85,8 @@ class DesignLoop:
                     session_key=session_key,
                     repo=repo,
                     issue_num=int(issue_num),
-                    architect_login=architect,
-                    developer_login=developer,
+                    architect_login=default_arch,
+                    developer_login=default_dev,
                 )
             except Exception:
                 log.exception("ensure_session failed %s", session_key)
@@ -102,10 +102,14 @@ class DesignLoop:
         if not sess:
             return
 
+        architect = str(sess.get("architect") or default_arch)
+        developer = str(sess.get("developer") or default_dev)
+        role_logins = {"architect": architect, "developer": developer}
+        bot_logins = {architect, developer}
+
         state = str(sess.get("state") or "PLANNING")
         paused = state == "PAUSED_HUMAN" or bool(sess.get("paused_reason"))
 
-        # Budget / stall check before routing work
         budget = BudgetState(
             turn_count=int(sess.get("turn_count") or 0),
             consec_agent_turns=int(sess.get("consec_agent_turns") or 0),
@@ -117,8 +121,6 @@ class DesignLoop:
             self.store.set_delivery_status(delivery_id, "done")
             return
 
-        # Normalize event kind for FSM
-        kind = self._event_kind(event, action, data, sender, architect, developer)
         dig = build_digest(
             event=event,
             action=action,
@@ -127,22 +129,53 @@ class DesignLoop:
             sender=sender,
             payload=data,
         )
+        kind = self._event_kind(event, action, data, sender)
 
-        # Route per recipient (peer bot is the target of most design events)
+        # §8.4: do not advance on unverified APPROVED (M3-3)
+        if kind == "design_approved_unverified":
+            pr_num = dig.get("pr") or sess.get("design_pr")
+            head = dig.get("head_sha")
+            # Developer approves Design PR; verify Developer on current head
+            from agentd.keychain import get_password
+            from agentd.verify import verify_design_approval
+
+            check = verify_design_approval(
+                repo=repo,
+                pr_number=int(pr_num or 0),
+                expected_approver_login=developer,
+                head_sha=str(head) if head else None,
+                token=get_password("claude-bot") or get_password("grok-bot"),
+            )
+            if not check.ok:
+                log.warning(
+                    "design_approved blocked id=%s: %s", delivery_id, check.reason
+                )
+                self._escalate(
+                    session_key,
+                    "system",
+                    f"unverified design approval: {check.reason}",
+                )
+                self.store.set_delivery_status(delivery_id, "done")
+                return
+            kind = "design_approved"
+
         recipient_role, recipient_login = self._pick_recipient(
             kind, state, architect, developer, sender
         )
         other = developer if recipient_role == "architect" else architect
+        body = None
+        if isinstance(data.get("comment"), dict):
+            body = data["comment"].get("body")
         decision = route_for_recipient(
             sender=sender,
             recipient_login=recipient_login,
+            recipient_role=recipient_role,
             other_bot_login=other,
             owner=self.config.owner,
-            body=(data.get("comment") or {}).get("body")
-            if isinstance(data.get("comment"), dict)
-            else None,
+            body=body,
             session_paused=paused,
-            config=self.config,
+            role_logins=role_logins,
+            bot_logins=bot_logins,
         )
         if decision.action == RouteAction.DROP:
             self.store.set_delivery_status(delivery_id, "dropped")
@@ -150,12 +183,11 @@ class DesignLoop:
             return
         if decision.action == RouteAction.DEFER:
             log.info("route defer id=%s reason=%s", delivery_id, decision.reason)
-            return  # leave deferred
+            return
 
         if decision.reset_consec:
             self.store.update_session_fields(session_key, consec_agent_turns=0)
 
-        # FSM
         tr = transition(state, kind)
         if tr:
             fields: dict[str, Any] = {"state": tr.new_state}
@@ -167,31 +199,35 @@ class DesignLoop:
             state = tr.new_state
             log.info("fsm %s → %s (%s)", session_key, tr.new_state, tr.note)
 
-        # Stall signals (review rounds)
         if kind in ("design_changes_requested", "design_revised"):
+            raw_fp = str(sess.get("progress_fp") or "")
+            armed = raw_fp.startswith("A:")
+            stored_fp = raw_fp[2:] if armed else (raw_fp or None)
             stall = StallTracker(
-                last_fp=sess.get("progress_fp"),
+                last_fp=stored_fp,
                 fp_repeat=int(sess.get("progress_repeat") or 0),
                 zero_thread_rounds=int(sess.get("zero_thread_rounds") or 0),
+                seen_head_change=armed,
             )
-            # head-change fingerprint (only counts after head moves)
             head = dig.get("head_sha")
             fp = progress_fingerprint(
-                head_sha=head,
                 open_thread_ids=[],
                 unresolved_count=0,
-                diff_stat=str(dig.get("pr") or ""),
+                diff_stat=str(dig.get("pr") or "") + "|" + str(dig.get("title") or ""),
             )
-            reason = stall.observe_fingerprint(fp, head)
+            reason = stall.observe_fingerprint(fp, str(head) if head else None)
             if not reason and kind == "design_changes_requested":
                 reason = stall.observe_review_round(threads_resolved=0)
             if reason:
                 self._escalate(session_key, "system", reason)
                 self.store.set_delivery_status(delivery_id, "done")
                 return
+            fp_store = (
+                f"A:{stall.last_fp}" if stall.seen_head_change else (stall.last_fp or "")
+            )
             self.store.update_session_fields(
                 session_key,
-                progress_fp=stall.last_fp,
+                progress_fp=fp_store,
                 progress_repeat=stall.fp_repeat,
                 zero_thread_rounds=stall.zero_thread_rounds,
                 review_rounds=int(sess.get("review_rounds") or 0) + 1,
@@ -332,8 +368,6 @@ class DesignLoop:
         action: str | None,
         data: dict[str, Any],
         sender: str,
-        architect: str,
-        developer: str,
     ) -> str:
         if event == "issues" and action in ("opened", "reopened", "labeled"):
             return "issue_opened"
@@ -353,7 +387,8 @@ class DesignLoop:
             if st == "CHANGES_REQUESTED":
                 return "design_changes_requested"
             if st == "APPROVED":
-                return "design_approved"
+                # Unverified until §8.4 check runs
+                return "design_approved_unverified"
         if event == "issue_comment" and action == "created":
             if sender.lower() == self.config.owner.lower():
                 return "owner_reply"

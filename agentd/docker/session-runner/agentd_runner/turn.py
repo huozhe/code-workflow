@@ -9,8 +9,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-# os used for fork/setuid
-
 from agentd_runner.adapters import resolve_adapter, run_adapter
 from agentd_runner.server import ROLE_UIDS, session_base
 
@@ -43,6 +41,7 @@ def load_rehydration(role: str) -> dict[str, Any]:
     """COLD→HOT continuity: summary + recent transcript tail (§6.3)."""
     paths = role_paths(role)
     summary = ""
+    lines: list[str] = []
     if paths["summary"].is_file():
         summary = paths["summary"].read_text(encoding="utf-8", errors="replace")
     tail: list[dict[str, Any]] = []
@@ -53,7 +52,11 @@ def load_rehydration(role: str) -> dict[str, Any]:
                 tail.append(json.loads(line))
             except json.JSONDecodeError:
                 continue
-    return {"summary": summary, "transcript_tail": tail, "transcript_lines": len(lines) if paths["transcript"].is_file() else 0}
+    return {
+        "summary": summary,
+        "transcript_tail": tail,
+        "transcript_lines": len(lines),
+    }
 
 
 def build_prompt(params: dict[str, Any], rehydrate: dict[str, Any] | None) -> str:
@@ -85,10 +88,15 @@ def build_prompt(params: dict[str, Any], rehydrate: dict[str, Any] | None) -> st
 
 
 def exec_turn_as_role(params: dict[str, Any]) -> dict[str, Any]:
-    """fork → setgid/setuid → adapter. Returns turn result dict."""
+    """setgroups([]) → setgid → setuid → adapter. Result returns on pipe (M3-6)."""
     role = str(params.get("role") or "")
     if role not in ROLE_UIDS:
-        return {"status": "failed", "summary": f"unknown role {role}", "public_actions": [], "artifacts": []}
+        return {
+            "status": "failed",
+            "summary": f"unknown role {role}",
+            "public_actions": [],
+            "artifacts": [],
+        }
 
     uid = ROLE_UIDS[role]
     paths = role_paths(role)
@@ -101,12 +109,10 @@ def exec_turn_as_role(params: dict[str, Any]) -> dict[str, Any]:
     deadline_s = int(params.get("deadline_s") or 900)
     turn_id = str(params.get("turn_id") or f"t-{int(time.time())}")
 
-    # Write prompt for the child / debugging
+    # Prompt on bind mount is fine (data, not control-flow). Result must not be.
     prompt_path = paths["context"] / f"prompt-{turn_id}.txt"
     prompt_path.write_text(prompt, encoding="utf-8")
-    result_path = paths["context"] / f"result-{turn_id}.json"
 
-    # Child writes result_path as the role UID
     def _child_body() -> dict[str, Any]:
         env = os.environ.copy()
         env.update(
@@ -135,32 +141,43 @@ def exec_turn_as_role(params: dict[str, Any]) -> dict[str, Any]:
             deadline_s=deadline_s,
         )
 
-    # Prefer fork+setuid in container (euid 0). On unprivileged test hosts, run inline.
+    result: dict[str, Any]
+    status = 0
+
     if os.geteuid() == 0:
         r, w = os.pipe()
         pid = os.fork()
         if pid == 0:
             os.close(r)
             try:
+                # Drop supplementary groups first (M3-4); after setuid we cannot.
+                try:
+                    os.setgroups([])
+                except OSError as exc:
+                    # CAP_SETGID required; container has it. Log and continue.
+                    os.write(2, f"setgroups: {exc}\n".encode())
                 os.setgid(uid)
                 os.setuid(uid)
-                result = _child_body()
-                result_path.write_text(json.dumps(result), encoding="utf-8")
-                os.write(w, b"ok")
+                if os.geteuid() == 0:
+                    # Must never run adapters as root in production container.
+                    os.write(2, b"FATAL: still euid 0 after setuid\n")
+                    os._exit(2)
+                out = _child_body()
+                payload = json.dumps(out).encode("utf-8")
+                # length-prefixed result on the pipe (not the bind mount)
+                os.write(w, len(payload).to_bytes(4, "big") + payload)
                 os._exit(0)
             except Exception as exc:  # noqa: BLE001
                 try:
-                    result_path.write_text(
-                        json.dumps(
-                            {
-                                "status": "failed",
-                                "summary": f"turn child error: {exc}",
-                                "public_actions": [],
-                                "artifacts": [],
-                            }
-                        ),
-                        encoding="utf-8",
-                    )
+                    err = json.dumps(
+                        {
+                            "status": "failed",
+                            "summary": f"turn child error: {exc}",
+                            "public_actions": [],
+                            "artifacts": [],
+                        }
+                    ).encode()
+                    os.write(w, len(err).to_bytes(4, "big") + err)
                 except OSError:
                     pass
                 try:
@@ -169,49 +186,67 @@ def exec_turn_as_role(params: dict[str, Any]) -> dict[str, Any]:
                     pass
                 os._exit(1)
             finally:
-                os.close(w)
-        os.close(w)
-        _, status = os.waitpid(pid, 0)
-        try:
-            os.close(r)
-        except OSError:
-            pass
-    else:
-        log.warning("euid!=0; running adapter without setuid (test host)")
-        try:
-            result = _child_body()
-            result_path.write_text(json.dumps(result), encoding="utf-8")
-        except Exception as exc:  # noqa: BLE001
-            result_path.write_text(
-                json.dumps(
-                    {
-                        "status": "failed",
-                        "summary": f"turn error: {exc}",
-                        "public_actions": [],
-                        "artifacts": [],
-                    }
-                ),
-                encoding="utf-8",
-            )
-        status = 0
+                try:
+                    os.close(w)
+                except OSError:
+                    pass
 
-    if result_path.is_file():
+        os.close(w)
+        # Read result from pipe
         try:
-            result = json.loads(result_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
+            header = b""
+            while len(header) < 4:
+                chunk = os.read(r, 4 - len(header))
+                if not chunk:
+                    break
+                header += chunk
+            if len(header) == 4:
+                n = int.from_bytes(header, "big")
+                body = b""
+                while len(body) < n:
+                    chunk = os.read(r, n - len(body))
+                    if not chunk:
+                        break
+                    body += chunk
+                result = json.loads(body.decode("utf-8"))
+            else:
+                result = {
+                    "status": "failed",
+                    "summary": "empty result pipe",
+                    "public_actions": [],
+                    "artifacts": [],
+                }
+        except Exception as exc:  # noqa: BLE001
             result = {
                 "status": "failed",
-                "summary": "invalid result JSON",
+                "summary": f"pipe read failed: {exc}",
+                "public_actions": [],
+                "artifacts": [],
+            }
+        finally:
+            try:
+                os.close(r)
+            except OSError:
+                pass
+        _, status = os.waitpid(pid, 0)
+        if os.WIFEXITED(status) and os.WEXITSTATUS(status) == 2:
+            result = {
+                "status": "failed",
+                "summary": "refusing to run adapter as root (setuid failed)",
                 "public_actions": [],
                 "artifacts": [],
             }
     else:
-        result = {
-            "status": "failed",
-            "summary": f"adapter produced no result (exit={status})",
-            "public_actions": [],
-            "artifacts": [],
-        }
+        log.warning("euid!=0; running adapter without setuid (test host only)")
+        try:
+            result = _child_body()
+        except Exception as exc:  # noqa: BLE001
+            result = {
+                "status": "failed",
+                "summary": f"turn error: {exc}",
+                "public_actions": [],
+                "artifacts": [],
+            }
 
     record = {
         "ts": int(time.time()),

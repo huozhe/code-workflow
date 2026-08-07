@@ -37,16 +37,18 @@ class BudgetState:
 
 def progress_fingerprint(
     *,
-    head_sha: str | None,
     open_thread_ids: list[str],
     unresolved_count: int,
     diff_stat: str,
 ) -> str:
-    """§9.3 fingerprint composition."""
+    """§9.3 fingerprint of *progress state*, not including head_sha.
+
+    head_sha is tracked separately so the stall counter can require at least one
+    real head move before arming, without making identical progress after a
+    cosmetic push unobservable (M3-1 / §9.3 amendment).
+    """
     material = (
-        (head_sha or "")
-        + "|"
-        + ",".join(sorted(open_thread_ids))
+        ",".join(sorted(open_thread_ids))
         + "|"
         + str(unresolved_count)
         + "|"
@@ -62,37 +64,52 @@ class StallTracker:
     last_fp: str | None = None
     fp_repeat: int = 0
     last_head: str | None = None
+    seen_head_change: bool = False
     zero_thread_rounds: int = 0
     fp_threshold: int = 3
     zero_thread_threshold: int = 3
 
     def observe_fingerprint(self, fp: str, head_sha: str | None) -> str | None:
-        """Return escalate reason or None.
+        """Count identical progress fingerprints across consecutive turns.
 
-        Fingerprint is sampled on each non-trivial head_sha change (§9.3).
-        Identical fingerprint across ``fp_threshold`` head changes ⇒ escalate.
-        Static head does not advance the counter (zero-thread + budgets cover that).
+        Arm only after the session has seen at least one non-trivial head_sha
+        change (slow initial convergence does not fire). Once armed, count
+        identical fingerprints every turn — including after further head moves
+        that leave review/diff state frozen (cosmetic pushes).
         """
-        if not head_sha:
+        if head_sha is None:
+            # No head yet: store fp only; zero-thread + budgets cover comment loops
+            if self.last_fp is None:
+                self.last_fp = fp
             return None
+
         if self.last_head is None:
             self.last_head = head_sha
             self.last_fp = fp
             self.fp_repeat = 0
             return None
-        if head_sha == self.last_head:
-            # no head change — do not count (not a "fix": other signals handle this)
+
+        if head_sha != self.last_head:
+            self.seen_head_change = True
+            self.last_head = head_sha
+
+        if not self.seen_head_change:
+            # Not armed yet — remember latest fp but do not escalate
+            self.last_fp = fp
+            self.fp_repeat = 0
             return None
-        # head moved
-        self.last_head = head_sha
+
+        # Armed: count consecutive identical progress fingerprints
         if fp == self.last_fp:
             self.fp_repeat += 1
         else:
             self.fp_repeat = 1
             self.last_fp = fp
+
         if self.fp_repeat >= self.fp_threshold:
             return (
-                f"stall: fingerprint repeated {self.fp_repeat} times across head changes"
+                f"stall: progress fingerprint identical {self.fp_repeat} "
+                f"consecutive turns after a head change"
             )
         return None
 
