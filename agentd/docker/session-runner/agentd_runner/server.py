@@ -272,10 +272,13 @@ def handle_request(req: dict[str, Any], authed: bool) -> dict[str, Any]:
         return err(-32001, "not attached")
 
     if method == "health.ping":
+        from agentd_runner import cli_session as _cli
+
         return ok(
             {
                 "ok": True,
                 "rss_bytes": rss_bytes(),
+                "cli_rss_kb": _cli.rss_snapshot(),
                 "session_key": STATE.session_key,
                 "initialized": STATE.initialized,
             }
@@ -331,6 +334,14 @@ def handle_request(req: dict[str, Any], authed: bool) -> dict[str, Any]:
                 rehydrated.get("architect", {}).get("transcript_lines"),
                 rehydrated.get("developer", {}).get("transcript_lines"),
             )
+        # #25: spawn one long-lived CLI per role (setuid in child). resume uses -c.
+        from agentd_runner.turn import ensure_role_cli_spawned
+
+        continue_sess = method == "session.resume"
+        cli_spawn = {
+            role: ensure_role_cli_spawned(role, continue_session=continue_sess)
+            for role in ROLE_UIDS
+        }
         return ok(
             {
                 "session_key": session_key,
@@ -338,10 +349,14 @@ def handle_request(req: dict[str, Any], authed: bool) -> dict[str, Any]:
                 "method": method,
                 "roles": STATE.roles,
                 "rehydrated": rehydrated,
+                "cli_spawn": cli_spawn,
             }
         )
 
     if method == "session.teardown":
+        from agentd_runner import cli_session as _cli
+
+        _cli.shutdown_all()
         # Best-effort: wipe secrets from tmpfs
         for role in ROLE_UIDS:
             role_dir = TOKEN_ROOT / role
@@ -368,8 +383,10 @@ def handle_request(req: dict[str, Any], authed: bool) -> dict[str, Any]:
             params = dict(params)
             params["resuming"] = True
         # Serialize per role so concurrent issues cannot interleave one conversation.
+        # Progress notifications (no id) may be written mid-turn via the active handler.
+        progress = params.pop("_progress_cb", None) if isinstance(params, dict) else None
         with STATE._role_locks[role]:
-            result = exec_turn_as_role(params)
+            result = exec_turn_as_role(params, progress=progress)
         return ok(result)
 
     if method == "escalate.human":
@@ -438,6 +455,30 @@ class _RPCHandler(socketserver.StreamRequestHandler):
                 )
                 break
             try:
+                # Inject notify.progress writer for long-lived turn streams (§14.2 / #25).
+                if method in ("turn.dispatch", "turn.resume"):
+                    params = req.get("params")
+                    if not isinstance(params, dict):
+                        params = {}
+                        req = dict(req)
+                        req["params"] = params
+                    turn_id = str(params.get("turn_id") or "")
+                    role = str(params.get("role") or "")
+
+                    def _progress(chunk_info: dict) -> None:
+                        self._write(
+                            {
+                                "jsonrpc": "2.0",
+                                "method": "notify.progress",
+                                "params": {
+                                    "turn_id": turn_id,
+                                    "role": role,
+                                    **chunk_info,
+                                },
+                            }
+                        )
+
+                    params["_progress_cb"] = _progress
                 self._write(handle_request(req, authed=True))
             except Exception as exc:  # noqa: BLE001
                 log.exception("handler error method=%s", method)

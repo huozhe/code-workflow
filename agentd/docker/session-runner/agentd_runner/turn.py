@@ -1,4 +1,9 @@
-"""Turn execution: privilege drop + adapter + transcript (§7.3, §6.3, §14)."""
+"""Turn execution: long-lived CLI pipe or one-shot adapter (§7.3, §6.3, §14).
+
+Default for real vendor adapters: multiplex over a per-role process held by
+agentd-runner after setuid at spawn (#25). mock/script and AGENTD_CLI_MODE=oneshot
+keep the disposable fork→setuid→run path (ADR-9 recovery).
+"""
 
 from __future__ import annotations
 
@@ -7,18 +12,19 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from agentd_runner.adapters import resolve_adapter, run_adapter
+from agentd_runner import cli_session
 from agentd_runner.server import ROLE_UIDS, session_base
 
 log = logging.getLogger("agentd_runner.turn")
 
+ProgressCb = Callable[[dict[str, Any]], None]
+
 
 def project_root() -> Path:
     """Project tree mount point (#20) — durable homes live here."""
-    import os
-
     return Path(
         os.environ.get("AGENTD_PROJECT_ROOT")
         or os.environ.get("AGENTD_HOST_ROOT")
@@ -85,6 +91,13 @@ def build_prompt(params: dict[str, Any], rehydrate: dict[str, Any] | None) -> st
         f"Turn: {params.get('turn_id')}",
         f"Event: {json.dumps(digest, indent=2)[:4000]}",
     ]
+    # Cwd decision (a) #25: CLI lives at project root; worktree is named per turn.
+    worktree = (params.get("context") or {}).get("worktree")
+    if worktree:
+        parts.append(
+            f"Issue worktree: {worktree}\n"
+            "Perform file/git work inside this path (project-root CLI session)."
+        )
     if rehydrate and rehydrate.get("summary"):
         parts.append("--- Context summary ---\n" + rehydrate["summary"][:8000])
     elif rehydrate and rehydrate.get("transcript_tail"):
@@ -105,31 +118,11 @@ def build_prompt(params: dict[str, Any], rehydrate: dict[str, Any] | None) -> st
     return "\n\n".join(parts)
 
 
-def exec_turn_as_role(params: dict[str, Any]) -> dict[str, Any]:
-    """setgroups([]) → setgid → setuid → adapter. Result returns on pipe (M3-6)."""
+def _oneshot_result(params: dict[str, Any], paths: dict[str, Path], adapter: str, prompt: str) -> dict[str, Any]:
+    """Disposable fork→setuid→run path (mock/script + explicit recovery)."""
     role = str(params.get("role") or "")
-    if role not in ROLE_UIDS:
-        return {
-            "status": "failed",
-            "summary": f"unknown role {role}",
-            "public_actions": [],
-            "artifacts": [],
-        }
-
     uid = ROLE_UIDS[role]
-    paths = role_paths(role)
-    for p in (paths["home"], paths["tmp"], paths["xdg"], paths["context"], paths["scratch"]):
-        p.mkdir(parents=True, exist_ok=True)
-
-    rehydrate = load_rehydration(role)
-    prompt = build_prompt(params, rehydrate)
-    adapter = resolve_adapter(role, params.get("adapter"))
     deadline_s = int(params.get("deadline_s") or 900)
-    turn_id = str(params.get("turn_id") or f"t-{int(time.time())}")
-
-    # Prompt on bind mount is fine (data, not control-flow). Result must not be.
-    prompt_path = paths["context"] / f"prompt-{turn_id}.txt"
-    prompt_path.write_text(prompt, encoding="utf-8")
 
     def _child_body() -> dict[str, Any]:
         env = os.environ.copy()
@@ -147,7 +140,6 @@ def exec_turn_as_role(params: dict[str, Any]) -> dict[str, Any]:
         if token_file.is_file():
             env["GH_TOKEN"] = token_file.read_text(encoding="utf-8").strip()
             env["GITHUB_TOKEN"] = env["GH_TOKEN"]
-        # Claude subscription token from control-channel tmpfs (#21 R1) — never Env.
         oauth_file = Path(f"/run/agent/{role}/claude_oauth_token")
         if oauth_file.is_file():
             env["CLAUDE_CODE_OAUTH_TOKEN"] = oauth_file.read_text(encoding="utf-8").strip()
@@ -163,30 +155,23 @@ def exec_turn_as_role(params: dict[str, Any]) -> dict[str, Any]:
             deadline_s=deadline_s,
         )
 
-    result: dict[str, Any]
-    status = 0
-
     if os.geteuid() == 0:
         r, w = os.pipe()
         pid = os.fork()
         if pid == 0:
             os.close(r)
             try:
-                # Drop supplementary groups first (M3-4); after setuid we cannot.
                 try:
                     os.setgroups([])
                 except OSError as exc:
-                    # CAP_SETGID required; container has it. Log and continue.
                     os.write(2, f"setgroups: {exc}\n".encode())
                 os.setgid(uid)
                 os.setuid(uid)
                 if os.geteuid() == 0:
-                    # Must never run adapters as root in production container.
                     os.write(2, b"FATAL: still euid 0 after setuid\n")
                     os._exit(2)
                 out = _child_body()
                 payload = json.dumps(out).encode("utf-8")
-                # length-prefixed result on the pipe (not the bind mount)
                 os.write(w, len(payload).to_bytes(4, "big") + payload)
                 os._exit(0)
             except Exception as exc:  # noqa: BLE001
@@ -214,7 +199,6 @@ def exec_turn_as_role(params: dict[str, Any]) -> dict[str, Any]:
                     pass
 
         os.close(w)
-        # Read result from pipe
         try:
             header = b""
             while len(header) < 4:
@@ -252,23 +236,106 @@ def exec_turn_as_role(params: dict[str, Any]) -> dict[str, Any]:
                 pass
         _, status = os.waitpid(pid, 0)
         if os.WIFEXITED(status) and os.WEXITSTATUS(status) == 2:
-            result = {
+            return {
                 "status": "failed",
                 "summary": "refusing to run adapter as root (setuid failed)",
                 "public_actions": [],
                 "artifacts": [],
             }
+        return result
+
+    log.warning("euid!=0; running adapter without setuid (test host only)")
+    try:
+        return _child_body()
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "status": "failed",
+            "summary": f"turn error: {exc}",
+            "public_actions": [],
+            "artifacts": [],
+        }
+
+
+def _live_result(
+    params: dict[str, Any],
+    paths: dict[str, Path],
+    adapter: str,
+    prompt: str,
+    progress: ProgressCb | None,
+) -> dict[str, Any]:
+    """Multiplex one turn over the long-lived per-role CLI (§6.3 / #25)."""
+    role = str(params.get("role") or "")
+    uid = ROLE_UIDS[role]
+    deadline_s = int(params.get("deadline_s") or 900)
+    sess = cli_session.get_or_create_session(
+        role=role,
+        adapter=adapter,
+        uid=uid,
+        home=paths["home"],
+        tmp=paths["tmp"],
+        xdg=paths["xdg"],
+        spawn_cwd=project_root(),
+    )
+    try:
+        sess.ensure_spawned(continue_session=True)
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "status": "failed",
+            "summary": f"cli spawn failed: {exc}",
+            "public_actions": [],
+            "artifacts": [],
+        }
+    return sess.turn(prompt, deadline_s=deadline_s, progress=progress)
+
+
+def exec_turn_as_role(
+    params: dict[str, Any],
+    *,
+    progress: ProgressCb | None = None,
+) -> dict[str, Any]:
+    """Execute one turn for a role.
+
+    Privilege: live CLI — dropped once at spawn (preexec); oneshot — per fork.
+    Caller (server) must hold the per-role lock so concurrent issues cannot
+    interleave writes on the shared pipe (#20 / ADR-4).
+    """
+    role = str(params.get("role") or "")
+    if role not in ROLE_UIDS:
+        return {
+            "status": "failed",
+            "summary": f"unknown role {role}",
+            "public_actions": [],
+            "artifacts": [],
+        }
+
+    paths = role_paths(role)
+    for p in (paths["home"], paths["tmp"], paths["xdg"], paths["context"], paths["scratch"]):
+        p.mkdir(parents=True, exist_ok=True)
+
+    rehydrate = load_rehydration(role)
+    # Live path: vendor process holds conversational state — inject transcript
+    # only on cold recovery (handled by -c / ACP store). Still attach summary
+    # when present so our compact layer is never orphaned (§14.4 growth note).
+    adapter = resolve_adapter(role, params.get("adapter"))
+    oneshot = cli_session.use_oneshot(adapter)
+    if oneshot:
+        prompt = build_prompt(params, rehydrate)
     else:
-        log.warning("euid!=0; running adapter without setuid (test host only)")
-        try:
-            result = _child_body()
-        except Exception as exc:  # noqa: BLE001
-            result = {
-                "status": "failed",
-                "summary": f"turn error: {exc}",
-                "public_actions": [],
-                "artifacts": [],
-            }
+        # Prefer vendor memory; still pass summary if we have compacted.
+        light = None
+        if rehydrate.get("summary"):
+            light = {"summary": rehydrate["summary"], "transcript_tail": []}
+        prompt = build_prompt(params, light)
+
+    deadline_s = int(params.get("deadline_s") or 900)
+    turn_id = str(params.get("turn_id") or f"t-{int(time.time())}")
+    prompt_path = paths["context"] / f"prompt-{turn_id}.txt"
+    prompt_path.write_text(prompt, encoding="utf-8")
+
+    if oneshot:
+        result = _oneshot_result(params, paths, adapter, prompt)
+    else:
+        result = _live_result(params, paths, adapter, prompt, progress)
 
     record = {
         "ts": int(time.time()),
@@ -278,6 +345,7 @@ def exec_turn_as_role(params: dict[str, Any]) -> dict[str, Any]:
         "event": params.get("event"),
         "status": result.get("status"),
         "summary": result.get("summary"),
+        "live_session": bool(result.get("live_session")),
     }
     try:
         append_transcript(role, record)
@@ -287,4 +355,54 @@ def exec_turn_as_role(params: dict[str, Any]) -> dict[str, Any]:
     result["turn_id"] = turn_id
     result["role"] = role
     result["adapter"] = adapter
+    if not oneshot:
+        result.setdefault("cli_rss_kb", cli_session.rss_snapshot().get(role, 0))
+    # §14.4: fail loudly on unbounded growth rather than silent truncate.
+    n_lines = int(rehydrate.get("transcript_lines") or 0)
+    if n_lines >= 5000:
+        log.error(
+            "transcript growth role=%s lines=%s — §14.4 compaction not yet "
+            "implemented; consider project conversation reset (no silent truncate)",
+            role,
+            n_lines,
+        )
+        result["transcript_growth_warning"] = n_lines
     return result
+
+
+def ensure_role_cli_spawned(role: str, *, continue_session: bool = False) -> dict[str, Any]:
+    """Spawn (or re-enter) the long-lived CLI for a role — session.init/resume.
+
+    Returns a small status dict; failures are soft so init can still succeed
+    when the image lacks a binary (tests); the next turn will surface them.
+    """
+    if role not in ROLE_UIDS:
+        return {"role": role, "spawned": False, "error": "unknown role"}
+    adapter = resolve_adapter(role, None)
+    if cli_session.use_oneshot(adapter):
+        return {"role": role, "spawned": False, "mode": "oneshot"}
+    paths = role_paths(role)
+    for p in (paths["home"], paths["tmp"], paths["xdg"]):
+        p.mkdir(parents=True, exist_ok=True)
+    try:
+        sess = cli_session.get_or_create_session(
+            role=role,
+            adapter=adapter,
+            uid=ROLE_UIDS[role],
+            home=paths["home"],
+            tmp=paths["tmp"],
+            xdg=paths["xdg"],
+            spawn_cwd=project_root(),
+        )
+        sess.ensure_spawned(continue_session=continue_session)
+        return {
+            "role": role,
+            "spawned": True,
+            "adapter": adapter,
+            "pid": sess.proc.pid if sess.proc else None,
+            "rss_kb": sess.last_rss_kb,
+            "continue_session": continue_session,
+        }
+    except Exception as exc:  # noqa: BLE001
+        log.warning("cli spawn at session lifecycle failed role=%s: %s", role, exc)
+        return {"role": role, "spawned": False, "error": str(exc)}
