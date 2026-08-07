@@ -14,9 +14,10 @@ log = logging.getLogger("agentd.db")
 
 # Bump when DDL changes require a rebuild. SQLite is a derived cache (ADR-2);
 # mismatch ⇒ wipe + recreate. GitHub remains source of truth (P1).
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # Schema DDL only — connection pragmas are set separately (see Store.__init__).
+# v2 (#20): runners keyed by project (N sessions : 1 runner); sessions.project_key.
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS deliveries (
   delivery_id TEXT PRIMARY KEY,
@@ -42,8 +43,18 @@ CREATE TABLE IF NOT EXISTS circuit_breaker (
 INSERT OR IGNORE INTO circuit_breaker(id, disk_paused, reason, updated_at)
 VALUES (1, 0, NULL, 0);
 
+CREATE TABLE IF NOT EXISTS runners (
+  project_key TEXT PRIMARY KEY,
+  container_id TEXT,
+  endpoint TEXT,
+  token TEXT,
+  tier TEXT NOT NULL,
+  last_seen_at INTEGER
+);
+
 CREATE TABLE IF NOT EXISTS sessions (
   session_key TEXT PRIMARY KEY,
+  project_key TEXT NOT NULL,
   repo TEXT NOT NULL,
   issue_num INTEGER NOT NULL,
   state TEXT NOT NULL,
@@ -64,16 +75,9 @@ CREATE TABLE IF NOT EXISTS sessions (
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
+CREATE INDEX IF NOT EXISTS ix_sessions_project
+  ON sessions(project_key);
 
-CREATE TABLE IF NOT EXISTS runners (
-  session_key TEXT PRIMARY KEY,
-  container_id TEXT,
-  endpoint TEXT,
-  token TEXT,
-  tier TEXT NOT NULL,
-  last_seen_at INTEGER,
-  FOREIGN KEY (session_key) REFERENCES sessions(session_key) ON DELETE CASCADE
-);
 
 CREATE TABLE IF NOT EXISTS turns (
   turn_id TEXT PRIMARY KEY,
@@ -143,14 +147,18 @@ class Store:
         return int(row[0]) if row else 0
 
     def _apply_schema(self) -> None:
-        """Create/migrate schema. ADR-2: mismatch ⇒ destructive rebuild."""
+        """Create/migrate schema.
+
+        Prefer incremental migrations that preserve the deliveries ledger
+        (§12.3 idempotency). Destructive rebuild only when no path exists
+        (ADR-2 worst case) — and the log must not claim a Reconciler that
+        is not implemented yet (M6).
+        """
         ver = self._schema_version()
         if ver == SCHEMA_VERSION:
-            # Still run IF NOT EXISTS so a partially-created file heals.
             self._conn.executescript(SCHEMA)
             return
         if ver == 0:
-            # Fresh DB or pre-version M0 file: CREATE IF NOT EXISTS keeps rows.
             self._conn.executescript(SCHEMA)
             self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             log.info("schema stamped user_version=%s", SCHEMA_VERSION)
@@ -160,14 +168,117 @@ class Store:
                 f"state.db user_version={ver} is newer than agentd "
                 f"SCHEMA_VERSION={SCHEMA_VERSION}; upgrade the binary"
             )
-        # ver < SCHEMA_VERSION and ver != 0: destructive rebuild (ADR-2).
+        if ver == 1 and SCHEMA_VERSION == 2:
+            self._migrate_v1_to_v2()
+            return
         log.warning(
-            "schema user_version=%s < SCHEMA_VERSION=%s; rebuilding derived "
-            "cache (ADR-2). Deliveries re-sync from GitHub via Reconciler.",
+            "schema user_version=%s < SCHEMA_VERSION=%s; no incremental "
+            "migration path — rebuilding state tables (ADR-2 worst case). "
+            "Deliveries/idempotency ledger will be wiped; re-ingest is "
+            "manual (Reconciler is not implemented until M6).",
             ver,
             SCHEMA_VERSION,
         )
         self._rebuild_schema()
+
+    def _table_columns(self, table: str) -> list[str]:
+        rows = self._conn.execute(f'PRAGMA table_info("{table}")').fetchall()
+        return [str(r[1]) for r in rows]
+
+    def _migrate_v1_to_v2(self) -> None:
+        """Additive #20 migration: sessions.project_key; runners keyed by project.
+
+        Preserves deliveries (and other tables). Runners rows are rewritten;
+        multiple session-level runners for the same project collapse to one
+        (last-write wins).
+        """
+        log.info("migrating schema v1 → v2 (preserve deliveries ledger)")
+        # sessions.project_key
+        sess_cols = self._table_columns("sessions")
+        if sess_cols and "project_key" not in sess_cols:
+            self._conn.execute(
+                "ALTER TABLE sessions ADD COLUMN project_key TEXT NOT NULL DEFAULT ''"
+            )
+        if sess_cols or "sessions" in {
+            r[0]
+            for r in self._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }:
+            self._conn.execute(
+                """
+                UPDATE sessions
+                SET project_key = repo
+                WHERE project_key = '' OR project_key IS NULL
+                """
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS ix_sessions_project ON sessions(project_key)"
+            )
+
+        # runners: session_key PK → project_key PK
+        runner_cols = self._table_columns("runners")
+        if "session_key" in runner_cols and "project_key" not in runner_cols:
+            self._conn.execute("ALTER TABLE runners RENAME TO runners_v1")
+            self._conn.execute(
+                """
+                CREATE TABLE runners (
+                  project_key TEXT PRIMARY KEY,
+                  container_id TEXT,
+                  endpoint TEXT,
+                  token TEXT,
+                  tier TEXT NOT NULL,
+                  last_seen_at INTEGER
+                )
+                """
+            )
+            rows = self._conn.execute(
+                """
+                SELECT r.session_key, r.container_id, r.endpoint, r.token,
+                       r.tier, r.last_seen_at, s.repo
+                FROM runners_v1 r
+                LEFT JOIN sessions s ON s.session_key = r.session_key
+                """
+            ).fetchall()
+            for row in rows:
+                sk = str(row[0] or "")
+                repo = str(row[6] or "")
+                if repo:
+                    pk = repo
+                elif "#" in sk:
+                    pk = sk.partition("#")[0]
+                else:
+                    pk = sk
+                if not pk:
+                    continue
+                self._conn.execute(
+                    """
+                    INSERT INTO runners(
+                      project_key, container_id, endpoint, token, tier, last_seen_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(project_key) DO UPDATE SET
+                      container_id = excluded.container_id,
+                      endpoint = excluded.endpoint,
+                      token = excluded.token,
+                      tier = excluded.tier,
+                      last_seen_at = excluded.last_seen_at
+                    """,
+                    (
+                        pk,
+                        row[1],
+                        row[2],
+                        row[3],
+                        row[4] or "cold",
+                        row[5],
+                    ),
+                )
+            self._conn.execute("DROP TABLE runners_v1")
+
+        # Ensure full schema objects exist (IF NOT EXISTS).
+        self._conn.executescript(SCHEMA)
+        self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        self._conn.commit()
+        log.info("schema migration v1 → v2 complete; user_version=%s", SCHEMA_VERSION)
 
     def _rebuild_schema(self) -> None:
         tables = self._conn.execute(
@@ -318,7 +429,7 @@ class Store:
                 """
                 SELECT s.*, r.container_id, r.endpoint, r.token AS runner_token, r.tier
                 FROM sessions s
-                LEFT JOIN runners r ON r.session_key = s.session_key
+                LEFT JOIN runners r ON r.project_key = s.project_key
                 WHERE s.session_key = ?
                 """,
                 (session_key,),
@@ -336,6 +447,7 @@ class Store:
         developer: str,
         created_at: int,
         updated_at: int,
+        project_key: str | None = None,
         paused_reason: str | None = None,
         roles_locked: int | None = None,
         design_pr: int | None = None,
@@ -346,17 +458,19 @@ class Store:
         progress_repeat: int | None = None,
         zero_thread_rounds: int | None = None,
     ) -> None:
+        pk = project_key or repo
         with self._lock:
             self._conn.execute(
                 """
                 INSERT INTO sessions(
-                  session_key, repo, issue_num, state, paused_reason,
+                  session_key, project_key, repo, issue_num, state, paused_reason,
                   architect, developer, roles_locked, design_pr,
                   turn_count, consec_agent_turns, review_rounds,
                   progress_fp, progress_repeat, zero_thread_rounds,
                   created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_key) DO UPDATE SET
+                  project_key = excluded.project_key,
                   state = excluded.state,
                   paused_reason = COALESCE(excluded.paused_reason, sessions.paused_reason),
                   roles_locked = COALESCE(excluded.roles_locked, sessions.roles_locked),
@@ -371,6 +485,7 @@ class Store:
                 """,
                 (
                     session_key,
+                    pk,
                     repo,
                     issue_num,
                     state,
@@ -493,9 +608,18 @@ class Store:
         return n
 
     def count_hot_sessions(self) -> int:
+        """Count HOT project runners (§6.6 — admission unit is the project)."""
         with self._lock:
             row = self._conn.execute(
                 "SELECT COUNT(*) AS n FROM runners WHERE tier = 'hot'"
+            ).fetchone()
+            return int(row["n"]) if row else 0
+
+    def count_project_sessions(self, project_key: str) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM sessions WHERE project_key = ?",
+                (project_key,),
             ).fetchone()
             return int(row["n"]) if row else 0
 
@@ -570,17 +694,30 @@ class Store:
             self._conn.commit()
             return int(cur.lastrowid or 0)
 
-    def get_runner(self, session_key: str) -> dict[str, Any] | None:
+    def get_runner(self, project_key: str) -> dict[str, Any] | None:
+        """Look up the project runner. ``project_key`` is ``owner/repo``."""
         with self._lock:
             row = self._conn.execute(
-                "SELECT * FROM runners WHERE session_key = ?",
+                "SELECT * FROM runners WHERE project_key = ?",
+                (project_key,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def get_runner_for_session(self, session_key: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT r.* FROM runners r
+                JOIN sessions s ON s.project_key = r.project_key
+                WHERE s.session_key = ?
+                """,
                 (session_key,),
             ).fetchone()
             return dict(row) if row else None
 
     def upsert_runner(
         self,
-        session_key: str,
+        project_key: str,
         *,
         container_id: str,
         endpoint: str,
@@ -592,16 +729,16 @@ class Store:
             self._conn.execute(
                 """
                 INSERT INTO runners(
-                  session_key, container_id, endpoint, token, tier, last_seen_at
+                  project_key, container_id, endpoint, token, tier, last_seen_at
                 ) VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(session_key) DO UPDATE SET
+                ON CONFLICT(project_key) DO UPDATE SET
                   container_id = excluded.container_id,
                   endpoint = excluded.endpoint,
                   token = excluded.token,
                   tier = excluded.tier,
                   last_seen_at = excluded.last_seen_at
                 """,
-                (session_key, container_id, endpoint, token, tier, now),
+                (project_key, container_id, endpoint, token, tier, now),
             )
             self._conn.commit()
 

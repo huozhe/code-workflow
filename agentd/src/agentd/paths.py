@@ -14,9 +14,13 @@ def agentd_root() -> Path:
 
 
 def ensure_layout(root: Path | None = None) -> Path:
-    """Create repos/, sessions/, archive/ and a default config if missing."""
+    """Create projects/, archive/, logs/ and a default config if missing.
+
+    Legacy ``repos/`` and ``sessions/`` may still exist until migrated into
+    ``projects/<owner>__<repo>/`` (issue #20).
+    """
     root = root or agentd_root()
-    for name in ("repos", "sessions", "archive", "logs"):
+    for name in ("projects", "archive", "logs", "repos", "sessions"):
         (root / name).mkdir(parents=True, exist_ok=True)
     config = root / "config.yaml"
     if not config.exists():
@@ -31,7 +35,7 @@ host:
   listen: 127.0.0.1:8787
   disk_floor_gb: 15
   disk_resume_gb: 20
-  max_hot_containers: 4
+  max_hot_containers: 4   # HOT project containers (§6.6)
   owner: huozhe
 
 gateway:
@@ -51,7 +55,10 @@ agents:
   claude:
     login: huozheclaude
     credential: keychain://agentd/claude-bot
+    # Subscription long-lived token (setup-token): keychain://agentd/claude-oauth-token
+    # → CLAUDE_CODE_OAUTH_TOKEN in the project container
   grok:
     login: huozhegrok
     credential: keychain://agentd/grok-bot
+    # Option D: durable HOME under projects/<owner>__<repo>/home/<role>/
 """

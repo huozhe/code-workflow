@@ -259,6 +259,15 @@ Two properties to hold when implementing: select the credential by **adapter**, 
 
 **Inbound detection net:** the gateway rejects and escalates any event where `sender.login == config.gateway.owner` **and** the body carries an `agentd:turn` provenance footer — a combination that is impossible under correct operation and is the signature of an agent acting with the owner token.
 
+**Model credentials (subscription, #19/#20) — separate from GitHub PATs.**
+
+| Provider | Delivery | Storage |
+|---|---|---|
+| **Claude** | Env `CLAUDE_CODE_OAUTH_TOKEN` at container create (from Keychain `agentd` / `claude-oauth-token`, minted via `claude setup-token`) | Not a file copy of interactive Keychain / `.credentials.json` |
+| **Grok** | Durable `projects/<owner>__<repo>/home/<role>/` with independent `grok login --device-auth` (Option D) | Never copy host `~/.grok/auth.json` into N places |
+
+Provision **both** providers per project; select by **adapter** at turn time so §5.3's `role/architect:grok` override does not require a re-mint. See `docs/ops/project-onboarding.md`.
+
 ### 5.3 Role Binding (FR-1.2)
 
 Precedence, highest first:
@@ -337,10 +346,11 @@ intake:
 ### 6.1 Identity and Scope
 
 ```
-session_key = "<owner>/<repo>#<issue_number>"
+session_key  = "<owner>/<repo>#<issue_number>"   # agentd issue session (FSM, budgets)
+project_key  = "<owner>/<repo>"                   # container / runner unit (#20)
 ```
 
-One session per issue (SRS §2), spanning any number of PRs, torn down only when the issue is closed.
+One **agentd session** per issue (SRS §2). One **project runner** (container) per repo, living for the project's lifetime, holding one long-lived CLI conversation per role shared across issues in that project (#19 / #20).
 
 **A session is not a container (project-scope amendment).** The container unit is the **project**, not the issue — see ADR-4. One project container hosts every session for that repository, so `sessions : runner` is N:1 rather than 1:1. Session identity, the §8.1 state machine, and §9's budgets and stall signals all remain **per issue** and are unaffected; only the process and filesystem substrate is shared.
 
@@ -396,12 +406,12 @@ Persistence therefore still permits the tiering in §6.5; it is simply no longer
 
 | Tier | Mechanism | RAM | Resume | Trigger |
 |---|---|---|---|---|
-| **HOT** | running, RPC attached | ≤ 3 GB | 0 | active turn |
+| **HOT** | running project runner, RPC attached | ≤ 3 GB | 0 | active turn on any issue in the project |
 | **COLD** | `docker stop` | **0** | 2–5 s | idle > 30 min, or admission pressure |
 
-A `docker pause` ("WARM") tier is available but is **latency-only and must never be cited as a memory saving** — the cgroup freezer suspends execution while pages stay resident. Only `docker stop` returns memory to the host. This document deliberately makes COLD the sole demotion target so that no sizing calculation can be built on the mistaken assumption.
+Tiering is **per project**, not per issue. Issue close does **not** stop the container (§10.3) — only worktrees/branches/scratch for that issue are removed. A `docker pause` ("WARM") tier must never be cited as a memory saving.
 
-COLD satisfies the SRS definition of zero cold start: no re-clone, no re-ingest, no lost state — only a process restart that reads `transcript.jsonl` and `context/summary.md` back in.
+COLD: no re-clone, no re-ingest, no lost role conversation — process restart reloads CLI session store + transcripts (`-c` / ACP resume).
 
 **Project-scope amendment: tiers apply to projects, not issues.** Stopping a container stops work on every issue in that project, so demotion is driven by project-level idleness rather than per-issue activity. Admission (`max_hot_containers`) counts projects. Note that §6.5's cap must be enforced on **promotion** as well as creation — promotion is the normal route to HOT under this model, so a cap checked only at create does not bound anything.
 
@@ -465,7 +475,7 @@ Non-obvious choices:
 - **No `/var/run/docker.sock`. Ever.** Mounting it would grant host root and the sibling role's credentials, dissolving every boundary in §13.
 - `--restart unless-stopped` lets containers survive an OrbStack or host restart on their own; the Reconciler then adopts or prunes them by label. This is the container half of NFR-1.1a.
 - The tmpfs at `mode=0711` lets each role traverse to its own token directory without listing the sibling's.
-- **Nested bind mounts for topology (M2 W1/W2).** `repos/` and `sessions/<key>` must be siblings under `/srv/agentd` so `worktree.useRelativePaths` gitdirs resolve (W1). Do **not** mount the whole `~/.agentd` root — that exposes `state.db` (which stores `runners.token` / the RPC bearer) and `config.yaml` to every role UID via the bind-mount DAC hole (§5.2), re-opening R1. Nested mounts give the sibling layout without host secrets.
+- **Single project mount (W1/W2, #20).** Mount exactly `projects/<owner>__<repo>` → `/srv/agentd` so `repo/`, `sessions/`, and `home/` are siblings (W1 relative gitdirs). Do **not** mount the whole `~/.agentd` root — that exposes `state.db` / `config.yaml` (W2 / R1).
 - **Capabilities (M2 amendment).** `--cap-drop ALL` alone makes `chown` and `setuid` return EPERM even for UID 0 under OrbStack/Linux, which makes §5.2 token placement and §7.3 privilege drop impossible. Re-add only `CHOWN`, `FOWNER`, `SETUID`, `SETGID`. No `SYS_ADMIN`, no `NET_ADMIN`, no docker socket.
 - **RPC bearer delivery (M2 amendment, R1).** The bearer is **not** in container env (`docker inspect`) and **not** on a bind mount (roles can read all bind-mounted files — §5.2 table). Sequence: `docker create` → `docker cp` host-minted bearer to container-local `/etc/agentd/rpc.bearer` (root-owned `0400`, real Linux DAC) → `docker start`. Runner refuses to bind if the file is missing. Assert both: absent from inspect Env, and unreadable as either role UID.
 - Egress is unrestricted by default (GitHub, model APIs, package registries). An allowlisting egress proxy is noted in §13.3 as hardening, not baseline.
@@ -694,7 +704,9 @@ The checkbox's only remaining job is to classify the terminal state:
 | Checkbox verified | `VERIFIED` | Full, plus completion summary comment |
 | Checkbox absent or unverified | `ABANDONED` | Full, reason recorded, no summary |
 
-Both tear down completely. There is no timer, no hold, and no attempt to reopen an issue the owner closed — a close without verification is a meaningful human act ("won't fix", "fixed another way"), and the system records it rather than arguing with it.
+Both tear down **issue artifacts** completely (worktrees, branches, scratch, issue session dirs). Under project-scoped runners (#20) the **project container is not an artifact of the issue** — issue close must not `docker stop`/`rm` a container still serving other issues. Container teardown is project-level (last session gone, or explicit project archive).
+
+There is no timer, no hold, and no attempt to reopen an issue the owner closed — a close without verification is a meaningful human act ("won't fix", "fixed another way"), and the system records it rather than arguing with it.
 
 **Ordering is normative: tick, then close** (`@huozhe`'s call, 2026-08-07). The classification is evaluated against the checkbox state at `issues.closed` and is never revised afterwards — a tick arriving after closure changes nothing. The alternative considered was making a late tick promote `ABANDONED` → `VERIFIED`, and it was rejected: it would reopen the terminal state after teardown has already run, which is precisely the "no timer, no hold" property above. The cost is that the ordering must be *communicated*, which is why §10.1's block carries it inline rather than leaving it to the runbook.
 
@@ -856,6 +868,8 @@ What this explicitly does **not** provide: cross-role *data* confidentiality. Bo
 
 The consequence that does **not** follow automatically, and must be stated rather than inherited: **a prompt injection now persists.** Under per-issue containers a poisoned turn was contained to one conversation that ended with the issue. Under project scope it remains in that role's conversation for the life of the project, influencing every later issue. This is an accepted cost of the decision to share context across issues (which is wanted — issues here are interconnected), not an oversight. Two mitigations follow from it: `session.snapshot` (§14.2) compaction becomes load-bearing rather than optional, and a project-level "reset this role's conversation" escape hatch is the remedy when a session is believed poisoned.
 
+**Cross-issue context (#20).** One CLI conversation per role is shared across issues in a project by design. A prompt injection in one issue's turn can persist into later issues for that role for the project's life. Accepted under owner decision (serial, interconnected issues); stated here so it is not inherited silently (§13.3).
+
 ### 13.3 Prompt Injection
 
 Issue and PR text is untrusted input and the agents hold write credentials. On a private single-owner repo the exposure is low; it rises immediately if the repo becomes public. Baseline mitigations: `intake.actors: collaborators` (§4.3); role cards instructing agents to treat issue/PR bodies as data rather than instructions; gateway-verified merge preconditions (§8.4); and a human closure gate that is structurally unreachable by any agent. Full mitigation is out of scope and belongs in a follow-up.
@@ -1016,6 +1030,7 @@ CREATE TABLE circuit_breaker (
 
 CREATE TABLE sessions (
   session_key TEXT PRIMARY KEY,         -- owner/repo#42
+  project_key TEXT NOT NULL,            -- owner/repo (#20)
   repo TEXT NOT NULL, issue_num INTEGER NOT NULL,
   state TEXT NOT NULL, paused_reason TEXT,
   architect TEXT NOT NULL, developer TEXT NOT NULL,
@@ -1031,12 +1046,12 @@ CREATE TABLE sessions (
   created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
 );
 
+-- N issue sessions : 1 project runner (#20)
 CREATE TABLE runners (
-  session_key TEXT PRIMARY KEY,
-  container_id TEXT, endpoint TEXT, token TEXT,
-  tier TEXT NOT NULL,                   -- hot|cold|absent
-  last_seen_at INTEGER,
-  FOREIGN KEY (session_key) REFERENCES sessions(session_key) ON DELETE CASCADE
+  project_key TEXT PRIMARY KEY,        -- owner/repo
+  container_id TEXT, endpoint TEXT, token TEXT,  -- RPC bearer
+  tier TEXT NOT NULL,                   -- hot|cold
+  last_seen_at INTEGER
 );
 
 CREATE TABLE turns (
