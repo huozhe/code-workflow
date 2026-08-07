@@ -128,6 +128,42 @@ def assert_bearer_not_readable_by_roles(container_id: str) -> None:
             )
 
 
+def assert_worktree_usable(
+    container_id: str,
+    *,
+    session_key: str,
+    issue_num: int,
+    role: str = "architect",
+    uid: str = "1001:1001",
+) -> None:
+    """§6.4: relative gitdir must resolve inside the container for the role UID.
+
+    Catches mount-topology mistakes (flattening repos/sessions differently on
+    host vs container) that leave worktrees unusable for agent git commands.
+    """
+    sn = session_dir_name(session_key)
+    wt = f"/srv/agentd/sessions/{sn}/{role}/worktrees/issue-{issue_num}"
+    r = _docker(
+        "exec",
+        "-u",
+        uid,
+        "-w",
+        wt,
+        container_id,
+        "git",
+        "rev-parse",
+        "--git-dir",
+        check=False,
+    )
+    if r.returncode != 0:
+        raise RuntimeError(
+            f"worktree unusable in container for {role} at {wt}: "
+            f"stdout={r.stdout!r} stderr={r.stderr!r}"
+        )
+    gitdir = (r.stdout or "").strip()
+    log.info("worktree ok role=%s gitdir=%s", role, gitdir)
+
+
 class SessionSupervisor:
     def __init__(self, store: Store, config: Config) -> None:
         self.store = store
@@ -196,17 +232,22 @@ class SessionSupervisor:
         name = container_name(session_key)
         _docker("rm", "-f", name, check=False)
 
+        # Single host-root mount preserves repos/ vs sessions/ topology so
+        # worktree.useRelativePaths gitdirs resolve identically (§6.4 / W1).
+        session_dir_in_container = f"/srv/agentd/sessions/{sn}"
         env: dict[str, str] = {
             # 0.0.0.0 required for published port; auth is root-only bearer file.
             "AGENTD_RPC_HOST": "0.0.0.0",
             "AGENTD_RPC_PORT": str(RPC_CONTAINER_PORT),
+            "AGENTD_HOST_ROOT": "/srv/agentd",
+            "AGENTD_SESSION_DIR": session_dir_in_container,
         }
         # Test-only stub API — never set on the ordinary production path.
         if github_api_base:
             env["AGENTD_GITHUB_API_BASE"] = github_api_base
 
         # create (not run) so we can docker cp the bearer onto container rootfs
-        # before start — never bind mount, never Env (§5.2 / R1).
+        # before start — never bind mount credentials, never Env (§5.2 / R1).
         create_args = [
             "create",
             "--name",
@@ -239,10 +280,10 @@ class SessionSupervisor:
             "no-new-privileges",
             "--tmpfs",
             "/run/agent:rw,noexec,nosuid,size=1m,mode=0711",
+            # One mount of the agentd root — not separate /srv/repo + /srv/session
+            # (those flatten topology and break relative worktree gitdirs).
             "-v",
-            f"{clone}:/srv/repo",
-            "-v",
-            f"{sess_host}:/srv/session",
+            f"{self.config.root}:/srv/agentd",
             "-p",
             f"127.0.0.1:0:{RPC_CONTAINER_PORT}",
         ]
@@ -267,6 +308,13 @@ class SessionSupervisor:
         assert_no_docker_sock_mount(cid)
         assert_bearer_not_in_inspect_env(cid)
         assert_bearer_not_readable_by_roles(cid)
+        # Worktree topology must resolve for both roles before we hand off.
+        assert_worktree_usable(
+            cid, session_key=session_key, issue_num=issue_num, role="architect", uid="1001:1001"
+        )
+        assert_worktree_usable(
+            cid, session_key=session_key, issue_num=issue_num, role="developer", uid="1002:1002"
+        )
         host_port = _host_port_from_inspect(cid)
         endpoint = f"127.0.0.1:{host_port}"
 

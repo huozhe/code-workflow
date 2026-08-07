@@ -93,14 +93,26 @@ def _run_as_role(uid: int, fn_name: str, paths: list[str]) -> int:
     return 1
 
 
+def session_base() -> Path:
+    """Session directory inside the container.
+
+    Prefer AGENTD_SESSION_DIR (…/sessions/<key> under the host-root mount).
+    Falls back to legacy /srv/session only for older containers.
+    """
+    override = os.environ.get("AGENTD_SESSION_DIR")
+    if override:
+        return Path(override)
+    return Path("/srv/session")
+
+
 def ensure_role_layout(role: str) -> dict[str, str]:
-    """HOME / TMPDIR / XDG under /srv/session/<role>/ at 0700.
+    """HOME / TMPDIR / XDG under <session>/<role>/ at 0700.
 
     Directories are created *as the role UID* so ownership is real on the
     container filesystem view. Host must leave base role dir traversable (0755).
     §7.3: fail if the role cannot write its TMPDIR.
     """
-    base = Path("/srv/session") / role
+    base = session_base() / role
     home = base / "home"
     tmp = base / "tmp"
     xdg = base / "xdg"

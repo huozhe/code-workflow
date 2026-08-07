@@ -64,8 +64,7 @@ class _GitHubStub(BaseHTTPRequestHandler):
 
 @pytest.fixture(scope="module")
 def built_image() -> None:
-    if image_present():
-        return
+    # Always build so Dockerfile changes are validated (layer cache keeps it cheap).
     root = Path(__file__).resolve().parents[1]
     r = subprocess.run(
         [
@@ -81,7 +80,7 @@ def built_image() -> None:
         text=True,
     )
     if r.returncode != 0:
-        pytest.skip(f"image build failed: {r.stderr[-500:]}")
+        pytest.skip(f"image build failed: {r.stderr[-800:]}")
 
 
 @pytest.fixture()
@@ -164,6 +163,28 @@ def test_session_health_ping_and_token_boundary(
         # Bearer must not sit on the session bind mount either
         sess = tmp_path / "sessions" / "test__repo__1"
         assert not (sess / ".runner" / "bearer").exists()
+
+        # W1: role can run git in its worktree (topology preserved)
+        wt = (
+            f"/srv/agentd/sessions/test__repo__1/architect/worktrees/issue-1"
+        )
+        git_st = subprocess.run(
+            [
+                "docker",
+                "exec",
+                "-u",
+                "1001:1001",
+                "-w",
+                wt,
+                handle.container_id,
+                "git",
+                "status",
+                "--short",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert git_st.returncode == 0, git_st.stderr
 
         boundary = sup.adversarial_token_check(handle)
         assert boundary["developer_can_read_architect_token"] is False, boundary
