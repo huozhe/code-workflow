@@ -260,8 +260,9 @@ class SessionSupervisor:
         name = container_name(session_key)
         _docker("rm", "-f", name, check=False)
 
-        # Single host-root mount preserves repos/ vs sessions/ topology so
-        # worktree.useRelativePaths gitdirs resolve identically (§6.4 / W1).
+        # Nested mounts (below): repos/ + sessions/<key> as siblings under
+        # /srv/agentd for relative worktree gitdirs (W1) — not the whole host
+        # root (that exposed state.db / runners.token — W2 / R1).
         session_dir_in_container = f"/srv/agentd/sessions/{sn}"
         env: dict[str, str] = {
             # 0.0.0.0 required for published port; auth is root-only bearer file.
