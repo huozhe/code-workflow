@@ -149,7 +149,9 @@ class DesignLoop:
         architect = str(sess.get("architect") or default_arch)
         developer = str(sess.get("developer") or default_dev)
         role_logins = {"architect": architect, "developer": developer}
-        bot_logins = {architect, developer}
+        # Include gateway login so §9.1 rule 6 cannot treat it as a human collaborator
+        # (PR #27 B2 / Architect: without this, gateway comments route as human-or-other).
+        bot_logins = {architect, developer} | self.config.all_bot_logins()
 
         state = str(sess.get("state") or "PLANNING")
         paused = state == "PAUSED_HUMAN" or bool(sess.get("paused_reason"))

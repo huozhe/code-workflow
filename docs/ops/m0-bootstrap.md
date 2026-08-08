@@ -23,9 +23,18 @@ security add-generic-password -s agentd -a grok-bot -w '<pat>' -U
 
 # Gateway voice (M3-A §8.5 escalations). Fail-closed: agentd will NOT fall
 # back to claude-bot/grok-bot for escalation comments (PR #27 B2 / ADR-11).
-# Mint a dedicated machine user with `issues: write` on target repos only —
-# not admin, not the Architect/Developer identities (FR-1.3 boundary).
+# Account: @huozhegateway (classic repo PAT — fine-grained unavailable on
+# private personal repos; see unified_design_spec §5.1 v1.1.2). Collaborator
+# on target repos only. Also set gateway.login in config.yaml.
 security add-generic-password -s agentd -a gateway -w '<gateway-pat>' -U
+```
+
+In `~/.agentd/config.yaml`:
+
+```yaml
+gateway:
+  login: huozhegateway   # GitHub username for escalation comments
+  docker_socket: unix:///var/run/docker.sock
 ```
 
 **Test-only env override (not for production LaunchAgent):**

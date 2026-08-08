@@ -175,6 +175,22 @@ def test_gateway_escalation_comment_dropped_for_both_roles() -> None:
         assert "escalation" in d2.reason
 
 
+def test_gateway_login_not_human_collaborator() -> None:
+    """Without escalation marker, gateway sender still must not route as human."""
+    d = route_for_recipient(
+        sender="huozhegateway",
+        recipient_login="huozheclaude",
+        recipient_role="architect",
+        other_bot_login="huozhegrok",
+        owner="huozhe",
+        body="accidental non-marker comment",
+        session_paused=False,
+        bot_logins={"huozheclaude", "huozhegrok", "huozhegateway"},
+    )
+    assert d.action == RouteAction.DROP
+    assert d.reason in ("unclassified sender", "gateway escalation comment")
+
+
 def test_owner_quote_with_escalation_marker_still_routes() -> None:
     """Owner unpause wins over escalation footer (same rule as turn provenance)."""
     body = format_escalation_comment(
