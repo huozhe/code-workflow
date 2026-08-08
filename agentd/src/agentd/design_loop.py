@@ -34,6 +34,11 @@ log = logging.getLogger("agentd.design_loop")
 _role_locks: dict[str, threading.Lock] = {}
 _role_locks_guard = threading.Lock()
 
+# Short-lived compare cache: same head ⇒ same tree; review *threads* can
+# resolve without a new commit, so they are never cached (PR #29 NB2).
+_STALL_DIFF_CACHE: dict[str, str] = {}
+
+
 
 def _lock_for_project_role(project_key: str, role: str) -> threading.Lock:
     key = f"{project_key}::{role}"
@@ -432,10 +437,19 @@ class DesignLoop:
         )
 
     def _github_api_token(self) -> str | None:
-        """Token for read-only GitHub stall queries (agent classic repo PAT)."""
+        """Token for gateway-initiated GitHub *reads* (stall observation).
+
+        Prefer the gateway credential so the audit trail matches who is
+        observing (PR #29 NB1). Agent PATs are fallback only if gateway is
+        missing — stall reads must not silently die when gateway is mint-only.
+        """
         if self._github_token is not None:
             return self._github_token or None
-        return get_password("claude-bot") or get_password("grok-bot")
+        return (
+            self._gateway_github_token()
+            or get_password("claude-bot")
+            or get_password("grok-bot")
+        )
 
     def _observe_stall_signals(
         self,
@@ -467,7 +481,7 @@ class DesignLoop:
         token = self._github_api_token()
 
         # --- real inputs (fetch boundary; tests inject here) ---
-        snap: PrReviewThreadSnapshot | None = None
+        # reviewThreads: always fetch — resolve does not move head.
         if self._fetch_threads is not None:
             snap = self._fetch_threads(
                 repo=repo, pr_number=int(pr_num or 0), token=token
@@ -476,6 +490,24 @@ class DesignLoop:
             snap = fetch_pr_review_threads(
                 repo=repo, pr_number=int(pr_num or 0), token=token
             )
+
+        base = (snap.base_ref if snap else None) or "main"
+        head_for_diff = str(head or (snap.head_oid if snap else "") or "")
+        diff_key = f"{repo}#{int(pr_num or 0)}@{base}...{head_for_diff}"
+        diff_stat: str | None = _STALL_DIFF_CACHE.get(diff_key)
+        if diff_stat is None and head_for_diff:
+            if self._fetch_diff is not None:
+                diff_stat = self._fetch_diff(
+                    repo=repo, base=base, head=head_for_diff, token=token
+                )
+            else:
+                diff_stat = fetch_diff_stat(
+                    repo=repo, base=base, head=head_for_diff, token=token
+                )
+            if diff_stat is not None:
+                _STALL_DIFF_CACHE[diff_key] = diff_stat
+                while len(_STALL_DIFF_CACHE) > 64:
+                    _STALL_DIFF_CACHE.pop(next(iter(_STALL_DIFF_CACHE)))
 
         open_ids: list[str] = []
         threads_observed = False
@@ -494,26 +526,18 @@ class DesignLoop:
             except json.JSONDecodeError:
                 prior_ids = set()
         current_ids = set(open_ids)
-        # Delta only meaningful once we have a prior snapshot.
+        # Delta only once we have a prior snapshot. First observed round has
+        # prior_ids empty → threads_resolved=0 by design (PR #29 NB3): absence
+        # of a previous snapshot is not evidence that anything was resolved.
+        # At threshold 3 that only means the counter can sit at 1 after the
+        # first real observation — not a false escalate.
         if threads_observed and prior_ids:
             threads_resolved = len(prior_ids - current_ids)
         else:
             threads_resolved = 0
 
-        base = (snap.base_ref if snap else None) or "main"
-        head_for_diff = str(head or (snap.head_oid if snap else "") or "")
-        diff_stat: str | None = None
-        if self._fetch_diff is not None:
-            diff_stat = self._fetch_diff(
-                repo=repo, base=base, head=head_for_diff, token=token
-            )
-        elif head_for_diff:
-            diff_stat = fetch_diff_stat(
-                repo=repo, base=base, head=head_for_diff, token=token
-            )
-
         reason: str | None = None
-        # Fingerprint only when we have real progress material (§9.3 NB2).
+        # Fingerprint only when we have real progress material (§9.3).
         if threads_observed and diff_stat is not None:
             fp = progress_fingerprint(
                 open_thread_ids=open_ids,
