@@ -74,20 +74,31 @@ class RunnerClient:
         if self._wfile is None or self._rfile is None:
             raise RuntimeError("not connected")
         self._id += 1
+        req_id = self._id
         req = {
             "jsonrpc": "2.0",
-            "id": self._id,
+            "id": req_id,
             "method": method,
             "params": params or {},
         }
         line = (json.dumps(req, separators=(",", ":")) + "\n").encode("utf-8")
         self._wfile.write(line)
         self._wfile.flush()
-        raw = self._rfile.readline()
-        if not raw:
-            raise RuntimeError("RPC connection closed")
-        resp = json.loads(raw.decode("utf-8"))
-        if "error" in resp and resp["error"]:
-            err = resp["error"]
-            raise RpcError(int(err.get("code", -1)), str(err.get("message", "")))
-        return resp.get("result")
+        # Drain notify.* frames (no id) until the matching response (#25 / §14.2).
+        while True:
+            raw = self._rfile.readline()
+            if not raw:
+                raise RuntimeError("RPC connection closed")
+            resp = json.loads(raw.decode("utf-8"))
+            if resp.get("id") is None and resp.get("method"):
+                log.debug("rpc notify %s params=%s", resp.get("method"), resp.get("params"))
+                continue
+            if resp.get("id") != req_id and resp.get("id") is not None:
+                log.warning(
+                    "rpc unexpected id %s (want %s); discarding", resp.get("id"), req_id
+                )
+                continue
+            if "error" in resp and resp["error"]:
+                err = resp["error"]
+                raise RpcError(int(err.get("code", -1)), str(err.get("message", "")))
+            return resp.get("result")

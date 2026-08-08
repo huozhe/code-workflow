@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | **Status** | Proposed for formal approval (Phase 3 exit) |
-| **Version** | 1.1.0 — see [Revision history](#revision-history) |
+| **Version** | 1.1.1 — see [Revision history](#revision-history) |
 | **Implements** | [`docs/requirements/SRS_async_multiagent_ai_coding_system.md`](../requirements/SRS_async_multiagent_ai_coding_system.md) **v1.3** |
 | **Supersedes** | [`proposals/claude_design_spec.md`](proposals/claude_design_spec.md) (#4) · [`proposals/grok_design_spec.md`](proposals/grok_design_spec.md) (#2) · [`proposals/gemini_design_spec.md`](proposals/gemini_design_spec.md) (#3) |
 | **Ref** | Issue #1 |
@@ -18,6 +18,7 @@ Amendments are also marked inline at the point they apply, which is where an imp
 
 | Version | Date | Change |
 |---|---|---|
+| **1.1.1** | 2026-08-07 | **Runner-owned long-lived CLI per role** (#25). A6 / §7.3 / §14.2 / §14.5 wording aligned with §6.3 (process liveness fast path): privilege drop at session spawn, `turn.dispatch` multiplexes over a held pipe with per-turn deadline, oneshot `-p` remains the recovery path. Cwd decision (a): spawn at project root; worktree named per turn. |
 | **1.1.0** | 2026-08-07 | **Container unit: issue → project** (ADR-4). Session directories nest under the project (§6.2); process liveness becomes the fast path and persistence the recovery path (§6.3); tiers and memory budget are per project (§6.5, §6.6); model-provider credential delivery and the never-copy rule (§5.2); cross-issue exposure and injection persistence (§13.2); ADR-3 clarified as being about *gateway*-held stdio. Owner decision on #19; implementation #20. |
 | **1.0.0** | 2026-08-02 | Approved via #1. Amendments for M0, M1, M2 (×2) and M3 subsequently landed **against 1.0.0 without a version bump** — recorded here rather than retrofitted, since they are marked inline and reassigning versions after the fact would misstate what was approved when. |
 
@@ -97,7 +98,7 @@ Two decisions were made by the repository owner (`@huozhe`) and are not open to 
 | A3 | The owner can configure repository webhooks and branch protection | Without branch protection, FR-1.3 is untestable and M4 cannot pass |
 | A4 | `/Users` is shared into containers by OrbStack (default) | Mount root becomes configurable; §6.4 relative worktree paths already remove the path-equality dependency |
 | A5 | Container-internal `tmpfs` enforces UID ownership and mode | **Load-bearing.** Falsified ⇒ fall back to two containers (ADR-4 fallback). **Spike M2-B** (M2-A is the separate host-bind expected-fail test) |
-| A6 | Each vendor agent CLI can run headless, non-interactively, one turn at a time | Adapter wraps it; continuity comes from our transcript, not vendor session state (ADR-9) |
+| A6 | Each vendor agent CLI can run headless, non-interactively, and accept sequential turns over a long-lived stdio session (or one-shot `-p` as recovery) | Adapter owns the protocol; **process liveness is the fast path** (§6.3). Our `transcript.jsonl` + vendor session store + `-c` / ACP re-entry is the recovery path when the process dies (ADR-9 — vendor resume is an optimization, not a dependency) |
 | A7 | The `~/.agentd` volume has ≥ 50 GB free at install | Circuit breaker trips immediately and the system refuses work — loudly, which is correct |
 
 ---
@@ -287,6 +288,8 @@ role/architect:grok        role/developer:claude
 This is narrower than the position originally locked in review ("at design freeze", i.e. when the Design PR merges), and it is narrower for a reason found during review of this PR: between Design PR *open* and Design PR *merge* the Developer is actively reviewing, so a label edit in that window would re-resolve roles and invalidate both the Architect's in-progress PR and the Developer's review context. Freezing at the first `turn.dispatch` instead — the other proposal — overshoots in the opposite direction, closing the window within seconds of the issue opening.
 
 Opening the Design PR is the right boundary because it is the last moment before any peer-review context exists, while still leaving the whole RFC-drafting turn (tens of seconds to minutes) available for a human to correct a mislabelled role.
+
+**Adapter swap and long-lived CLI (#25).** Changing a role's adapter (label override or config) while a project runner is HOT kills that role's held CLI process and starts the new adapter. The vendor conversation for the prior adapter is discarded — deliberate: one process cannot speak two protocols. Cross-issue context for that role is then rebuilt from `transcript.jsonl` / vendor store on the recovery path (§14.5), not carried across the adapter boundary.
 
 ### 5.4 Configuration
 
@@ -486,12 +489,20 @@ Non-obvious choices:
 PID 1  agentd-runner (root)
    │   - binds RPC endpoint
    │   - receives tokens via session.init, writes /run/agent/<role>/token
+   │   - owns stdio of one long-lived CLI child per role (§6.3 / #25)
    │   - NEVER executes agent or tool code as root
-   └── per turn: fork → setgid/setuid(uid_<role>) → exec adapter
-         env: HOME=/srv/session/<role>/home
-              TMPDIR=/srv/session/<role>/tmp   (mode 0700)
-              XDG_*=/srv/session/<role>/xdg
+   └── per role (session.init / resume, and on crash respawn):
+         Popen(preexec: setgroups([]) → setgid/setuid(uid_<role>))
+         cwd = project root (/srv/agentd); worktree path is named per turn
+         env: HOME=<durable project home>/<role>  (or session home fallback)
+              TMPDIR=<session>/<role>/tmp   (mode 0700)
+              XDG_*=<session>/<role>/xdg
+         turns multiplex over the held pipe under the per-(project, role) lock
+   └── recovery / mock / AGENTD_CLI_MODE=oneshot:
+         per turn: fork → setgroups([]) → setgid/setuid → run -p adapter
 ```
+
+**Timing change (#25).** Privilege drop moved from *per turn* to *per session spawn*. The §7.3 invariants are unchanged: the CLI never runs as root; correct per-role uid; no supplementary groups; `HOME` / `TMPDIR` / `XDG_*` under the role's tree. A wedged turn is bounded by a per-turn deadline on the shared pipe; on expiry the runner kills the child so the role remains usable, then respawns with `-c` / store re-entry on the next dispatch.
 
 Every subprocess of a turn — the agent CLI, `git`, `gh`, test runners, package managers — runs as the role UID. Per-role `TMPDIR` at `0700` is required, not optional: `/tmp` at `1777` prevents cross-UID *deletion* but not cross-UID *reading*, and CLIs routinely cache credentials into their default temp path.
 
@@ -906,19 +917,23 @@ First frame after connect must be `session.attach` carrying the bearer token; an
 | `session.attach` | Authenticate the connection |
 | `session.init` | First-time setup: role cards, identities, **tokens**, workspace paths, budgets; **identity preflight** (`GET /user` per token) before any turn |
 | `session.resume` | Post-restart rehydration with a digest of missed activity; re-delivers tokens; **repeats identity preflight** |
-| `turn.dispatch` | Run one turn against one normalized event |
+| `turn.dispatch` | Run one turn against one normalized event — on the **held per-role CLI pipe** when live (§6.3); oneshot `-p` only when mock/script or `AGENTD_CLI_MODE=oneshot` |
 | `turn.resume` | Re-enter an interrupted turn; runner re-derives state from the workspace |
 | `session.snapshot` | Force a transcript checkpoint and context compaction |
-| `session.teardown` | Clean up owned artifacts, report what was removed (FR-4.3) |
-| `health.ping` | Liveness + RSS |
+| `session.teardown` | Kill held CLI children, wipe secrets, report cleanup (FR-4.3) |
+| `health.ping` | Liveness + runner RSS + per-role CLI RSS (`cli_rss_kb`) |
 
 **Runner → Gateway**
 
 | Method | Purpose |
 |---|---|
-| `notify.progress` | Streaming turn progress (notification) |
+| `notify.progress` | Streaming turn progress (notification; no `id`) — partial CLI output while a turn is open |
 | `artifact.register` | Declare a worktree/branch/scratch path for the cleanup ledger |
 | `escalate.human` | Request human input; pauses the session (FR-3.3/3.4) |
+
+**`turn.dispatch` on a held pipe (#25).** The runner does not `exec` a new CLI per turn for real adapters. It writes one user message (claude stream-json) or one `session/prompt` (grok ACP) on the existing stdin, reads until turn-end (`{"type":"result"}` / `stopReason: end_turn`), and may emit `notify.progress` frames before the JSON-RPC response. The gateway client must drain notification frames until the matching response `id`. Per-turn `deadline_s` still bounds the wait; on expiry the child is killed and the result is `failed` so the role lock can release. Crash or kill → next dispatch respawns with vendor `-c` / session store + transcript under §14.5.
+
+**Cwd.** The long-lived process is spawned at the project root (`/srv/agentd`). Each turn's prompt names the issue worktree; the process is not rebound per issue (decision (a) on #25).
 
 ### 14.3 Example Turn
 
@@ -947,9 +962,15 @@ First frame after connect must be `session.attach` carrying the bearer token; an
 
 When `transcript.jsonl` exceeds a configured token estimate, the runner self-summarizes into `context/summary.md` and starts a new segment. Resume loads the summary plus the current segment, bounding per-turn cost on long-lived issues.
 
+**Project-scope / long-lived CLI (#25):** vendor in-process context also grows for the project lifetime (not only our transcript). Compaction becomes load-bearing (§13.2). Automatic `session.snapshot` compaction is still future work; until it lands, the runner **logs at ERROR** when `transcript.jsonl` reaches **≥ 5000 lines** and surfaces `transcript_growth_warning` on the turn result — operators must reset the role conversation rather than expect silent mid-turn truncation.
+
 ### 14.5 Vendor Adapter Contract
 
-**The stable surface is `agentd-runner` + host-persisted `transcript.jsonl` + `summary.md` + event digest — not vendor session-resume APIs.** If a vendor CLI cannot rehydrate its own internal session, the adapter rebuilds the next turn from our files, exactly as a COLD resume does. Slightly higher token cost; zero cold start still holds at the git and workspace layers. Vendor capability differences are therefore adapter implementation details and cannot force an architecture change.
+**The stable surface is `agentd-runner` + host-persisted `transcript.jsonl` + `summary.md` + event digest.** Vendor session-resume (`claude -c`, Grok ACP / durable HOME store) is the **fast recovery** when a held process dies; it is **not** the sole continuity mechanism and not a dependency for architecture (ADR-9). If a vendor CLI cannot rehydrate its own internal session, the adapter rebuilds the next turn from our files (oneshot `-p` with transcript rehydration), exactly as a cold path does. Slightly higher token cost; zero cold start still holds at the git and workspace layers. Vendor capability differences are therefore adapter implementation details and cannot force an architecture change.
+
+**One-shot `-p` remains explicit recovery**, selected by `AGENTD_CLI_MODE=oneshot` or by mock/script adapters — never the accidental default for production claude/grok once the long-lived path is wired (#25).
+
+**§14.4 growth note.** In-process vendor context now grows for the project's lifetime. Compaction (`session.snapshot`) is load-bearing; until implemented, the runner must fail loudly on unbounded growth rather than silently truncate mid-conversation.
 
 ---
 
