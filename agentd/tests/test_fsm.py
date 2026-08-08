@@ -20,3 +20,8 @@ def test_design_happy_path() -> None:
 def test_escalation_pause() -> None:
     t = transition("DESIGN_REVIEW", "escalation")
     assert t is not None and t.new_state == "PAUSED_HUMAN"
+
+
+def test_owner_reply_from_pause_fallback() -> None:
+    t = transition("PAUSED_HUMAN", "owner_reply")
+    assert t is not None and t.new_state == "PLANNING"

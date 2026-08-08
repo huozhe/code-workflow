@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from agentd.github_write import format_escalation_comment
 from agentd.routing import (
     RouteAction,
+    parse_escalation_marker,
     parse_provenance,
     provenance_footer,
     route_for_recipient,
@@ -125,3 +127,88 @@ def test_provenance_footer_roundtrip() -> None:
     assert p["session"] == "o/r#1"
     assert p["role"] == "architect"
     assert p["turn"] == "t-abc"
+
+
+def test_gateway_escalation_comment_dropped_for_both_roles() -> None:
+    """PR #27 B1: agentd:escalation must never become an agent turn."""
+    body = format_escalation_comment(
+        owner="huozhe",
+        session_key="o/r#42",
+        state="DESIGN_REVIEW",
+        role="system",
+        reason="budget",
+    )
+    assert parse_escalation_marker(body) is not None
+    assert parse_provenance(body) is None  # different marker
+
+    for role, login, other in (
+        ("architect", "huozheclaude", "huozhegrok"),
+        ("developer", "huozhegrok", "huozheclaude"),
+    ):
+        # Sender is the other bot (B1: agent-PAT post) — not self-echo.
+        # Unpaused after owner unpause is the failure mode in the review.
+        d = route_for_recipient(
+            sender=other,
+            recipient_login=login,
+            recipient_role=role,
+            other_bot_login=other,
+            owner="huozhe",
+            body=body,
+            session_paused=False,
+            bot_logins={"huozheclaude", "huozhegrok"},
+        )
+        assert d.action == RouteAction.DROP, (role, d)
+        assert "escalation" in d.reason
+
+        # While still paused — drop immediately, do not park as deferred.
+        d2 = route_for_recipient(
+            sender=other,
+            recipient_login=login,
+            recipient_role=role,
+            other_bot_login=other,
+            owner="huozhe",
+            body=body,
+            session_paused=True,
+            bot_logins={"huozheclaude", "huozhegrok"},
+        )
+        assert d2.action == RouteAction.DROP
+        assert "escalation" in d2.reason
+
+
+def test_gateway_login_not_human_collaborator() -> None:
+    """Without escalation marker, gateway sender still must not route as human."""
+    d = route_for_recipient(
+        sender="huozhegateway",
+        recipient_login="huozheclaude",
+        recipient_role="architect",
+        other_bot_login="huozhegrok",
+        owner="huozhe",
+        body="accidental non-marker comment",
+        session_paused=False,
+        bot_logins={"huozheclaude", "huozhegrok", "huozhegateway"},
+    )
+    assert d.action == RouteAction.DROP
+    assert d.reason in ("unclassified sender", "gateway escalation comment")
+
+
+def test_owner_quote_with_escalation_marker_still_routes() -> None:
+    """Owner unpause wins over escalation footer (same rule as turn provenance)."""
+    body = format_escalation_comment(
+        owner="huozhe",
+        session_key="o/r#1",
+        state="PLANNING",
+        role="system",
+        reason="x",
+    )
+    body = f"> quoted\n{body}\n\nProceed with option A."
+    d = route_for_recipient(
+        sender="huozhe",
+        recipient_login="huozheclaude",
+        recipient_role="architect",
+        other_bot_login="huozhegrok",
+        owner="huozhe",
+        body=body,
+        session_paused=True,
+    )
+    assert d.action == RouteAction.ROUTE
+    assert d.reset_consec is True

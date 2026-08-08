@@ -20,6 +20,21 @@ security add-generic-password -s agentd -a webhook-secret -w '<random-hex>' -U
 # Bot PATs (used from M2+; store now so M0 host is complete)
 security add-generic-password -s agentd -a claude-bot -w '<pat>' -U
 security add-generic-password -s agentd -a grok-bot -w '<pat>' -U
+
+# Gateway voice (M3-A §8.5 escalations). Fail-closed: agentd will NOT fall
+# back to claude-bot/grok-bot for escalation comments (PR #27 B2 / ADR-11).
+# Account: @huozhegateway (classic repo PAT — fine-grained unavailable on
+# private personal repos; see unified_design_spec §5.1 v1.1.2). Collaborator
+# on target repos only. Also set gateway.login in config.yaml.
+security add-generic-password -s agentd -a gateway -w '<gateway-pat>' -U
+```
+
+In `~/.agentd/config.yaml`:
+
+```yaml
+gateway:
+  login: huozhegateway   # GitHub username for escalation comments
+  docker_socket: unix:///var/run/docker.sock
 ```
 
 **Test-only env override (not for production LaunchAgent):**
@@ -28,6 +43,7 @@ security add-generic-password -s agentd -a grok-bot -w '<pat>' -U
 export AGENTD_SECRET_WEBHOOK_SECRET='...'   # webhook HMAC
 export AGENTD_SECRET_CLAUDE_BOT='...'       # optional PAT overrides
 export AGENTD_SECRET_GROK_BOT='...'
+export AGENTD_SECRET_GATEWAY='...'         # gateway escalation comment PAT
 ```
 
 These bypass Keychain when set. The production plist must **not** set them; production loads only from Keychain at process start and **exits non-zero** if the webhook secret is missing (so a lagging login-keychain after FileVault unlock fails loud instead of 5xx-dropping GitHub deliveries).

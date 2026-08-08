@@ -15,7 +15,9 @@ from agentd.db import Store, decompress_payload
 from agentd.digest import build_digest, digest_to_markdown
 from agentd.fsm import transition
 from agentd.gitops import project_key_from_repo, project_path
+from agentd.github_write import format_escalation_comment, post_issue_comment
 from agentd.intake import evaluate_intake
+from agentd.keychain import get_password
 from agentd.loop_safety import BudgetState, StallTracker, progress_fingerprint
 from agentd.routing import RouteAction, provenance_footer, route_for_recipient
 from agentd.rpc_client import RunnerClient
@@ -54,11 +56,16 @@ class DesignLoop:
         supervisor: SessionSupervisor | None = None,
         *,
         dispatch_turns: bool = True,
+        post_comment: Any | None = None,
+        gateway_token: str | None = None,
     ) -> None:
         self.store = store
         self.config = config
         self.supervisor = supervisor
         self.dispatch_turns = dispatch_turns
+        # Injectables for unit tests (M3-A gateway GitHub write).
+        self._post_comment = post_comment
+        self._gateway_token = gateway_token
 
     def process_deferred_batch(self, limit: int = 20) -> int:
         n = 0
@@ -142,7 +149,9 @@ class DesignLoop:
         architect = str(sess.get("architect") or default_arch)
         developer = str(sess.get("developer") or default_dev)
         role_logins = {"architect": architect, "developer": developer}
-        bot_logins = {architect, developer}
+        # Include gateway login so §9.1 rule 6 cannot treat it as a human collaborator
+        # (PR #27 B2 / Architect: without this, gateway comments route as human-or-other).
+        bot_logins = {architect, developer} | self.config.all_bot_logins()
 
         state = str(sess.get("state") or "PLANNING")
         paused = state == "PAUSED_HUMAN" or bool(sess.get("paused_reason"))
@@ -152,11 +161,13 @@ class DesignLoop:
             consec_agent_turns=int(sess.get("consec_agent_turns") or 0),
             review_rounds=int(sess.get("review_rounds") or 0),
         )
-        breach = budget.breach()
-        if breach:
-            self._escalate(session_key, "system", breach)
-            self.store.set_delivery_status(delivery_id, "done")
-            return
+        # Do not re-escalate while already paused — owner reply is the only exit.
+        if not paused:
+            breach = budget.breach()
+            if breach:
+                self._escalate(session_key, "system", breach)
+                self.store.set_delivery_status(delivery_id, "done")
+                return
 
         dig = build_digest(
             event=event,
@@ -224,6 +235,18 @@ class DesignLoop:
 
         if decision.reset_consec:
             self.store.update_session_fields(session_key, consec_agent_turns=0)
+
+        # M3-A / §8.5: owner reply while paused → unpause, inject reply, resume turn.
+        if paused and kind == "owner_reply":
+            self._resume_from_escalation(
+                session_key=session_key,
+                sess=sess,
+                dig=dig,
+                data=data,
+                delivery_id=delivery_id,
+                issue_num=int(issue_num),
+            )
+            return
 
         tr = transition(state, kind)
         if tr:
@@ -418,12 +441,157 @@ class DesignLoop:
             provenance_footer(session_key=session_key, role=role, turn_id=turn_id),
         )
 
+    def _gateway_github_token(self) -> str | None:
+        """Gateway voice only — never an agent PAT (PR #27 B2 / ADR-11).
+
+        Keychain account ``gateway`` (service ``agentd``). Env override:
+        ``AGENTD_SECRET_GATEWAY``. No fallback to claude-bot / grok-bot.
+        """
+        if self._gateway_token is not None:
+            # Explicit inject (tests may pass "" to force failure).
+            return self._gateway_token or None
+        return get_password("gateway")
+
     def _escalate(self, session_key: str, role: str, reason: str) -> None:
-        self.store.open_escalation(session_key=session_key, role=role, reason=reason)
-        self.store.update_session_fields(
-            session_key, state="PAUSED_HUMAN", paused_reason=reason
+        """§8.5: pause, post @owner comment, record escalation with comment_id."""
+        sess = self.store.get_session(session_key) or {}
+        prev_state = str(sess.get("state") or "PLANNING")
+        if prev_state == "PAUSED_HUMAN":
+            prev_state = str(sess.get("resume_state") or "PLANNING")
+        repo = str(sess.get("repo") or "")
+        issue_num = sess.get("issue_num")
+
+        comment_id: int | None = None
+        body = format_escalation_comment(
+            owner=self.config.owner,
+            session_key=session_key,
+            state=prev_state,
+            role=role,
+            reason=reason,
         )
-        log.warning("escalation session=%s reason=%s", session_key, reason)
+        try:
+            if self._post_comment is not None:
+                comment_id = int(
+                    self._post_comment(
+                        repo=repo,
+                        issue_num=int(issue_num or 0),
+                        body=body,
+                        token=self._gateway_github_token(),
+                    )
+                )
+            else:
+                comment_id = post_issue_comment(
+                    repo=repo,
+                    issue_num=int(issue_num or 0),
+                    body=body,
+                    token=self._gateway_github_token(),
+                )
+        except Exception as exc:  # noqa: BLE001
+            # Still pause — never silent about the failure (P5).
+            log.exception(
+                "escalation comment failed session=%s: %s — session still paused",
+                session_key,
+                exc,
+            )
+            reason = f"{reason} [comment_post_failed: {exc}]"
+
+        self.store.open_escalation(
+            session_key=session_key,
+            role=role,
+            reason=reason,
+            comment_id=comment_id,
+        )
+        self.store.update_session_fields(
+            session_key,
+            state="PAUSED_HUMAN",
+            paused_reason=reason,
+            resume_state=prev_state,
+        )
+        log.warning(
+            "escalation session=%s reason=%s comment_id=%s resume=%s",
+            session_key,
+            reason,
+            comment_id,
+            prev_state,
+        )
+
+    def _resume_from_escalation(
+        self,
+        *,
+        session_key: str,
+        sess: dict[str, Any],
+        dig: dict[str, Any],
+        data: dict[str, Any],
+        delivery_id: str,
+        issue_num: int,
+    ) -> None:
+        """Owner issue_comment while PAUSED_HUMAN → close escalation, dispatch."""
+        open_esc = self.store.get_open_escalation(session_key)
+        resume_state = str(sess.get("resume_state") or "PLANNING")
+        if resume_state == "PAUSED_HUMAN":
+            resume_state = "PLANNING"
+        esc_role = str((open_esc or {}).get("role") or "architect")
+        if esc_role == "system":
+            esc_role = "architect"
+        if esc_role not in ("architect", "developer"):
+            esc_role = "architect"
+
+        comment_body = ""
+        if isinstance(data.get("comment"), dict):
+            comment_body = str(data["comment"].get("body") or "")
+        dig = dict(dig)
+        dig["kind"] = "owner_reply"
+        dig["owner_reply"] = comment_body[:8000]
+        dig["escalation_reason"] = str(
+            (open_esc or {}).get("reason") or sess.get("paused_reason") or ""
+        )
+        dig["resumed_from"] = "PAUSED_HUMAN"
+        dig["resume_state"] = resume_state
+
+        n = self.store.close_escalation(session_key)
+        self.store.update_session_fields(
+            session_key,
+            state=resume_state,
+            paused_reason=None,
+            resume_state=None,
+            consec_agent_turns=0,
+        )
+        log.info(
+            "escalation closed session=%s rows=%s → %s (owner reply)",
+            session_key,
+            n,
+            resume_state,
+        )
+
+        if self.dispatch_turns and self.supervisor and sess.get("endpoint"):
+            turn_id = "t-" + uuid.uuid4().hex[:12]
+            self._dispatch_turn(
+                session_key=session_key,
+                role=esc_role,
+                turn_id=turn_id,
+                delivery_id=delivery_id,
+                dig=dig,
+                issue_num=issue_num,
+            )
+            budget = BudgetState(
+                turn_count=int(sess.get("turn_count") or 0),
+                consec_agent_turns=0,
+                review_rounds=int(sess.get("review_rounds") or 0),
+            )
+            budget.after_agent_turn()
+            self.store.update_session_fields(
+                session_key,
+                turn_count=budget.turn_count,
+                consec_agent_turns=budget.consec_agent_turns,
+            )
+
+        self.store.set_delivery_status(delivery_id, "routed")
+        log.info(
+            "delivery routed id=%s session=%s role=%s kind=owner_reply (resume)",
+            delivery_id,
+            session_key,
+            esc_role,
+        )
 
     def _event_kind(
         self,

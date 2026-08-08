@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | **Status** | Proposed for formal approval (Phase 3 exit) |
-| **Version** | 1.1.1 — see [Revision history](#revision-history) |
+| **Version** | 1.1.2 — see [Revision history](#revision-history) |
 | **Implements** | [`docs/requirements/SRS_async_multiagent_ai_coding_system.md`](../requirements/SRS_async_multiagent_ai_coding_system.md) **v1.3** |
 | **Supersedes** | [`proposals/claude_design_spec.md`](proposals/claude_design_spec.md) (#4) · [`proposals/grok_design_spec.md`](proposals/grok_design_spec.md) (#2) · [`proposals/gemini_design_spec.md`](proposals/gemini_design_spec.md) (#3) |
 | **Ref** | Issue #1 |
@@ -18,6 +18,7 @@ Amendments are also marked inline at the point they apply, which is where an imp
 
 | Version | Date | Change |
 |---|---|---|
+| **1.1.2** | 2026-08-08 | **Three identities + classic PATs** (M3-A). §5.1 / A2: Architect, Developer, and **gateway** (`huozhegateway`) machine users; classic `repo` PATs (fine-grained impossible on private personal repos); FR-1.3 boundary enforced by code paths and branch protection, not token scope. §9.1: gateway-authored / `agentd:escalation` comments drop for every recipient. |
 | **1.1.1** | 2026-08-07 | **Runner-owned long-lived CLI per role** (#25). A6 / §7.3 / §14.2 / §14.5 wording aligned with §6.3 (process liveness fast path): privilege drop at session spawn, `turn.dispatch` multiplexes over a held pipe with per-turn deadline, oneshot `-p` remains the recovery path. Cwd decision (a): spawn at project root; worktree named per turn. |
 | **1.1.0** | 2026-08-07 | **Container unit: issue → project** (ADR-4). Session directories nest under the project (§6.2); process liveness becomes the fast path and persistence the recovery path (§6.3); tiers and memory budget are per project (§6.5, §6.6); model-provider credential delivery and the never-copy rule (§5.2); cross-issue exposure and injection persistence (§13.2); ADR-3 clarified as being about *gateway*-held stdio. Owner decision on #19; implementation #20. |
 | **1.0.0** | 2026-08-02 | Approved via #1. Amendments for M0, M1, M2 (×2) and M3 subsequently landed **against 1.0.0 without a version bump** — recorded here rather than retrofitted, since they are marked inline and reassigning versions after the fact would misstate what was approved when. |
@@ -94,7 +95,7 @@ Two decisions were made by the repository owner (`@huozhe`) and are not open to 
 | # | Assumption | If wrong |
 |---|---|---|
 | A1 | OrbStack is installed, healthy, and set to start at login | Gateway retries until the Docker socket appears; no design change |
-| A2 | Two GitHub machine users exist with fine-grained PATs and `write` on target repos | Auth module swaps token source; §5 unchanged in shape |
+| A2 | Three GitHub machine users exist (Architect, Developer, gateway) with classic `repo` PATs and collaborator access on target repos | Auth module swaps token source; §5 unchanged in shape |
 | A3 | The owner can configure repository webhooks and branch protection | Without branch protection, FR-1.3 is untestable and M4 cannot pass |
 | A4 | `/Users` is shared into containers by OrbStack (default) | Mount root becomes configurable; §6.4 relative worktree paths already remove the path-equality dependency |
 | A5 | Container-internal `tmpfs` enforces UID ownership and mode | **Load-bearing.** Falsified ⇒ fall back to two containers (ADR-4 fallback). **Spike M2-B** (M2-A is the separate host-bind expected-fail test) |
@@ -202,15 +203,25 @@ intake:
 
 ### 5.1 Accounts
 
-Two GitHub **machine user accounts** (e.g. `@claude-bot`, `@grok-bot`), each a collaborator with `write`, each holding a **fine-grained PAT** scoped to the target repositories: Contents (RW), Issues (RW), Pull requests (RW), Metadata (R), Checks (R).
+Three GitHub **machine user accounts**, each a collaborator on the target repositories, each holding a PAT stored in the **macOS Keychain** and read by the gateway only:
+
+| Role | Example login | Keychain account | Purpose |
+|---|---|---|---|
+| Architect | `@huozheclaude` | `claude-bot` | Agent turns, Design PR open/merge, reviews as Architect |
+| Developer | `@huozhegrok` | `grok-bot` | Agent turns, Design PR review/approval, implementation |
+| **Gateway** | `@huozhegateway` | `gateway` | §8.5 escalation comments only — not agent turns |
 
 Machine users rather than a GitHub App, because SRS §2 requires the identity string used in communications and webhook filtering to match a registered GitHub **username**; App bots surface as `app-name[bot]`. See ADR-7.
 
-Long-lived PATs live in the **macOS Keychain** and are read by the gateway only:
+**Credential shape (honest, 2026-08-08).** On a **private repository owned by a personal account**, fine-grained PATs cannot target that repository from a collaborator identity, and personal repos have **no collaborator roles** (every collaborator has push). So all three tokens are **classic PATs with the `repo` scope** — account-wide, not per-repository. Token scope therefore **does not** enforce the FR-1.3 boundary; branch protection and the gateway's narrow write surface (escalation comments only) do. M4-A remains the demonstration that the boundary holds. Blast radius is bounded by *collaborations*: keep each machine user a collaborator only on repos that need it.
 
 ```bash
 security add-generic-password -s agentd -a claude-bot -w <pat>
+security add-generic-password -s agentd -a grok-bot -w <pat>
+security add-generic-password -s agentd -a gateway -w <pat>
 ```
+
+The gateway identity exists so §8.5 can speak without (a) unpausing itself as `owner_reply`, (b) failing to notify the owner of their own @-mention, or (c) resetting `consec_agent_turns` as owner traffic. It must appear in `bot_logins` so §9.1 never classifies it as a human collaborator.
 
 ### 5.2 Credential Delivery — the mechanism FR-1.3 rests on
 
@@ -607,9 +618,9 @@ The gateway verifies; the agent acts. Agents never self-certify a privileged tra
 An agent invokes `escalate.human` with a reason and a specific question; the gateway also raises escalations itself on budget exhaustion or stall detection (§9). Then:
 
 1. Session `paused_reason` set; dispatch stops.
-2. Comment posted tagging `@<owner>` with the question, current state, and what each plausible answer would cause.
+2. Comment posted **as the gateway identity** (Keychain `agentd` / `gateway` — never an agent PAT) tagging `@<owner>` with the question, current state, and what each plausible answer would cause. Body carries `<!-- agentd:escalation session=… -->` so routing drops the echo for every agent recipient.
 3. Escalation recorded with the comment id.
-4. Resume on the next `issue_comment` from a non-bot sender, injecting the reply as the next turn's event.
+4. Resume on the next `issue_comment` from the **owner** (aligned with §9.1: while `PAUSED_*`, non-owner senders defer), injecting the reply as the next turn's event and restoring the pre-pause state.
 
 P5: no failure mode ends in silence.
 
@@ -624,17 +635,22 @@ P5: no failure mode ends in silence.
 | Condition | Action |
 |---|---|
 | `sender.login` == the intended recipient's identity | **Drop** (self-echo) |
-| `sender.login` is the other bot | **Route**, increment `consec_agent_turns` |
 | `sender.login` == owner | **Route**, reset `consec_agent_turns` to 0 |
+| Body contains `<!-- agentd:escalation … -->` (gateway voice, §8.5) | **Drop** for every recipient |
+| `sender.login` is the other agent bot | **Route**, increment `consec_agent_turns` |
 | Body contains a provenance footer written by the recipient | **Drop** (own artifact) |
 | `delivery_id` already terminal | **Drop** (redelivery) |
 | Session `PAUSED_*` and sender is not the owner | **Defer** (stays queued) |
+| `sender.login` is the gateway login (no escalation marker) | **Drop** (gateway is not a human collaborator) |
 
-Every agent-authored comment carries a machine-readable footer, which makes rules 4 and 5 mechanical rather than a model judgement call:
+Every agent-authored comment carries a machine-readable footer; gateway escalations carry a distinct marker. Both make drop rules mechanical:
 
 ```html
 <!-- agentd:turn session=huozhe/code-workflow#42 role=architect turn=01J8Z… -->
+<!-- agentd:escalation session=huozhe/code-workflow#42 -->
 ```
+
+Owner quote-replies that copy either footer still **route** — owner is evaluated before marker rules (same trap as M3-2).
 
 ### 9.2 Budgets
 

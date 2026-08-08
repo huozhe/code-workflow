@@ -66,14 +66,30 @@ class Config:
     def state_db(self) -> Path:
         return self.root / "state.db"
 
+    @property
+    def gateway_login(self) -> str | None:
+        """GitHub login for gateway-authored comments (§8.5 / §5.1 third identity)."""
+        gw = self.raw.get("gateway") or {}
+        login = gw.get("login")
+        return str(login) if login else None
+
     def agent_login(self, agent_id: str) -> str | None:
         agents = self.raw.get("agents") or {}
         entry = agents.get(agent_id) or {}
         return entry.get("login")
 
     def all_bot_logins(self) -> set[str]:
+        """Agent logins + gateway login (must not be classified as human §9.1)."""
         agents = self.raw.get("agents") or {}
-        return {str(v["login"]) for v in agents.values() if isinstance(v, dict) and "login" in v}
+        logins = {
+            str(v["login"])
+            for v in agents.values()
+            if isinstance(v, dict) and "login" in v
+        }
+        gw = self.gateway_login
+        if gw:
+            logins.add(gw)
+        return logins
 
 
 def load_config(root: Path | None = None) -> Config:
