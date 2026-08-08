@@ -440,14 +440,15 @@ class DesignLoop:
         )
 
     def _gateway_github_token(self) -> str | None:
-        if self._gateway_token:
-            return self._gateway_token
-        # Prefer explicit gateway account; fall back to either bot PAT.
-        return (
-            get_password("gateway")
-            or get_password("claude-bot")
-            or get_password("grok-bot")
-        )
+        """Gateway voice only — never an agent PAT (PR #27 B2 / ADR-11).
+
+        Keychain account ``gateway`` (service ``agentd``). Env override:
+        ``AGENTD_SECRET_GATEWAY``. No fallback to claude-bot / grok-bot.
+        """
+        if self._gateway_token is not None:
+            # Explicit inject (tests may pass "" to force failure).
+            return self._gateway_token or None
+        return get_password("gateway")
 
     def _escalate(self, session_key: str, role: str, reason: str) -> None:
         """§8.5: pause, post @owner comment, record escalation with comment_id."""

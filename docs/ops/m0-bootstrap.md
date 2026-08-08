@@ -20,6 +20,12 @@ security add-generic-password -s agentd -a webhook-secret -w '<random-hex>' -U
 # Bot PATs (used from M2+; store now so M0 host is complete)
 security add-generic-password -s agentd -a claude-bot -w '<pat>' -U
 security add-generic-password -s agentd -a grok-bot -w '<pat>' -U
+
+# Gateway voice (M3-A §8.5 escalations). Fail-closed: agentd will NOT fall
+# back to claude-bot/grok-bot for escalation comments (PR #27 B2 / ADR-11).
+# Mint a dedicated machine user with `issues: write` on target repos only —
+# not admin, not the Architect/Developer identities (FR-1.3 boundary).
+security add-generic-password -s agentd -a gateway -w '<gateway-pat>' -U
 ```
 
 **Test-only env override (not for production LaunchAgent):**
@@ -28,6 +34,7 @@ security add-generic-password -s agentd -a grok-bot -w '<pat>' -U
 export AGENTD_SECRET_WEBHOOK_SECRET='...'   # webhook HMAC
 export AGENTD_SECRET_CLAUDE_BOT='...'       # optional PAT overrides
 export AGENTD_SECRET_GROK_BOT='...'
+export AGENTD_SECRET_GATEWAY='...'         # gateway escalation comment PAT
 ```
 
 These bypass Keychain when set. The production plist must **not** set them; production loads only from Keychain at process start and **exits non-zero** if the webhook secret is missing (so a lagging login-keychain after FileVault unlock fails loud instead of 5xx-dropping GitHub deliveries).

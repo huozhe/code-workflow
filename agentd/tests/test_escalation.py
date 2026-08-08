@@ -39,6 +39,35 @@ def test_format_escalation_comment_tags_owner_and_states_answers() -> None:
     assert "PAUSED_HUMAN" in body
 
 
+def test_gateway_token_no_agent_pat_fallback(tmp_path: Path, monkeypatch) -> None:
+    """PR #27 B2: never fall back to claude-bot / grok-bot."""
+    store = Store(tmp_path / "state.db")
+    cfg = _cfg(tmp_path)
+    # Injected empty token forces fail-closed path for missing keychain.
+    loop = DesignLoop(
+        store,
+        cfg,
+        supervisor=None,
+        dispatch_turns=False,
+        gateway_token="",  # explicit empty
+    )
+    monkeypatch.delenv("AGENTD_SECRET_GATEWAY", raising=False)
+    assert loop._gateway_github_token() is None
+    # Without inject, only get_password("gateway") is consulted — not agent bots.
+    loop2 = DesignLoop(store, cfg, supervisor=None, dispatch_turns=False)
+    monkeypatch.setattr(
+        "agentd.design_loop.get_password",
+        lambda account: {"claude-bot": "pat-c", "grok-bot": "pat-g"}.get(account),
+    )
+    assert loop2._gateway_github_token() is None
+    monkeypatch.setattr(
+        "agentd.design_loop.get_password",
+        lambda account: "gw-pat" if account == "gateway" else None,
+    )
+    assert loop2._gateway_github_token() == "gw-pat"
+    store.close()
+
+
 def test_escalate_posts_comment_and_records_id(tmp_path: Path) -> None:
     store = Store(tmp_path / "state.db")
     cfg = _cfg(tmp_path)
@@ -86,6 +115,89 @@ def test_escalate_posts_comment_and_records_id(tmp_path: Path) -> None:
     assert posts[0]["issue_num"] == 42
     assert "@huozhe" in posts[0]["body"]
     assert posts[0]["token"] == "tok-gw"
+    store.close()
+
+
+def test_escalation_echo_dropped_not_dispatched_after_unpause(tmp_path: Path) -> None:
+    """B1 end-to-end: parked escalation webhook is dropped, not a Developer turn."""
+    store = Store(tmp_path / "state.db")
+    cfg = _cfg(tmp_path)
+    now = 1_700_000_000
+    sk = "huozhe/code-workflow#99"
+    store.upsert_session(
+        session_key=sk,
+        repo="huozhe/code-workflow",
+        issue_num=99,
+        state="PLANNING",
+        architect="huozheclaude",
+        developer="huozhegrok",
+        created_at=now,
+        updated_at=now,
+    )
+    posts: list[str] = []
+
+    def fake_post(*, repo, issue_num, body, token):  # noqa: ANN001
+        posts.append(body)
+        return 42
+
+    loop = DesignLoop(
+        store,
+        cfg,
+        supervisor=None,
+        dispatch_turns=False,
+        post_comment=fake_post,
+        gateway_token="gw",
+    )
+    loop._escalate(sk, "system", "stall")
+    esc_body = posts[0]
+
+    # Simulate GitHub delivering the gateway comment (sender = whoever posted).
+    store.insert_delivery(
+        delivery_id="d-esc-echo",
+        event="issue_comment",
+        action="created",
+        repo="huozhe/code-workflow",
+        issue_num=99,
+        sender="gateway-bot",  # or any non-owner; marker is what matters
+        payload=json.dumps(
+            {
+                "action": "created",
+                "issue": {"number": 99},
+                "comment": {"body": esc_body},
+                "repository": {"full_name": "huozhe/code-workflow"},
+                "sender": {"login": "gateway-bot"},
+            }
+        ).encode(),
+        status="deferred",
+    )
+    # While paused, marker → DROP (not DEFER)
+    loop.process_deferred_batch()
+    assert store.count_by_status().get("dropped") == 1
+    assert store.count_by_status().get("deferred") in (None, 0)
+
+    # Owner unpause
+    store.insert_delivery(
+        delivery_id="d-owner",
+        event="issue_comment",
+        action="created",
+        repo="huozhe/code-workflow",
+        issue_num=99,
+        sender="huozhe",
+        payload=json.dumps(
+            {
+                "action": "created",
+                "issue": {"number": 99},
+                "comment": {"body": "go ahead"},
+                "repository": {"full_name": "huozhe/code-workflow"},
+                "sender": {"login": "huozhe"},
+            }
+        ).encode(),
+        status="deferred",
+    )
+    loop.process_deferred_batch()
+    sess = store.get_session(sk)
+    assert sess["state"] == "PLANNING"
+    assert sess.get("paused_reason") is None
     store.close()
 
 

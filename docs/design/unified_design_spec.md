@@ -607,9 +607,9 @@ The gateway verifies; the agent acts. Agents never self-certify a privileged tra
 An agent invokes `escalate.human` with a reason and a specific question; the gateway also raises escalations itself on budget exhaustion or stall detection (§9). Then:
 
 1. Session `paused_reason` set; dispatch stops.
-2. Comment posted tagging `@<owner>` with the question, current state, and what each plausible answer would cause.
+2. Comment posted **as the gateway identity** (Keychain `agentd` / `gateway` — never an agent PAT) tagging `@<owner>` with the question, current state, and what each plausible answer would cause. Body carries `<!-- agentd:escalation session=… -->` so routing drops the echo for every agent recipient.
 3. Escalation recorded with the comment id.
-4. Resume on the next `issue_comment` from a non-bot sender, injecting the reply as the next turn's event.
+4. Resume on the next `issue_comment` from the **owner** (aligned with §9.1: while `PAUSED_*`, non-owner senders defer), injecting the reply as the next turn's event and restoring the pre-pause state.
 
 P5: no failure mode ends in silence.
 
