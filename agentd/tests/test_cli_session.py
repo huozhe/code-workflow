@@ -110,10 +110,18 @@ def test_claude_spawn_uses_continue_flag(tmp_path: Path) -> None:
         sess.shutdown()
         sess.ensure_spawned(continue_session=True)
 
-    assert "-c" not in captured[0]
-    assert "-c" in captured[1]
-    assert "--input-format" in captured[0]
-    assert "stream-json" in captured[0]
+    # Vendor argv starts after: bash -c SCRIPT role-secret-wrap ROLE
+    def vendor(cmd: list[str]) -> list[str]:
+        i = cmd.index("role-secret-wrap")
+        return cmd[i + 2 :]  # skip wrap marker + role
+
+    assert "-c" not in vendor(captured[0])
+    assert "-c" in vendor(captured[1])
+    assert "--input-format" in vendor(captured[0])
+    assert "stream-json" in vendor(captured[0])
+    # B5: secrets loaded via bash wrapper, not by runner
+    assert captured[0][0] == "bash"
+    assert "role-secret-wrap" in captured[0]
 
 
 def test_grok_acp_initialize_and_prompt(tmp_path: Path) -> None:
@@ -528,3 +536,181 @@ def test_ensure_role_dirs_chowns_when_root(tmp_path: Path) -> None:
         sess._ensure_role_dirs()
     assert any(c[1] == 1001 for c in chowns)
     assert (tmp_path / "h").is_dir()
+
+
+def test_role_env_does_not_read_secrets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """B5: runner must not open 0400 role secret files as root."""
+    # Even if files exist on the host path layout, _role_env must not load them.
+    monkeypatch.setenv("GH_TOKEN", "leak-me")
+    env = cli_session._role_env(
+        "architect", tmp_path / "h", tmp_path / "t", tmp_path / "x"
+    )
+    assert "GH_TOKEN" not in env
+    assert "GITHUB_TOKEN" not in env
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
+    assert env["HOME"] == str(tmp_path / "h")
+
+
+def test_wrap_with_role_secrets_prepends_bash() -> None:
+    wrapped = cli_session._wrap_with_role_secrets("developer", ["grok", "agent", "stdio"])
+    assert wrapped[:5] == ["bash", "-c", wrapped[2], "role-secret-wrap", "developer"]
+    assert wrapped[-3:] == ["grok", "agent", "stdio"]
+    assert "/run/agent/${ROLE}/token" in wrapped[2] or "/run/agent/" in wrapped[2]
+
+
+def test_pick_permission_option_prefers_allow_once_for_execute() -> None:
+    """B6: execute tools offer allow-once, not allow-edits-session."""
+    assert (
+        cli_session._pick_permission_option(
+            {"options": [{"optionId": "allow-once"}, {"optionId": "reject-once"}]}
+        )
+        == "allow-once"
+    )
+    assert (
+        cli_session._pick_permission_option(
+            {
+                "options": [
+                    {"optionId": "allow-edits-session"},
+                    {"optionId": "reject-once"},
+                ]
+            }
+        )
+        == "allow-edits-session"
+    )
+    assert (
+        cli_session._pick_permission_option(
+            {"options": [{"optionId": "allow_always"}, {"optionId": "allow-once"}]}
+        )
+        == "allow_always"
+    )
+
+
+def test_grok_execute_permission_picks_allow_once(tmp_path: Path) -> None:
+    """B6 regression: hardcoded allow-edits-session is invalid for execute."""
+    import queue as qmod
+
+    writes: list[dict] = []
+    q: qmod.Queue[str | None] = qmod.Queue()
+    q.put(
+        json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 0,
+                "method": "session/request_permission",
+                "params": {
+                    "toolCall": {"kind": "execute", "title": "Write file"},
+                    "options": [
+                        {"optionId": "allow-once"},
+                        {"optionId": "reject-once"},
+                    ],
+                },
+            }
+        )
+    )
+    q.put(
+        json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"text": "DONE"},
+                    }
+                },
+            }
+        )
+    )
+    q.put(json.dumps({"jsonrpc": "2.0", "id": 1001, "result": {"stopReason": "end_turn"}}))
+
+    sess = cli_session.LiveCliSession(
+        role="developer",
+        adapter="grok-cli",
+        uid=1002,
+        home=tmp_path / "h",
+        tmp=tmp_path / "t",
+        xdg=tmp_path / "x",
+        spawn_cwd=tmp_path,
+    )
+    sess.acp_session_id = "s"
+    sess._rpc_id = 1000
+    sess._stdout_q = q
+    sess.proc = MagicMock()
+    sess.proc.poll.return_value = None
+    sess.proc.stdin = MagicMock()
+    sess.proc.stdin.write.side_effect = lambda data: writes.append(json.loads(data.strip())) or len(
+        data
+    )
+
+    with patch.object(cli_session.LiveCliSession, "_sample_rss"):
+        result = sess.turn("write file", deadline_s=5)
+
+    assert result["status"] == "done"
+    perm = next(w for w in writes if w.get("id") == 0 and "result" in w)
+    assert perm["result"]["outcome"]["optionId"] == "allow-once"
+
+
+def test_grok_cancelled_stop_reason_is_failed(tmp_path: Path) -> None:
+    """B7: cancelled + empty text must not be status=done."""
+    import queue as qmod
+
+    q: qmod.Queue[str | None] = qmod.Queue()
+    q.put(
+        json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 1001,
+                "result": {"stopReason": "cancelled", "agentResult": None},
+            }
+        )
+    )
+    sess = cli_session.LiveCliSession(
+        role="developer",
+        adapter="grok-cli",
+        uid=1002,
+        home=tmp_path / "h",
+        tmp=tmp_path / "t",
+        xdg=tmp_path / "x",
+        spawn_cwd=tmp_path,
+    )
+    sess.acp_session_id = "s"
+    sess._rpc_id = 1000
+    sess._stdout_q = q
+    sess.proc = MagicMock()
+    sess.proc.poll.return_value = None
+    sess.proc.stdin = MagicMock()
+
+    with patch.object(cli_session.LiveCliSession, "_sample_rss"):
+        result = sess.turn("do something", deadline_s=5)
+
+    assert result["status"] == "failed"
+    assert "cancelled" in result["summary"]
+    assert result.get("stop_reason") == "cancelled"
+
+
+def test_grok_empty_end_turn_is_failed(tmp_path: Path) -> None:
+    import queue as qmod
+
+    q: qmod.Queue[str | None] = qmod.Queue()
+    q.put(json.dumps({"jsonrpc": "2.0", "id": 1001, "result": {"stopReason": "end_turn"}}))
+    sess = cli_session.LiveCliSession(
+        role="developer",
+        adapter="grok-cli",
+        uid=1002,
+        home=tmp_path / "h",
+        tmp=tmp_path / "t",
+        xdg=tmp_path / "x",
+        spawn_cwd=tmp_path,
+    )
+    sess.acp_session_id = "s"
+    sess._rpc_id = 1000
+    sess._stdout_q = q
+    sess.proc = MagicMock()
+    sess.proc.poll.return_value = None
+    sess.proc.stdin = MagicMock()
+
+    with patch.object(cli_session.LiveCliSession, "_sample_rss"):
+        result = sess.turn("x", deadline_s=5)
+
+    assert result["status"] == "failed"
+    assert "empty" in result["summary"].lower()

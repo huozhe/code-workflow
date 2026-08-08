@@ -29,10 +29,6 @@ log = logging.getLogger("agentd_runner.cli_session")
 _SESSIONS: dict[str, "LiveCliSession"] = {}
 _REGISTRY_LOCK = threading.Lock()
 
-# ACP permission option verified on host (Architect review PR #26 B1).
-_ACP_ALLOW_EDITS_SESSION = "allow-edits-session"
-
-
 def project_root() -> Path:
     return Path(
         os.environ.get("AGENTD_PROJECT_ROOT")
@@ -61,6 +57,13 @@ def _drop_privs(uid: int) -> None:
 
 
 def _role_env(role: str, home: Path, tmp: Path, xdg: Path) -> dict[str, str]:
+    """Non-secret env only.
+
+    GH_TOKEN / CLAUDE_CODE_OAUTH_TOKEN live on tmpfs at 0400 role-owned.
+    Under §7.2 (no CAP_DAC_OVERRIDE) container root cannot read them — B5.
+    The spawn wrapper loads secrets *after* the privilege drop.
+    """
+    _ = role  # reserved for future non-secret role hints
     env = os.environ.copy()
     env.update(
         {
@@ -72,14 +75,63 @@ def _role_env(role: str, home: Path, tmp: Path, xdg: Path) -> dict[str, str]:
             "PATH": env.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
         }
     )
-    token_file = Path(f"/run/agent/{role}/token")
-    if token_file.is_file():
-        env["GH_TOKEN"] = token_file.read_text(encoding="utf-8").strip()
-        env["GITHUB_TOKEN"] = env["GH_TOKEN"]
-    oauth_file = Path(f"/run/agent/{role}/claude_oauth_token")
-    if oauth_file.is_file():
-        env["CLAUDE_CODE_OAUTH_TOKEN"] = oauth_file.read_text(encoding="utf-8").strip()
+    # Drop any inherited secrets from the runner process environment.
+    env.pop("GH_TOKEN", None)
+    env.pop("GITHUB_TOKEN", None)
+    env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
     return env
+
+
+def _wrap_with_role_secrets(role: str, cmd: list[str]) -> list[str]:
+    """bash wrapper: as role UID, cat secrets then exec vendor CLI (B5)."""
+    if role not in ("architect", "developer"):
+        raise ValueError(f"unknown role {role!r}")
+    # $1 = role; remaining argv = vendor command.
+    script = (
+        'set -e\n'
+        'ROLE="$1"; shift\n'
+        'TOK="/run/agent/${ROLE}/token"\n'
+        'if [ -r "$TOK" ]; then\n'
+        '  export GH_TOKEN="$(cat "$TOK")"\n'
+        '  export GITHUB_TOKEN="$GH_TOKEN"\n'
+        'fi\n'
+        'OAUTH="/run/agent/${ROLE}/claude_oauth_token"\n'
+        'if [ -r "$OAUTH" ]; then\n'
+        '  export CLAUDE_CODE_OAUTH_TOKEN="$(cat "$OAUTH")"\n'
+        'fi\n'
+        'exec "$@"\n'
+    )
+    return ["bash", "-c", script, "role-secret-wrap", role, *cmd]
+
+
+def _pick_permission_option(params: dict[str, Any]) -> str | None:
+    """Choose an allow option from the request's offered list (B6).
+
+    Edit tools offer ``allow-edits-session``; execute tools offer
+    ``allow-once`` / ``reject-once``. Hardcoding either id fails the other.
+    Preference: allow_always → allow-edits-session → allow-once → first allow* → first.
+    """
+    options = params.get("options") or []
+    ids: list[str] = []
+    for opt in options:
+        if isinstance(opt, dict) and opt.get("optionId"):
+            ids.append(str(opt["optionId"]))
+    if not ids:
+        return None
+    for preferred in (
+        "allow_always",
+        "allow-always",
+        "allow-edits-session",
+        "allow_once",
+        "allow-once",
+    ):
+        if preferred in ids:
+            return preferred
+    for oid in ids:
+        low = oid.lower()
+        if "allow" in low and "reject" not in low:
+            return oid
+    return ids[0]
 
 
 def _is_jsonrpc_response(obj: dict[str, Any]) -> bool:
@@ -195,6 +247,8 @@ class LiveCliSession:
             cmd = self._grok_cmd()
         else:
             raise ValueError(f"no long-lived spawn for adapter {self.adapter!r}")
+        # B5: secrets loaded in-child after setuid, not by root runner.
+        cmd = _wrap_with_role_secrets(self.role, cmd)
 
         # B3: never PIPE stderr without a reader — fill → wedged CLI.
         stderr_path = self.tmp / f"cli-{self.role}.stderr.log"
@@ -334,10 +388,25 @@ class LiveCliSession:
         log.info("grok ACP session %s role=%s", self.acp_session_id, self.role)
 
     def _handle_acp_server_request(self, obj: dict[str, Any]) -> None:
-        """Answer agent→client requests so tool turns do not wedge (B1)."""
+        """Answer agent→client requests so tool turns do not wedge (B1/B6)."""
         method = str(obj.get("method") or "")
         rid = obj.get("id")
         if method == "session/request_permission":
+            params = obj.get("params") if isinstance(obj.get("params"), dict) else {}
+            option_id = _pick_permission_option(params or {})
+            if not option_id:
+                self._acp_write(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": rid,
+                        "error": {
+                            "code": -32602,
+                            "message": "no permission options offered",
+                        },
+                    }
+                )
+                log.warning("acp permission with empty options role=%s", self.role)
+                return
             self._acp_write(
                 {
                     "jsonrpc": "2.0",
@@ -345,12 +414,17 @@ class LiveCliSession:
                     "result": {
                         "outcome": {
                             "outcome": "selected",
-                            "optionId": _ACP_ALLOW_EDITS_SESSION,
+                            "optionId": option_id,
                         }
                     },
                 }
             )
-            log.debug("acp allow permission id=%s role=%s", rid, self.role)
+            log.debug(
+                "acp allow permission id=%s option=%s role=%s",
+                rid,
+                option_id,
+                self.role,
+            )
             return
         # Capabilities are false; refuse any accidental fs/terminal calls.
         if method.startswith("fs/") or method.startswith("terminal/"):
@@ -570,17 +644,37 @@ class LiveCliSession:
                 "public_actions": [],
                 "artifacts": [],
             }
-        stop = ((result or {}).get("result") or {}).get("stopReason")
-        if stop and stop != "end_turn":
-            log.info("grok stopReason=%s role=%s", stop, self.role)
+        # B7: stopReason drives status — cancelled must not look like done.
+        stop = str(((result or {}).get("result") or {}).get("stopReason") or "")
         text = "".join(chunks)
         if not text and result:
             text = str((result.get("result") or {}).get("text") or "")[:4000]
+        text = (text or "").strip()
+        if stop and stop != "end_turn":
+            status = "needs_human" if stop in ("refusal", "rejected") else "failed"
+            summary = text or f"grok stopReason={stop}"
+            log.info("grok stopReason=%s → %s role=%s", stop, status, self.role)
+            return {
+                "status": status,
+                "summary": summary[:4000],
+                "public_actions": [],
+                "artifacts": [],
+                "stop_reason": stop,
+            }
+        if not text:
+            return {
+                "status": "failed",
+                "summary": "empty agent result (no text after end_turn)",
+                "public_actions": [],
+                "artifacts": [],
+                "stop_reason": stop or "end_turn",
+            }
         return {
             "status": "done",
             "summary": text[:4000],
             "public_actions": [],
             "artifacts": [],
+            "stop_reason": stop or "end_turn",
         }
 
     def _read_jsonrpc_result(
