@@ -402,6 +402,18 @@ def handle_request(req: dict[str, Any], authed: bool) -> dict[str, Any]:
             }
         )
 
+    # artifact.register is Runner → Gateway (notification). The gateway client
+    # drains no-id frames; if a misconfigured peer calls it as a request, accept.
+    if method == "artifact.register":
+        return ok(
+            {
+                "accepted": True,
+                "kind": params.get("kind"),
+                "ref": params.get("ref"),
+                "role": params.get("role"),
+            }
+        )
+
     return err(-32601, f"method not found: {method}")
 
 
