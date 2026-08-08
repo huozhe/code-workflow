@@ -260,24 +260,40 @@ class DesignLoop:
             log.info("fsm %s → %s (%s)", session_key, tr.new_state, tr.note)
 
         if kind in ("design_changes_requested", "design_revised"):
+            # §9.3 both stall signals — fingerprint arming untouched; zero-thread
+            # is head-agnostic and covers the fingerprint's blind spot (M3-B).
             raw_fp = str(sess.get("progress_fp") or "")
             armed = raw_fp.startswith("A:")
             stored_fp = raw_fp[2:] if armed else (raw_fp or None)
             stall = StallTracker(
-                last_fp=stored_fp,
+                last_fp=stored_fp or None,
                 fp_repeat=int(sess.get("progress_repeat") or 0),
                 zero_thread_rounds=int(sess.get("zero_thread_rounds") or 0),
                 seen_head_change=armed,
             )
             head = dig.get("head_sha")
+            open_ids = dig.get("open_thread_ids") or []
+            if not isinstance(open_ids, list):
+                open_ids = []
+            open_ids = [str(x) for x in open_ids]
+            unresolved = int(dig.get("unresolved_count") or len(open_ids) or 0)
+            # Never put head_sha into fingerprint material (§9.3).
+            diff_stat = str(
+                dig.get("diff_stat")
+                or f"{dig.get('pr') or ''}|{dig.get('title') or ''}"
+            )
             fp = progress_fingerprint(
-                open_thread_ids=[],
-                unresolved_count=0,
-                diff_stat=str(dig.get("pr") or "") + "|" + str(dig.get("title") or ""),
+                open_thread_ids=open_ids,
+                unresolved_count=unresolved,
+                diff_stat=diff_stat,
             )
             reason = stall.observe_fingerprint(fp, str(head) if head else None)
+            # A review round for zero-thread is a CHANGES_REQUESTED delivery.
+            # threads_resolved may be supplied on the digest (or a future GH
+            # fetch); default 0 = no threads closed this round.
             if not reason and kind == "design_changes_requested":
-                reason = stall.observe_review_round(threads_resolved=0)
+                threads_resolved = int(dig.get("threads_resolved") or 0)
+                reason = stall.observe_review_round(threads_resolved=threads_resolved)
             if reason:
                 self._escalate(session_key, "system", reason)
                 self.store.set_delivery_status(delivery_id, "done")
@@ -285,13 +301,16 @@ class DesignLoop:
             fp_store = (
                 f"A:{stall.last_fp}" if stall.seen_head_change else (stall.last_fp or "")
             )
-            self.store.update_session_fields(
-                session_key,
-                progress_fp=fp_store,
-                progress_repeat=stall.fp_repeat,
-                zero_thread_rounds=stall.zero_thread_rounds,
-                review_rounds=int(sess.get("review_rounds") or 0) + 1,
-            )
+            fields_stall: dict[str, Any] = {
+                "progress_fp": fp_store,
+                "progress_repeat": stall.fp_repeat,
+                "zero_thread_rounds": stall.zero_thread_rounds,
+            }
+            if kind == "design_changes_requested":
+                fields_stall["review_rounds"] = int(sess.get("review_rounds") or 0) + 1
+            self.store.update_session_fields(session_key, **fields_stall)
+            # Keep local sess view in sync for later steps this delivery.
+            sess = {**sess, **fields_stall}
 
         # Dispatch turn to the session runner
         if self.dispatch_turns and self.supervisor and sess.get("endpoint"):

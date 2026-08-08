@@ -45,6 +45,16 @@ def build_digest(
     if "review" in data and isinstance(data["review"], dict):
         d["review_state"] = data["review"].get("state")
         d["review_id"] = data["review"].get("id")
+    # Optional stall inputs (§9.3) — gateway may attach after a GH fetch, or
+    # tests inject them. Never derived from head_sha.
+    if "open_thread_ids" in data:
+        d["open_thread_ids"] = data["open_thread_ids"]
+    if "unresolved_count" in data:
+        d["unresolved_count"] = data["unresolved_count"]
+    if "threads_resolved" in data:
+        d["threads_resolved"] = data["threads_resolved"]
+    if "diff_stat" in data:
+        d["diff_stat"] = data["diff_stat"]
     return d
 
 

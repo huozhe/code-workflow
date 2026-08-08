@@ -88,3 +88,31 @@ def test_zero_thread_progress_escalates() -> None:
     assert reason is not None and "zero thread" in reason
     assert st.observe_review_round(1) is None
     assert st.zero_thread_rounds == 0
+
+
+def test_zero_thread_fires_while_fingerprint_disarmed() -> None:
+    """M3-B: layered signals — static head never arms fingerprint; zero-thread still fires.
+
+    Do not re-introduce head_sha into the fingerprint hash (§9.3 standing warning).
+    """
+    st = StallTracker(fp_threshold=3, zero_thread_threshold=3)
+    fp = progress_fingerprint(
+        open_thread_ids=["t1"],
+        unresolved_count=1,
+        diff_stat="frozen",
+    )
+    # Same head forever → fingerprint stays disarmed
+    for _ in range(5):
+        assert st.observe_fingerprint(fp, "sha-static") is None
+    assert st.seen_head_change is False
+    assert st.fp_repeat == 0
+
+    assert st.observe_review_round(0) is None
+    assert st.observe_review_round(0) is None
+    reason = st.observe_review_round(0)
+    assert reason is not None
+    assert "zero thread" in reason
+    assert "fingerprint" not in reason
+    # Still disarmed after zero-thread fired
+    assert st.seen_head_change is False
+    assert st.observe_fingerprint(fp, "sha-static") is None
