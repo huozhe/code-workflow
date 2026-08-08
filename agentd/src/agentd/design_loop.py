@@ -15,6 +15,11 @@ from agentd.db import Store, decompress_payload
 from agentd.digest import build_digest, digest_to_markdown
 from agentd.fsm import transition
 from agentd.gitops import project_key_from_repo, project_path
+from agentd.github_fetch import (
+    PrReviewThreadSnapshot,
+    fetch_diff_stat,
+    fetch_pr_review_threads,
+)
 from agentd.github_write import format_escalation_comment, post_issue_comment
 from agentd.intake import evaluate_intake
 from agentd.keychain import get_password
@@ -58,14 +63,20 @@ class DesignLoop:
         dispatch_turns: bool = True,
         post_comment: Any | None = None,
         gateway_token: str | None = None,
+        fetch_threads: Any | None = None,
+        fetch_diff: Any | None = None,
+        github_token: str | None = None,
     ) -> None:
         self.store = store
         self.config = config
         self.supervisor = supervisor
         self.dispatch_turns = dispatch_turns
-        # Injectables for unit tests (M3-A gateway GitHub write).
+        # Injectables for unit tests (M3-A write / M3-B fetch boundary).
         self._post_comment = post_comment
         self._gateway_token = gateway_token
+        self._fetch_threads = fetch_threads
+        self._fetch_diff = fetch_diff
+        self._github_token = github_token
 
     def process_deferred_batch(self, limit: int = 20) -> int:
         n = 0
@@ -260,57 +271,17 @@ class DesignLoop:
             log.info("fsm %s → %s (%s)", session_key, tr.new_state, tr.note)
 
         if kind in ("design_changes_requested", "design_revised"):
-            # §9.3 both stall signals — fingerprint arming untouched; zero-thread
-            # is head-agnostic and covers the fingerprint's blind spot (M3-B).
-            raw_fp = str(sess.get("progress_fp") or "")
-            armed = raw_fp.startswith("A:")
-            stored_fp = raw_fp[2:] if armed else (raw_fp or None)
-            stall = StallTracker(
-                last_fp=stored_fp or None,
-                fp_repeat=int(sess.get("progress_repeat") or 0),
-                zero_thread_rounds=int(sess.get("zero_thread_rounds") or 0),
-                seen_head_change=armed,
+            stalled = self._observe_stall_signals(
+                session_key=session_key,
+                sess=sess,
+                dig=dig,
+                kind=kind,
+                delivery_id=delivery_id,
+                repo=repo,
             )
-            head = dig.get("head_sha")
-            open_ids = dig.get("open_thread_ids") or []
-            if not isinstance(open_ids, list):
-                open_ids = []
-            open_ids = [str(x) for x in open_ids]
-            unresolved = int(dig.get("unresolved_count") or len(open_ids) or 0)
-            # Never put head_sha into fingerprint material (§9.3).
-            diff_stat = str(
-                dig.get("diff_stat")
-                or f"{dig.get('pr') or ''}|{dig.get('title') or ''}"
-            )
-            fp = progress_fingerprint(
-                open_thread_ids=open_ids,
-                unresolved_count=unresolved,
-                diff_stat=diff_stat,
-            )
-            reason = stall.observe_fingerprint(fp, str(head) if head else None)
-            # A review round for zero-thread is a CHANGES_REQUESTED delivery.
-            # threads_resolved may be supplied on the digest (or a future GH
-            # fetch); default 0 = no threads closed this round.
-            if not reason and kind == "design_changes_requested":
-                threads_resolved = int(dig.get("threads_resolved") or 0)
-                reason = stall.observe_review_round(threads_resolved=threads_resolved)
-            if reason:
-                self._escalate(session_key, "system", reason)
-                self.store.set_delivery_status(delivery_id, "done")
+            if stalled:
                 return
-            fp_store = (
-                f"A:{stall.last_fp}" if stall.seen_head_change else (stall.last_fp or "")
-            )
-            fields_stall: dict[str, Any] = {
-                "progress_fp": fp_store,
-                "progress_repeat": stall.fp_repeat,
-                "zero_thread_rounds": stall.zero_thread_rounds,
-            }
-            if kind == "design_changes_requested":
-                fields_stall["review_rounds"] = int(sess.get("review_rounds") or 0) + 1
-            self.store.update_session_fields(session_key, **fields_stall)
-            # Keep local sess view in sync for later steps this delivery.
-            sess = {**sess, **fields_stall}
+            sess = self.store.get_session(session_key) or sess
 
         # Dispatch turn to the session runner
         if self.dispatch_turns and self.supervisor and sess.get("endpoint"):
@@ -459,6 +430,137 @@ class DesignLoop:
             turn_id,
             provenance_footer(session_key=session_key, role=role, turn_id=turn_id),
         )
+
+    def _github_api_token(self) -> str | None:
+        """Token for read-only GitHub stall queries (agent classic repo PAT)."""
+        if self._github_token is not None:
+            return self._github_token or None
+        return get_password("claude-bot") or get_password("grok-bot")
+
+    def _observe_stall_signals(
+        self,
+        *,
+        session_key: str,
+        sess: dict[str, Any],
+        dig: dict[str, Any],
+        kind: str,
+        delivery_id: str,
+        repo: str,
+    ) -> bool:
+        """§9.3 fingerprint + zero-thread. Returns True if session escalated.
+
+        Inputs come from GitHub (GraphQL threads + REST compare), not invented
+        webhook fields. When observation fails, signals are **skipped** and
+        logged — never replaced with a constant placeholder countdown.
+        """
+        raw_fp = str(sess.get("progress_fp") or "")
+        armed = raw_fp.startswith("A:")
+        stored_fp = raw_fp[2:] if armed else (raw_fp or None)
+        stall = StallTracker(
+            last_fp=stored_fp or None,
+            fp_repeat=int(sess.get("progress_repeat") or 0),
+            zero_thread_rounds=int(sess.get("zero_thread_rounds") or 0),
+            seen_head_change=armed,
+        )
+        head = dig.get("head_sha")
+        pr_num = dig.get("pr") or sess.get("design_pr")
+        token = self._github_api_token()
+
+        # --- real inputs (fetch boundary; tests inject here) ---
+        snap: PrReviewThreadSnapshot | None = None
+        if self._fetch_threads is not None:
+            snap = self._fetch_threads(
+                repo=repo, pr_number=int(pr_num or 0), token=token
+            )
+        else:
+            snap = fetch_pr_review_threads(
+                repo=repo, pr_number=int(pr_num or 0), token=token
+            )
+
+        open_ids: list[str] = []
+        threads_observed = False
+        if snap is not None:
+            threads_observed = True
+            open_ids = list(snap.open_thread_ids)
+        unresolved = len(open_ids)
+
+        prior_ids: set[str] = set()
+        raw_prior = sess.get("stall_open_threads")
+        if raw_prior:
+            try:
+                loaded = json.loads(str(raw_prior))
+                if isinstance(loaded, list):
+                    prior_ids = {str(x) for x in loaded}
+            except json.JSONDecodeError:
+                prior_ids = set()
+        current_ids = set(open_ids)
+        # Delta only meaningful once we have a prior snapshot.
+        if threads_observed and prior_ids:
+            threads_resolved = len(prior_ids - current_ids)
+        else:
+            threads_resolved = 0
+
+        base = (snap.base_ref if snap else None) or "main"
+        head_for_diff = str(head or (snap.head_oid if snap else "") or "")
+        diff_stat: str | None = None
+        if self._fetch_diff is not None:
+            diff_stat = self._fetch_diff(
+                repo=repo, base=base, head=head_for_diff, token=token
+            )
+        elif head_for_diff:
+            diff_stat = fetch_diff_stat(
+                repo=repo, base=base, head=head_for_diff, token=token
+            )
+
+        reason: str | None = None
+        # Fingerprint only when we have real progress material (§9.3 NB2).
+        if threads_observed and diff_stat is not None:
+            fp = progress_fingerprint(
+                open_thread_ids=open_ids,
+                unresolved_count=unresolved,
+                diff_stat=diff_stat,
+            )
+            reason = stall.observe_fingerprint(fp, str(head) if head else None)
+        else:
+            log.warning(
+                "stall fingerprint skipped session=%s threads_ok=%s diff_ok=%s "
+                "(no placeholder hash — would be a blind countdown)",
+                session_key,
+                threads_observed,
+                diff_stat is not None,
+            )
+
+        # Zero-thread: only on CHANGES_REQUESTED, only when we observed threads.
+        if not reason and kind == "design_changes_requested":
+            if threads_observed:
+                reason = stall.observe_review_round(
+                    threads_resolved=threads_resolved
+                )
+            else:
+                log.warning(
+                    "stall zero-thread skipped session=%s: no reviewThreads snapshot",
+                    session_key,
+                )
+
+        if reason:
+            self._escalate(session_key, "system", reason)
+            self.store.set_delivery_status(delivery_id, "done")
+            return True
+
+        fp_store = (
+            f"A:{stall.last_fp}" if stall.seen_head_change else (stall.last_fp or "")
+        )
+        fields_stall: dict[str, Any] = {
+            "progress_fp": fp_store,
+            "progress_repeat": stall.fp_repeat,
+            "zero_thread_rounds": stall.zero_thread_rounds,
+        }
+        if threads_observed:
+            fields_stall["stall_open_threads"] = json.dumps(sorted(current_ids))
+        if kind == "design_changes_requested":
+            fields_stall["review_rounds"] = int(sess.get("review_rounds") or 0) + 1
+        self.store.update_session_fields(session_key, **fields_stall)
+        return False
 
     def _gateway_github_token(self) -> str | None:
         """Gateway voice only — never an agent PAT (PR #27 B2 / ADR-11).

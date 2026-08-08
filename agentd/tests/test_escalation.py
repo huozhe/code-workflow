@@ -386,7 +386,9 @@ def test_v2_to_v3_preserves_deliveries(tmp_path: Path) -> None:
     conn.close()
 
     store = Store(path)
-    assert store._schema_version() == 3
+    # Chain v2 → v3 → v4 (current)
+    assert store._schema_version() == SCHEMA_VERSION
     assert store.delivery_count() == 1
     assert "resume_state" in store._table_columns("sessions")
+    assert "stall_open_threads" in store._table_columns("sessions")
     store.close()

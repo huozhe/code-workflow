@@ -14,11 +14,12 @@ log = logging.getLogger("agentd.db")
 
 # Bump when DDL changes require a rebuild. SQLite is a derived cache (ADR-2);
 # mismatch ⇒ wipe + recreate. GitHub remains source of truth (P1).
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # Schema DDL only — connection pragmas are set separately (see Store.__init__).
 # v2 (#20): runners keyed by project (N sessions : 1 runner); sessions.project_key.
 # v3 (M3-A): sessions.resume_state for PAUSED_HUMAN → pre-pause restore (§8.5).
+# v4 (M3-B): sessions.stall_open_threads JSON for zero-thread delta (§9.3).
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS deliveries (
   delivery_id TEXT PRIMARY KEY,
@@ -61,6 +62,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   state TEXT NOT NULL,
   paused_reason TEXT,
   resume_state TEXT,
+  stall_open_threads TEXT,
   architect TEXT NOT NULL,
   developer TEXT NOT NULL,
   roles_locked INTEGER NOT NULL DEFAULT 0,
@@ -174,9 +176,12 @@ class Store:
         if ver == 1:
             self._migrate_v1_to_v2()
             ver = 2
-        if ver == 2 and SCHEMA_VERSION >= 3:
+        if ver == 2:
             self._migrate_v2_to_v3()
-            return
+            ver = 3
+        if ver == 3:
+            self._migrate_v3_to_v4()
+            ver = 4
         if ver == SCHEMA_VERSION:
             return
         log.warning(
@@ -298,6 +303,19 @@ class Store:
         self._conn.execute("PRAGMA user_version = 3")
         self._conn.commit()
         log.info("schema migration v2 → v3 complete; user_version=3")
+
+    def _migrate_v3_to_v4(self) -> None:
+        """M3-B: persist prior open review-thread ids for zero-thread delta (§9.3)."""
+        log.info("migrating schema v3 → v4 (sessions.stall_open_threads)")
+        cols = self._table_columns("sessions")
+        if cols and "stall_open_threads" not in cols:
+            self._conn.execute(
+                "ALTER TABLE sessions ADD COLUMN stall_open_threads TEXT"
+            )
+        self._conn.executescript(SCHEMA)
+        self._conn.execute("PRAGMA user_version = 4")
+        self._conn.commit()
+        log.info("schema migration v3 → v4 complete; user_version=4")
 
     def _rebuild_schema(self) -> None:
         tables = self._conn.execute(
@@ -541,6 +559,7 @@ class Store:
             "progress_fp",
             "progress_repeat",
             "zero_thread_rounds",
+            "stall_open_threads",
             "updated_at",
         }
         cols = []

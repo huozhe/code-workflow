@@ -136,8 +136,8 @@ def test_unknown_version_gap_rebuilds_with_honest_log(
         payload=b"{}",
     )
     with store._lock:
-        # Stuck at v3 with no path to a future SCHEMA_VERSION → rebuild.
-        store._conn.execute("PRAGMA user_version = 3")
+        # Stuck at current version with no path to a future SCHEMA_VERSION → rebuild.
+        store._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         store._conn.commit()
     store.close()
 

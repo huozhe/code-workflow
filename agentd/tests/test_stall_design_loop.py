@@ -1,4 +1,4 @@
-"""M3-B: zero-thread-progress through DesignLoop with fingerprint disarmed."""
+"""M3-B: zero-thread-progress with real fetch boundary (not invented webhook fields)."""
 
 from __future__ import annotations
 
@@ -6,8 +6,9 @@ import json
 from pathlib import Path
 
 from agentd.config import Config
-from agentd.db import Store
+from agentd.db import SCHEMA_VERSION, Store
 from agentd.design_loop import DesignLoop
+from agentd.github_fetch import PrReviewThreadSnapshot
 
 
 def _cfg(tmp: Path) -> Config:
@@ -24,7 +25,8 @@ def _cfg(tmp: Path) -> Config:
     )
 
 
-def _changes_requested_payload(*, head: str, threads_resolved: int = 0) -> bytes:
+def _realistic_changes_requested(*, head: str) -> bytes:
+    """Webhook body shaped like GitHub — no stall invent fields."""
     return json.dumps(
         {
             "action": "submitted",
@@ -34,22 +36,31 @@ def _changes_requested_payload(*, head: str, threads_resolved: int = 0) -> bytes
                 "title": "Design: RFC",
                 "html_url": "https://example/pr/9",
                 "head": {"sha": head},
+                "base": {"ref": "main"},
             },
             "repository": {"full_name": "huozhe/code-workflow"},
             "sender": {"login": "huozhegrok"},
-            # Stall inputs on the digest path (§9.3) — frozen progress, static head.
-            "open_thread_ids": ["thread-a"],
-            "unresolved_count": 1,
-            "threads_resolved": threads_resolved,
-            "diff_stat": "1 file changed, 1 insertion(+)",
         }
     ).encode()
 
 
-def test_zero_thread_escalates_via_design_loop_fingerprint_disarmed(
-    tmp_path: Path,
-) -> None:
-    """Exit: stalling review rounds escalate via zero-thread while fp unarmed."""
+def _snap(open_ids: list[str], *, head: str = "deadbeef") -> PrReviewThreadSnapshot:
+    return PrReviewThreadSnapshot(
+        open_thread_ids=list(open_ids),
+        unresolved_count=len(open_ids),
+        all_thread_ids=list(open_ids),
+        base_ref="main",
+        head_oid=head,
+    )
+
+
+def test_zero_thread_escalates_via_fetch_boundary_fp_disarmed(tmp_path: Path) -> None:
+    """Exit: 3 rounds, nothing resolved, static head → zero-thread only.
+
+    Fingerprint is skipped when diff_stat is unavailable OR threads observed
+    with static head never arm — here we supply a real frozen diff_stat so
+    fingerprint *could* run, but static head keeps it disarmed.
+    """
     store = Store(tmp_path / "state.db")
     cfg = _cfg(tmp_path)
     now = 1_700_000_000
@@ -66,21 +77,32 @@ def test_zero_thread_escalates_via_design_loop_fingerprint_disarmed(
         design_pr=9,
     )
     posts: list[str] = []
+    # Same unresolved threads every round; frozen diff.
+    open_ids = ["PRRT_thread_a", "PRRT_thread_b"]
+    static_head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
-    def fake_post(*, repo, issue_num, body, token):  # noqa: ANN001
-        posts.append(body)
-        return 7001
+    def fake_threads(*, repo, pr_number, token):  # noqa: ANN001
+        assert repo == "huozhe/code-workflow"
+        assert pr_number == 9
+        assert token == "tok"
+        return _snap(open_ids, head=static_head)
+
+    def fake_diff(*, repo, base, head, token):  # noqa: ANN001
+        assert base == "main"
+        return "file.py|modified|1+0-"
 
     loop = DesignLoop(
         store,
         cfg,
         supervisor=None,
         dispatch_turns=False,
-        post_comment=fake_post,
+        post_comment=lambda **k: posts.append(k["body"]) or 8001,  # noqa: ARG005
         gateway_token="gw",
+        fetch_threads=fake_threads,
+        fetch_diff=fake_diff,
+        github_token="tok",
     )
 
-    static_head = "deadbeef00000000000000000000000000000001"
     for i in range(3):
         store.insert_delivery(
             delivery_id=f"d-cr-{i}",
@@ -89,7 +111,7 @@ def test_zero_thread_escalates_via_design_loop_fingerprint_disarmed(
             repo="huozhe/code-workflow",
             issue_num=9,
             sender="huozhegrok",
-            payload=_changes_requested_payload(head=static_head, threads_resolved=0),
+            payload=_realistic_changes_requested(head=static_head),
             status="deferred",
         )
         loop.process_deferred_batch()
@@ -100,18 +122,14 @@ def test_zero_thread_escalates_via_design_loop_fingerprint_disarmed(
     reason = str(sess.get("paused_reason") or "")
     assert "zero thread" in reason, reason
     assert "fingerprint" not in reason
-    # Fingerprint never armed (no A: prefix)
-    fp = str(sess.get("progress_fp") or "")
-    assert not fp.startswith("A:"), fp
-    assert posts, "escalation comment should have been posted"
-    assert "@huozhe" in posts[0]
-    assert "zero thread" in posts[0] or "zero thread" in reason
-    esc = store.get_open_escalation(sk)
-    assert esc is not None and esc.get("comment_id") == 7001
+    # Fingerprint never armed (static head)
+    assert not str(sess.get("progress_fp") or "").startswith("A:")
+    assert posts and "@huozhe" in posts[0]
     store.close()
 
 
-def test_thread_resolution_resets_zero_thread_counter(tmp_path: Path) -> None:
+def test_thread_resolution_prevents_zero_thread_escalate(tmp_path: Path) -> None:
+    """Control: resolving threads resets counter — no escalate on round 3."""
     store = Store(tmp_path / "state.db")
     cfg = _cfg(tmp_path)
     now = 1_700_000_000
@@ -127,43 +145,104 @@ def test_thread_resolution_resets_zero_thread_counter(tmp_path: Path) -> None:
         updated_at=now,
         design_pr=10,
     )
+    # Round sequence: both open → both open → only one open (one resolved).
+    snaps = [
+        _snap(["t1", "t2"]),
+        _snap(["t1", "t2"]),
+        _snap(["t1"]),  # t2 resolved this round
+    ]
+    idx = {"i": 0}
+
+    def fake_threads(**k):  # noqa: ANN001, ANN003
+        s = snaps[min(idx["i"], len(snaps) - 1)]
+        idx["i"] += 1
+        return s
+
+    posts: list = []
     loop = DesignLoop(
         store,
         cfg,
         supervisor=None,
         dispatch_turns=False,
-        post_comment=lambda **k: 1,  # noqa: ARG005
+        post_comment=lambda **k: posts.append(1) or 1,  # noqa: ARG005
         gateway_token="gw",
+        fetch_threads=fake_threads,
+        fetch_diff=lambda **k: "frozen",  # noqa: ARG005
+        github_token="tok",
     )
-    head = "abc"
-    # Two empty rounds
-    for i in range(2):
+    head = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    for i in range(3):
         store.insert_delivery(
-            delivery_id=f"d-z-{i}",
+            delivery_id=f"d-ok-{i}",
             event="pull_request_review",
             action="submitted",
             repo="huozhe/code-workflow",
             issue_num=10,
             sender="huozhegrok",
-            payload=_changes_requested_payload(head=head, threads_resolved=0),
+            payload=_realistic_changes_requested(head=head),
             status="deferred",
         )
         loop.process_deferred_batch()
-    assert int(store.get_session(sk)["zero_thread_rounds"] or 0) == 2
 
-    # A round that resolves a thread resets the counter
-    store.insert_delivery(
-        delivery_id="d-z-resolved",
-        event="pull_request_review",
-        action="submitted",
+    sess = store.get_session(sk)
+    assert sess["state"] != "PAUSED_HUMAN", sess.get("paused_reason")
+    # After resolve on round 3, counter should be 0 (resolved > 0)
+    assert int(sess["zero_thread_rounds"] or 0) == 0
+    assert not posts
+    store.close()
+
+
+def test_missing_fetch_skips_signals_no_countdown(tmp_path: Path) -> None:
+    """When GraphQL fails, do not escalate on a blind 3-round timer."""
+    store = Store(tmp_path / "state.db")
+    cfg = _cfg(tmp_path)
+    now = 1_700_000_000
+    sk = "huozhe/code-workflow#11"
+    store.upsert_session(
+        session_key=sk,
         repo="huozhe/code-workflow",
-        issue_num=10,
-        sender="huozhegrok",
-        payload=_changes_requested_payload(head=head, threads_resolved=1),
-        status="deferred",
+        issue_num=11,
+        state="DESIGN_REVIEW",
+        architect="huozheclaude",
+        developer="huozhegrok",
+        created_at=now,
+        updated_at=now,
+        design_pr=11,
     )
-    loop.process_deferred_batch()
+    posts: list = []
+    loop = DesignLoop(
+        store,
+        cfg,
+        supervisor=None,
+        dispatch_turns=False,
+        post_comment=lambda **k: posts.append(1) or 1,  # noqa: ARG005
+        gateway_token="gw",
+        fetch_threads=lambda **k: None,  # noqa: ARG005
+        fetch_diff=lambda **k: None,  # noqa: ARG005
+        github_token="tok",
+    )
+    head = "cccccccccccccccccccccccccccccccccccccccc"
+    for i in range(5):
+        store.insert_delivery(
+            delivery_id=f"d-skip-{i}",
+            event="pull_request_review",
+            action="submitted",
+            repo="huozhe/code-workflow",
+            issue_num=11,
+            sender="huozhegrok",
+            payload=_realistic_changes_requested(head=head),
+            status="deferred",
+        )
+        loop.process_deferred_batch()
     sess = store.get_session(sk)
     assert sess["state"] != "PAUSED_HUMAN"
-    assert int(sess["zero_thread_rounds"] or 0) == 0
+    assert int(sess.get("zero_thread_rounds") or 0) == 0
+    assert not posts
+    store.close()
+
+
+def test_schema_v4_stall_open_threads_column(tmp_path: Path) -> None:
+    store = Store(tmp_path / "s.db")
+    assert store._schema_version() == SCHEMA_VERSION
+    assert "stall_open_threads" in store._table_columns("sessions")
     store.close()
