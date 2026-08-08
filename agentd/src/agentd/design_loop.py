@@ -506,8 +506,10 @@ class DesignLoop:
                 )
             if diff_stat is not None:
                 _STALL_DIFF_CACHE[diff_key] = diff_stat
+                # pop(..., None): concurrent eviction can race under multi-project
+                # delivery threads; KeyError would abort stall observation.
                 while len(_STALL_DIFF_CACHE) > 64:
-                    _STALL_DIFF_CACHE.pop(next(iter(_STALL_DIFF_CACHE)))
+                    _STALL_DIFF_CACHE.pop(next(iter(_STALL_DIFF_CACHE)), None)
 
         open_ids: list[str] = []
         threads_observed = False
