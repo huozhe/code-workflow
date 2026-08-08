@@ -223,6 +223,20 @@ class DesignLoop:
                 return
             kind = "design_approved"
 
+        # Only the Design PR merge advances DESIGN_APPROVED → IMPLEMENTING (§8.3).
+        if kind == "design_merged":
+            tracked = sess.get("design_pr")
+            event_pr = dig.get("pr")
+            if not tracked or not event_pr or int(event_pr) != int(tracked):
+                log.info(
+                    "drop id=%s: merge of pr=%s is not design_pr=%s",
+                    delivery_id,
+                    event_pr,
+                    tracked,
+                )
+                self.store.set_delivery_status(delivery_id, "dropped")
+                return
+
         recipient_role, recipient_login = self._pick_recipient(
             kind, state, architect, developer, sender
         )
@@ -241,10 +255,7 @@ class DesignLoop:
             role_logins=role_logins,
             bot_logins=bot_logins,
         )
-        if decision.action == RouteAction.DROP:
-            self.store.set_delivery_status(delivery_id, "dropped")
-            log.info("route drop id=%s reason=%s", delivery_id, decision.reason)
-            return
+        # DEFER: leave queued — no FSM (session paused for non-owner).
         if decision.action == RouteAction.DEFER:
             log.info("route defer id=%s reason=%s", delivery_id, decision.reason)
             return
@@ -264,6 +275,10 @@ class DesignLoop:
             )
             return
 
+        # P1: gateway drives FSM from *observed* GitHub events even when routing
+        # drops the turn (self-echo). Architect merge of the Design PR is sent by
+        # the Architect identity — recipient is also Architect (§8.3), so without
+        # this the merge never advances DESIGN_APPROVED → IMPLEMENTING (M3-D).
         tr = transition(state, kind)
         if tr:
             fields: dict[str, Any] = {"state": tr.new_state}
@@ -287,6 +302,18 @@ class DesignLoop:
             if stalled:
                 return
             sess = self.store.get_session(session_key) or sess
+
+        # DROP after FSM: no agent turn (self-echo, own-artifact, …).
+        if decision.action == RouteAction.DROP:
+            self.store.set_delivery_status(delivery_id, "done")
+            log.info(
+                "route drop after fsm id=%s reason=%s kind=%s state=%s",
+                delivery_id,
+                decision.reason,
+                kind,
+                state,
+            )
+            return
 
         # Dispatch turn to the session runner
         if self.dispatch_turns and self.supervisor and sess.get("endpoint"):
@@ -788,7 +815,8 @@ class DesignLoop:
                 return "design_pr_opened"
             if action == "synchronize" and is_design:
                 return "design_revised"
-            if action == "closed" and pr.get("merged"):
+            # Merge of a Design-titled PR; session design_pr match is enforced later.
+            if action == "closed" and pr.get("merged") and is_design:
                 return "design_merged"
         if event == "pull_request_review":
             review = data.get("review") or {}
@@ -823,10 +851,20 @@ class DesignLoop:
         developer: str,
         sender: str,
     ) -> tuple[str, str]:
-        # Happy path: issue → architect; design_pr → developer; changes → architect; etc.
-        if kind in ("issue_opened", "design_changes_requested", "design_merged", "merge_design"):
+        # Happy path (§8.2 / §8.3):
+        #   issue → architect drafts Design PR
+        #   design_pr_opened / revised → developer reviews
+        #   design_approved → architect merges (merge actor is Architect)
+        #   design_merged → architect begins implementation
+        if kind in (
+            "issue_opened",
+            "design_changes_requested",
+            "design_approved",
+            "design_merged",
+            "merge_design",
+        ):
             return "architect", architect
-        if kind in ("design_pr_opened", "design_revised", "design_approved"):
+        if kind in ("design_pr_opened", "design_revised"):
             return "developer", developer
         # Default: route to the role that is not the sender bot
         if sender.lower() == architect.lower():
