@@ -1,4 +1,7 @@
-"""#25 long-lived CLI session unit tests (no real vendor binaries)."""
+"""#25 long-lived CLI session unit tests (no real vendor binaries).
+
+Includes PR #26 Architect B1/B2 regression: agent→client ACP requests.
+"""
 
 from __future__ import annotations
 
@@ -26,64 +29,43 @@ def _clean_registry() -> None:
     cli_session.shutdown_all()
 
 
-def _fake_claude_proc(lines: list[dict[str, Any]]) -> MagicMock:
-    """Popen mock: stdin accepts writes; stdout yields NDJSON lines then blocks."""
-    out_lines = [json.dumps(o) + "\n" for o in lines]
-    idx = {"i": 0}
-    lock = threading.Lock()
+def _wire_stdout_queue(sess: cli_session.LiveCliSession, lines: list[str]) -> None:
+    """Simulate reader thread: put lines then leave queue open for more pushes."""
+    import queue as qmod
 
-    proc = MagicMock()
-    proc.poll.return_value = None
-    proc.pid = 4242
-    proc.stderr = MagicMock()
-    proc.stderr.read.return_value = ""
-
-    stdin = MagicMock()
-    proc.stdin = stdin
-
-    def readline() -> str:
-        with lock:
-            i = idx["i"]
-            if i >= len(out_lines):
-                time.sleep(0.05)
-                return ""
-            idx["i"] = i + 1
-            return out_lines[i]
-
-    stdout = MagicMock()
-    stdout.fileno.return_value = 3
-    stdout.readline.side_effect = readline
-    proc.stdout = stdout
-    return proc
+    q: qmod.Queue[str | None] = qmod.Queue()
+    for line in lines:
+        q.put(line)
+    sess._stdout_q = q
+    sess.proc = MagicMock()
+    sess.proc.poll.return_value = None
+    sess.proc.pid = 4242
+    sess.proc.stdin = MagicMock()
 
 
 def test_claude_turn_ends_on_type_result(tmp_path: Path) -> None:
-    home = tmp_path / "home"
-    tmp = tmp_path / "tmp"
-    xdg = tmp_path / "xdg"
     lines = [
-        {"type": "assistant", "session_id": "s1", "message": {"content": [{"type": "text", "text": "hi "}]}},
-        {"type": "result", "session_id": "s1", "result": "hi done", "is_error": False},
+        json.dumps(
+            {
+                "type": "assistant",
+                "session_id": "s1",
+                "message": {"content": [{"type": "text", "text": "hi "}]},
+            }
+        ),
+        json.dumps({"type": "result", "session_id": "s1", "result": "hi done", "is_error": False}),
     ]
-    fake = _fake_claude_proc(lines)
     progress: list[str] = []
-
-    with patch("agentd_runner.cli_session.subprocess.Popen", return_value=fake), patch(
-        "agentd_runner.cli_session.select.select", return_value=([3], [], [])
-    ), patch.object(cli_session.LiveCliSession, "_sample_rss"):
-        sess = cli_session.LiveCliSession(
-            role="architect",
-            adapter="claude-code",
-            uid=1001,
-            home=home,
-            tmp=tmp,
-            xdg=xdg,
-            spawn_cwd=tmp_path,
-        )
-        sess.ensure_spawned()
-        # Popen should have been called with stream-json flags and no -c
-        cmd = fake  # just ensure spawn happened
-        assert sess.proc is fake
+    sess = cli_session.LiveCliSession(
+        role="architect",
+        adapter="claude-code",
+        uid=1001,
+        home=tmp_path / "h",
+        tmp=tmp_path / "t",
+        xdg=tmp_path / "x",
+        spawn_cwd=tmp_path,
+    )
+    _wire_stdout_queue(sess, lines)
+    with patch.object(cli_session.LiveCliSession, "_sample_rss"):
         result = sess.turn("hello", deadline_s=5, progress=lambda p: progress.append(p.get("chunk", "")))
 
     assert result["status"] == "done"
@@ -96,13 +78,25 @@ def test_claude_turn_ends_on_type_result(tmp_path: Path) -> None:
 def test_claude_spawn_uses_continue_flag(tmp_path: Path) -> None:
     captured: list[list[str]] = []
 
-    def fake_popen(cmd, **kwargs):  # noqa: ANN001, ANN003
+    def fake_popen(**kwargs):  # noqa: ANN003
+        cmd = kwargs.get("args") or kwargs.get("args")
+        if "args" in kwargs:
+            cmd = kwargs["args"]
         captured.append(list(cmd))
-        return _fake_claude_proc([{"type": "result", "result": "ok"}])
+        proc = MagicMock()
+        proc.poll.return_value = None
+        proc.pid = 1
+        proc.stdin = MagicMock()
+        # stdout lines for reader thread
+        proc.stdout = MagicMock()
+        proc.stdout.readline.side_effect = [""]  # EOF immediately after spawn
+        return proc
 
     with patch("agentd_runner.cli_session.subprocess.Popen", side_effect=fake_popen), patch(
-        "agentd_runner.cli_session.select.select", return_value=([3], [], [])
-    ), patch.object(cli_session.LiveCliSession, "_sample_rss"):
+        "agentd_runner.cli_session.os.geteuid", return_value=501
+    ), patch.object(cli_session.LiveCliSession, "_sample_rss"), patch.object(
+        cli_session.LiveCliSession, "_acp_initialize_unlocked"
+    ):
         sess = cli_session.LiveCliSession(
             role="architect",
             adapter="claude-code",
@@ -124,7 +118,6 @@ def test_claude_spawn_uses_continue_flag(tmp_path: Path) -> None:
 
 def test_grok_acp_initialize_and_prompt(tmp_path: Path) -> None:
     """Grok agent stdio: initialize → session/new → session/prompt end_turn."""
-    replies: dict[int, dict] = {}
     out_q: list[str] = []
     lock = threading.Lock()
 
@@ -138,7 +131,13 @@ def test_grok_acp_initialize_and_prompt(tmp_path: Path) -> None:
             method = msg.get("method")
             with lock:
                 if method == "initialize":
-                    out_q.append(json.dumps({"jsonrpc": "2.0", "id": mid, "result": {"protocolVersion": 1}}) + "\n")
+                    # Assert B1 caps are false
+                    caps = (msg.get("params") or {}).get("clientCapabilities") or {}
+                    assert caps.get("fs", {}).get("readTextFile") is False
+                    assert caps.get("terminal") is False
+                    out_q.append(
+                        json.dumps({"jsonrpc": "2.0", "id": mid, "result": {"protocolVersion": 1}})
+                    )
                 elif method == "session/new":
                     out_q.append(
                         json.dumps(
@@ -148,7 +147,6 @@ def test_grok_acp_initialize_and_prompt(tmp_path: Path) -> None:
                                 "result": {"sessionId": "acp-99"},
                             }
                         )
-                        + "\n"
                     )
                 elif method == "session/prompt":
                     out_q.append(
@@ -164,7 +162,6 @@ def test_grok_acp_initialize_and_prompt(tmp_path: Path) -> None:
                                 },
                             }
                         )
-                        + "\n"
                     )
                     out_q.append(
                         json.dumps(
@@ -179,7 +176,6 @@ def test_grok_acp_initialize_and_prompt(tmp_path: Path) -> None:
                                 },
                             }
                         )
-                        + "\n"
                     )
                     out_q.append(
                         json.dumps(
@@ -189,70 +185,219 @@ def test_grok_acp_initialize_and_prompt(tmp_path: Path) -> None:
                                 "result": {"stopReason": "end_turn"},
                             }
                         )
-                        + "\n"
                     )
         return len(data) if isinstance(data, (bytes, str)) else 0
 
-    proc = MagicMock()
-    proc.poll.return_value = None
-    proc.pid = 7
-    proc.stderr = MagicMock()
-    proc.stderr.read.return_value = ""
-    stdin = MagicMock()
-    stdin.write.side_effect = on_write
-    proc.stdin = stdin
-    stdout = MagicMock()
-    stdout.fileno.return_value = 5
+    sess = cli_session.LiveCliSession(
+        role="developer",
+        adapter="grok-cli",
+        uid=1002,
+        home=tmp_path / "h",
+        tmp=tmp_path / "t",
+        xdg=tmp_path / "x",
+        spawn_cwd=tmp_path,
+    )
+    import queue as qmod
 
-    def readline() -> str:
-        deadline = time.time() + 2
+    q: qmod.Queue[str | None] = qmod.Queue()
+
+    def feed_from_out() -> None:
+        """Move agent frames into the session queue as the fake agent produces them."""
+        seen = 0
+        deadline = time.time() + 5
         while time.time() < deadline:
             with lock:
-                if out_q:
-                    return out_q.pop(0)
+                while seen < len(out_q):
+                    q.put(out_q[seen])
+                    seen += 1
             time.sleep(0.01)
-        return ""
 
-    stdout.readline.side_effect = readline
-    proc.stdout = stdout
+    feeder = threading.Thread(target=feed_from_out, daemon=True)
+    feeder.start()
 
-    with patch("agentd_runner.cli_session.subprocess.Popen", return_value=proc), patch(
-        "agentd_runner.cli_session.select.select", return_value=([5], [], [])
-    ), patch.object(cli_session.LiveCliSession, "_sample_rss"):
-        sess = cli_session.LiveCliSession(
-            role="developer",
-            adapter="grok-cli",
-            uid=1002,
-            home=tmp_path / "h",
-            tmp=tmp_path / "t",
-            xdg=tmp_path / "x",
-            spawn_cwd=tmp_path,
-        )
-        sess.ensure_spawned()
+    sess.proc = MagicMock()
+    sess.proc.poll.return_value = None
+    sess.proc.pid = 7
+    sess.proc.stdin = MagicMock()
+    sess.proc.stdin.write.side_effect = on_write
+    sess._stdout_q = q
+
+    with patch.object(cli_session.LiveCliSession, "_sample_rss"):
+        sess._acp_initialize_unlocked()
         assert sess.acp_session_id == "acp-99"
         result = sess.turn("ping", deadline_s=5)
 
     assert result["status"] == "done"
     assert result["summary"] == "ORANGE_TIGER"
     assert result["live_session"] is True
-    _ = replies
+
+
+def test_grok_answers_permission_and_ignores_request_id_collision(tmp_path: Path) -> None:
+    """B1+B2 regression: request_permission id=0 must not be treated as turn result.
+
+    Real grok sends agent→client requests with ids starting at 0 while our
+    client ids start high; a shape-blind id match would end the turn early or
+    hang if we drop the permission request.
+    """
+    writes: list[dict] = []
+    import queue as qmod
+
+    q: qmod.Queue[str | None] = qmod.Queue()
+    # Simulate: permission request id=0, then fs request id=1, then real result.
+    # Our mid for session/prompt will be 1002 after init path skipped.
+    q.put(
+        json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 0,
+                "method": "session/request_permission",
+                "params": {
+                    "toolCall": {"kind": "edit", "title": "Write /tmp/tt.txt"},
+                    "options": [
+                        {"optionId": "allow-edits-session", "name": "allow always"},
+                    ],
+                },
+            }
+        )
+    )
+    q.put(
+        json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "fs/read_text_file",
+                "params": {"path": "/tmp/tt.txt"},
+            }
+        )
+    )
+    q.put(
+        json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"text": "HELLO"},
+                    }
+                },
+            }
+        )
+    )
+    # Colliding id: agent response uses mid we will assign — only shape marks it response.
+    # Our _rpc_id starts 1000; first prompt uses 1001 after we set acp_session_id.
+    q.put(
+        json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 1001,
+                "result": {"stopReason": "end_turn"},
+            }
+        )
+    )
+
+    sess = cli_session.LiveCliSession(
+        role="developer",
+        adapter="grok-cli",
+        uid=1002,
+        home=tmp_path / "h",
+        tmp=tmp_path / "t",
+        xdg=tmp_path / "x",
+        spawn_cwd=tmp_path,
+    )
+    sess.acp_session_id = "s-live"
+    sess._rpc_id = 1000
+    sess._stdout_q = q
+    sess.proc = MagicMock()
+    sess.proc.poll.return_value = None
+    sess.proc.pid = 3
+    sess.proc.stdin = MagicMock()
+
+    def capture_write(data: str) -> int:
+        writes.append(json.loads(data.strip()))
+        return len(data)
+
+    sess.proc.stdin.write.side_effect = capture_write
+
+    with patch.object(cli_session.LiveCliSession, "_sample_rss"):
+        result = sess.turn("write a file with HELLO", deadline_s=5)
+
+    assert result["status"] == "done"
+    assert result["summary"] == "HELLO"
+    # Permission approved with Architect-verified optionId
+    perm_replies = [
+        w
+        for w in writes
+        if w.get("id") == 0 and "result" in w and not w.get("method")
+    ]
+    assert perm_replies, writes
+    outcome = perm_replies[0]["result"]["outcome"]
+    assert outcome["outcome"] == "selected"
+    assert outcome["optionId"] == "allow-edits-session"
+    # fs/* refused (capability not offered)
+    fs_errs = [w for w in writes if w.get("id") == 1 and "error" in w]
+    assert fs_errs
+
+
+def test_id_collision_request_not_accepted_as_response() -> None:
+    """B2 unit: method+id is a request, not a response even if id matches mid."""
+    req = {"jsonrpc": "2.0", "id": 5, "method": "session/request_permission", "params": {}}
+    resp = {"jsonrpc": "2.0", "id": 5, "result": {"stopReason": "end_turn"}}
+    assert cli_session._is_jsonrpc_request(req) is True
+    assert cli_session._is_jsonrpc_response(req) is False
+    assert cli_session._is_jsonrpc_request(resp) is False
+    assert cli_session._is_jsonrpc_response(resp) is True
 
 
 def test_deadline_kills_child_and_role_usable(tmp_path: Path) -> None:
+    import queue as qmod
+
+    sess = cli_session.LiveCliSession(
+        role="architect",
+        adapter="claude-code",
+        uid=1001,
+        home=tmp_path / "h",
+        tmp=tmp_path / "t",
+        xdg=tmp_path / "x",
+        spawn_cwd=tmp_path,
+    )
+    # Empty queue → timeouts
+    sess._stdout_q = qmod.Queue()
     proc = MagicMock()
     proc.poll.return_value = None
     proc.pid = 9
-    proc.stderr = MagicMock()
     proc.stdin = MagicMock()
-    stdout = MagicMock()
-    stdout.fileno.return_value = 8
-    # Never produces a result line
-    stdout.readline.return_value = ""
-    proc.stdout = stdout
+    sess.proc = proc
 
-    with patch("agentd_runner.cli_session.subprocess.Popen", return_value=proc), patch(
-        "agentd_runner.cli_session.select.select", return_value=([], [], [])
-    ), patch.object(cli_session.LiveCliSession, "_sample_rss"):
+    with patch.object(cli_session.LiveCliSession, "_sample_rss"):
+        result = sess.turn("slow", deadline_s=0)
+
+    assert result["status"] == "failed"
+    assert "deadline" in result["summary"]
+    assert not sess.is_alive()
+    assert sess.proc is None
+    proc.send_signal.assert_called()
+
+
+def test_stderr_redirected_to_role_log_not_pipe(tmp_path: Path) -> None:
+    """B3: stderr must not be subprocess.PIPE (buffer fill wedge)."""
+    seen: dict[str, Any] = {}
+
+    def fake_popen(**kwargs):  # noqa: ANN003
+        seen.update(kwargs)
+        proc = MagicMock()
+        proc.poll.return_value = None
+        proc.pid = 1
+        proc.stdin = MagicMock()
+        proc.stdout = MagicMock()
+        proc.stdout.readline.side_effect = [""]
+        return proc
+
+    with patch("agentd_runner.cli_session.subprocess.Popen", side_effect=fake_popen), patch(
+        "agentd_runner.cli_session.os.geteuid", return_value=501
+    ), patch.object(cli_session.LiveCliSession, "_sample_rss"), patch.object(
+        cli_session.LiveCliSession, "_acp_initialize_unlocked"
+    ):
         sess = cli_session.LiveCliSession(
             role="architect",
             adapter="claude-code",
@@ -263,24 +408,27 @@ def test_deadline_kills_child_and_role_usable(tmp_path: Path) -> None:
             spawn_cwd=tmp_path,
         )
         sess.ensure_spawned()
-        result = sess.turn("slow", deadline_s=0)  # immediate deadline
 
-    assert result["status"] == "failed"
-    assert "deadline" in result["summary"]
-    assert not sess.is_alive()
-    proc.send_signal.assert_called()
+    import subprocess as sp
+
+    assert seen.get("stderr") is not sp.PIPE
+    assert seen.get("stderr") is not None
+    assert (tmp_path / "t" / "cli-architect.stderr.log").is_file()
+    sess.shutdown()
 
 
 def test_registry_one_session_per_role(tmp_path: Path) -> None:
-    with patch("agentd_runner.cli_session.subprocess.Popen") as popen, patch.object(
-        cli_session.LiveCliSession, "_sample_rss"
-    ), patch.object(cli_session.LiveCliSession, "_acp_initialize_unlocked"):
+    with patch("agentd_runner.cli_session.subprocess.Popen") as popen, patch(
+        "agentd_runner.cli_session.os.geteuid", return_value=501
+    ), patch.object(cli_session.LiveCliSession, "_sample_rss"), patch.object(
+        cli_session.LiveCliSession, "_acp_initialize_unlocked"
+    ):
         fake = MagicMock()
         fake.poll.return_value = None
         fake.pid = 1
         fake.stdin = MagicMock()
         fake.stdout = MagicMock()
-        fake.stderr = MagicMock()
+        fake.stdout.readline.side_effect = lambda: time.sleep(60) or ""  # type: ignore[misc]
         popen.return_value = fake
         a1 = cli_session.get_or_create_session(
             role="architect",
@@ -320,12 +468,7 @@ def test_use_oneshot_for_mock_and_env() -> None:
 
 
 def test_role_lock_serializes_pipe_writes(tmp_path: Path) -> None:
-    """Two concurrent turn() calls on one session must not interleave (lock)."""
     order: list[str] = []
-    lines_a = [
-        {"type": "result", "result": "A"},
-    ]
-    # Use real sessions with slow turn by patching the unlocked method
     with patch.object(cli_session.LiveCliSession, "_spawn_unlocked"), patch.object(
         cli_session.LiveCliSession, "_sample_rss"
     ):
@@ -362,4 +505,26 @@ def test_role_lock_serializes_pipe_writes(tmp_path: Path) -> None:
     assert len(order) == 4
     assert order[0].startswith("start:") and order[1].startswith("end:")
     assert order[0].split(":")[1] == order[1].split(":")[1]
-    _ = lines_a
+
+
+def test_ensure_role_dirs_chowns_when_root(tmp_path: Path) -> None:
+    chowns: list[tuple] = []
+
+    def fake_chown(path, uid, gid):  # noqa: ANN001
+        chowns.append((str(path), uid, gid))
+
+    sess = cli_session.LiveCliSession(
+        role="architect",
+        adapter="claude-code",
+        uid=1001,
+        home=tmp_path / "h",
+        tmp=tmp_path / "t",
+        xdg=tmp_path / "x",
+        spawn_cwd=tmp_path / "cwd",
+    )
+    with patch("agentd_runner.cli_session.os.geteuid", return_value=0), patch(
+        "agentd_runner.cli_session.os.chown", side_effect=fake_chown
+    ):
+        sess._ensure_role_dirs()
+    assert any(c[1] == 1001 for c in chowns)
+    assert (tmp_path / "h").is_dir()

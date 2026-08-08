@@ -164,61 +164,30 @@ def test_role_paths_home_tmp_xdg_under_tree(tmp_path: Path, monkeypatch: pytest.
     assert str(paths["xdg"]).endswith(str(Path("architect") / "xdg"))
 
 
-def test_live_spawn_preexec_drops_privs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Privilege drop runs once in preexec at spawn — not per turn (#25 / §7.3)."""
+def test_live_spawn_drops_privs_once_via_popen_user(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Privilege drop at spawn via Popen(user=) — not per turn (#25 / §7.3 / NB2)."""
     monkeypatch.delenv("AGENTD_CLI_MODE", raising=False)
-    drops: list[int] = []
+    import queue as qmod
 
-    def fake_drop(uid: int) -> None:
-        drops.append(uid)
+    spawn_kwargs: list[dict] = []
 
-    fake = MagicMock()
-    fake.poll.return_value = None
-    fake.pid = 55
-    fake.stdin = MagicMock()
-    fake.stdout = MagicMock()
-    fake.stdout.fileno.return_value = 11
-    fake.stderr = MagicMock()
-    # One assistant + result for a single turn
-    responses = [
-        json.dumps(
-            {
-                "type": "assistant",
-                "session_id": "x",
-                "message": {"content": [{"type": "text", "text": "ok"}]},
-            }
-        )
-        + "\n",
-        json.dumps({"type": "result", "session_id": "x", "result": "ok"}) + "\n",
-    ]
-    ri = {"i": 0}
-
-    def readline() -> str:
-        if ri["i"] < len(responses):
-            r = responses[ri["i"]]
-            ri["i"] += 1
-            return r
-        time.sleep(0.05)
-        return ""
-
-    fake.stdout.readline.side_effect = readline
-
-    captured_preexec: list = []
-
-    def fake_popen(cmd, **kwargs):  # noqa: ANN001, ANN003
-        pe = kwargs.get("preexec_fn")
-        captured_preexec.append(pe)
-        # Simulate root path: invoke preexec once as spawn would
-        if pe is not None and os.geteuid() != 0:
-            # On test host we still record that a preexec was supplied when root.
-            pass
+    def fake_popen(**kwargs):  # noqa: ANN003
+        spawn_kwargs.append(dict(kwargs))
+        fake = MagicMock()
+        fake.poll.return_value = None
+        fake.pid = 55
+        fake.stdin = MagicMock()
+        fake.stdout = MagicMock()
+        fake.stdout.readline.side_effect = [""]  # reader thread EOF
         return fake
 
     with patch("agentd_runner.cli_session.subprocess.Popen", side_effect=fake_popen), patch(
-        "agentd_runner.cli_session.select.select", return_value=([11], [], [])
-    ), patch("agentd_runner.cli_session._drop_privs", side_effect=fake_drop), patch(
         "agentd_runner.cli_session.os.geteuid", return_value=0
-    ), patch.object(cli_session.LiveCliSession, "_sample_rss"):
+    ), patch("agentd_runner.cli_session.os.chown"), patch.object(
+        cli_session.LiveCliSession, "_sample_rss"
+    ):
         sess = cli_session.LiveCliSession(
             role="architect",
             adapter="claude-code",
@@ -228,21 +197,33 @@ def test_live_spawn_preexec_drops_privs(tmp_path: Path, monkeypatch: pytest.Monk
             xdg=tmp_path / "x",
             spawn_cwd=tmp_path,
         )
-        # Force the preexec path by calling it ourselves the way Popen would.
         sess.ensure_spawned()
-        assert captured_preexec and captured_preexec[0] is not None
-        captured_preexec[0]()  # simulates child preexec
-        assert drops == [1001]
+        assert len(spawn_kwargs) == 1
+        assert spawn_kwargs[0].get("user") == 1001
+        assert spawn_kwargs[0].get("group") == 1001
+        assert spawn_kwargs[0].get("extra_groups") == []
+        # stderr is a file, not PIPE
+        assert spawn_kwargs[0].get("stderr") is not None
 
+        # Two turns without re-spawn: drop only once
+        q: qmod.Queue[str | None] = qmod.Queue()
+        for _ in range(2):
+            q.put(
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "session_id": "x",
+                        "message": {"content": [{"type": "text", "text": "ok"}]},
+                    }
+                )
+            )
+            q.put(json.dumps({"type": "result", "session_id": "x", "result": "ok"}))
+        sess._stdout_q = q
         r1 = sess.turn("t1", deadline_s=5)
-        # Reset responses for second turn
-        ri["i"] = 0
         r2 = sess.turn("t2", deadline_s=5)
 
     assert r1["status"] == "done" and r2["status"] == "done"
-    # setuid only at spawn, not per turn
-    assert drops == [1001]
-    assert len(captured_preexec) == 1
+    assert len(spawn_kwargs) == 1
 
 
 def test_drop_privs_clears_groups_and_rejects_root() -> None:

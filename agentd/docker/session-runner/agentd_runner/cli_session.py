@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-import select
+import queue
 import shutil
 import signal
 import subprocess
@@ -21,13 +21,16 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, IO, TextIO
 
 log = logging.getLogger("agentd_runner.cli_session")
 
 # Global registry: one live session per role (project container).
 _SESSIONS: dict[str, "LiveCliSession"] = {}
 _REGISTRY_LOCK = threading.Lock()
+
+# ACP permission option verified on host (Architect review PR #26 B1).
+_ACP_ALLOW_EDITS_SESSION = "allow-edits-session"
 
 
 def project_root() -> Path:
@@ -79,6 +82,18 @@ def _role_env(role: str, home: Path, tmp: Path, xdg: Path) -> dict[str, str]:
     return env
 
 
+def _is_jsonrpc_response(obj: dict[str, Any]) -> bool:
+    """Response = has result/error and no method (B2: id spaces collide)."""
+    if "method" in obj:
+        return False
+    return "result" in obj or "error" in obj
+
+
+def _is_jsonrpc_request(obj: dict[str, Any]) -> bool:
+    """Agent→client request: method + id (needs a reply)."""
+    return bool(obj.get("method")) and "id" in obj and "result" not in obj and "error" not in obj
+
+
 @dataclass
 class LiveCliSession:
     """One long-lived vendor CLI process for a role."""
@@ -91,13 +106,15 @@ class LiveCliSession:
     xdg: Path
     spawn_cwd: Path
     proc: subprocess.Popen[str] | None = None
-    # Claude stream-json session_id (if advertised on stream)
     claude_session_id: str | None = None
-    # Grok ACP session id
     acp_session_id: str | None = None
-    _rpc_id: int = 0
+    # Client request ids start at 0; keep ours high to reduce confusion in logs.
+    _rpc_id: int = 1000
     _lock: threading.Lock = field(default_factory=threading.Lock)
     last_rss_kb: int = 0
+    _stderr_fh: IO[str] | None = field(default=None, repr=False)
+    _stdout_q: queue.Queue[str | None] | None = field(default=None, repr=False)
+    _reader_thread: threading.Thread | None = field(default=None, repr=False)
 
     def is_alive(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
@@ -121,7 +138,10 @@ class LiveCliSession:
     def _kill_unlocked(self) -> None:
         proc = self.proc
         self.proc = None
+        self._stdout_q = None
+        self._reader_thread = None
         if proc is None:
+            self._close_stderr()
             return
         try:
             if proc.poll() is None:
@@ -133,14 +153,40 @@ class LiveCliSession:
                     proc.wait(timeout=3)
         except Exception as exc:  # noqa: BLE001
             log.warning("kill %s cli: %s", self.role, exc)
+        self._close_stderr()
+
+    def _close_stderr(self) -> None:
+        fh = self._stderr_fh
+        self._stderr_fh = None
+        if fh is not None:
+            try:
+                fh.close()
+            except OSError:
+                pass
+
+    def _ensure_role_dirs(self) -> None:
+        """Create role trees; chown to role uid when we are root (NB1)."""
+        dirs = [
+            self.home,
+            self.tmp,
+            self.xdg,
+            self.xdg / "cache",
+            self.xdg / "config",
+            self.xdg / "data",
+            self.spawn_cwd,
+        ]
+        for d in dirs:
+            d.mkdir(parents=True, exist_ok=True)
+            if os.geteuid() == 0:
+                try:
+                    os.chown(d, self.uid, self.uid)
+                except OSError as exc:
+                    log.warning("chown %s uid=%s: %s", d, self.uid, exc)
 
     def _spawn_unlocked(self, *, continue_session: bool) -> None:
-        self.home.mkdir(parents=True, exist_ok=True)
-        self.tmp.mkdir(parents=True, exist_ok=True)
-        (self.xdg / "cache").mkdir(parents=True, exist_ok=True)
-        (self.xdg / "config").mkdir(parents=True, exist_ok=True)
-        (self.xdg / "data").mkdir(parents=True, exist_ok=True)
-        self.spawn_cwd.mkdir(parents=True, exist_ok=True)
+        self._ensure_role_dirs()
+        self.acp_session_id = None
+        self._rpc_id = 1000
 
         env = _role_env(self.role, self.home, self.tmp, self.xdg)
         if self.adapter in ("claude-code", "claude"):
@@ -150,9 +196,26 @@ class LiveCliSession:
         else:
             raise ValueError(f"no long-lived spawn for adapter {self.adapter!r}")
 
-        def preexec() -> None:
-            if os.geteuid() == 0:
-                _drop_privs(self.uid)
+        # B3: never PIPE stderr without a reader — fill → wedged CLI.
+        stderr_path = self.tmp / f"cli-{self.role}.stderr.log"
+        self._close_stderr()
+        self._stderr_fh = open(stderr_path, "a", encoding="utf-8")  # noqa: SIM115
+
+        popen_kwargs: dict[str, Any] = {
+            "args": cmd,
+            "stdin": subprocess.PIPE,
+            "stdout": subprocess.PIPE,
+            "stderr": self._stderr_fh,
+            "text": True,
+            "bufsize": 1,
+            "cwd": str(self.spawn_cwd),
+            "env": env,
+        }
+        # Prefer C-level drop (safe in threaded parent) over preexec_fn (NB2).
+        if os.geteuid() == 0:
+            popen_kwargs["user"] = self.uid
+            popen_kwargs["group"] = self.uid
+            popen_kwargs["extra_groups"] = []
 
         log.info(
             "spawning long-lived cli role=%s adapter=%s uid=%s cwd=%s continue=%s",
@@ -162,20 +225,51 @@ class LiveCliSession:
             self.spawn_cwd,
             continue_session,
         )
-        self.proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-            cwd=str(self.spawn_cwd),
-            env=env,
-            preexec_fn=preexec if os.geteuid() == 0 else None,
-        )
+        try:
+            self.proc = subprocess.Popen(**popen_kwargs)
+        except (TypeError, ValueError, PermissionError) as exc:
+            # Older Python or non-Linux: fall back to preexec_fn setuid.
+            log.warning("Popen(user=) failed (%s); falling back to preexec_fn", exc)
+            popen_kwargs.pop("user", None)
+            popen_kwargs.pop("group", None)
+            popen_kwargs.pop("extra_groups", None)
+
+            def preexec() -> None:
+                if os.geteuid() == 0:
+                    _drop_privs(self.uid)
+
+            popen_kwargs["preexec_fn"] = preexec if os.geteuid() == 0 else None
+            self.proc = subprocess.Popen(**popen_kwargs)
+
+        self._start_stdout_reader()
         if self.adapter in ("grok-cli", "grok"):
             self._acp_initialize_unlocked()
         self._sample_rss()
+
+    def _start_stdout_reader(self) -> None:
+        """Reader thread avoids select+TextIOWrapper buffer trap (NB3)."""
+        assert self.proc and self.proc.stdout
+        q: queue.Queue[str | None] = queue.Queue()
+        self._stdout_q = q
+        stream: TextIO = self.proc.stdout
+
+        def _run() -> None:
+            try:
+                while True:
+                    line = stream.readline()
+                    if line == "":
+                        q.put(None)
+                        return
+                    q.put(line.rstrip("\n"))
+            except Exception as exc:  # noqa: BLE001
+                log.debug("stdout reader ended role=%s: %s", self.role, exc)
+                q.put(None)
+
+        t = threading.Thread(
+            target=_run, name=f"cli-stdout-{self.role}", daemon=True
+        )
+        self._reader_thread = t
+        t.start()
 
     def _claude_cmd(self, continue_session: bool) -> list[str]:
         binary = shutil.which("claude") or os.environ.get("CLAUDE_BIN") or "claude"
@@ -188,7 +282,6 @@ class LiveCliSession:
             "--verbose",
             "--dangerously-skip-permissions",
         ]
-        # -c restores conversation from disk when process was killed (S5 recovery).
         if continue_session:
             cmd.append("-c")
         return cmd
@@ -197,9 +290,16 @@ class LiveCliSession:
         binary = shutil.which("grok") or os.environ.get("GROK_BIN") or "grok"
         return [binary, "agent", "stdio"]
 
+    def _acp_write(self, obj: dict[str, Any]) -> None:
+        assert self.proc and self.proc.stdin
+        self.proc.stdin.write(json.dumps(obj) + "\n")
+        self.proc.stdin.flush()
+
     def _acp_initialize_unlocked(self) -> None:
         assert self.proc and self.proc.stdin and self.proc.stdout
         self._rpc_id += 1
+        # B1: advertise only what we implement. Grok does its own file I/O as
+        # the role UID; we only answer session/request_permission.
         init = {
             "jsonrpc": "2.0",
             "id": self._rpc_id,
@@ -207,17 +307,18 @@ class LiveCliSession:
             "params": {
                 "protocolVersion": 1,
                 "clientCapabilities": {
-                    "fs": {"readTextFile": True, "writeTextFile": True},
-                    "terminal": True,
+                    "fs": {"readTextFile": False, "writeTextFile": False},
+                    "terminal": False,
                 },
-                "clientInfo": {"name": "agentd-runner", "version": "1.1.0"},
+                "clientInfo": {"name": "agentd-runner", "version": "1.1.1"},
             },
         }
-        self.proc.stdin.write(json.dumps(init) + "\n")
-        self.proc.stdin.flush()
+        self._acp_write(init)
         resp = self._read_jsonrpc_result(self._rpc_id, timeout_s=30)
         if resp is None:
             raise RuntimeError("grok ACP initialize timed out")
+        if resp.get("error"):
+            raise RuntimeError(f"grok ACP initialize error: {resp['error']!r}")
         self._rpc_id += 1
         new = {
             "jsonrpc": "2.0",
@@ -225,13 +326,55 @@ class LiveCliSession:
             "method": "session/new",
             "params": {"cwd": str(self.spawn_cwd), "mcpServers": []},
         }
-        self.proc.stdin.write(json.dumps(new) + "\n")
-        self.proc.stdin.flush()
+        self._acp_write(new)
         resp2 = self._read_jsonrpc_result(self._rpc_id, timeout_s=30)
         if not resp2 or not (resp2.get("result") or {}).get("sessionId"):
             raise RuntimeError(f"grok ACP session/new failed: {resp2!r}")
         self.acp_session_id = str(resp2["result"]["sessionId"])
         log.info("grok ACP session %s role=%s", self.acp_session_id, self.role)
+
+    def _handle_acp_server_request(self, obj: dict[str, Any]) -> None:
+        """Answer agent→client requests so tool turns do not wedge (B1)."""
+        method = str(obj.get("method") or "")
+        rid = obj.get("id")
+        if method == "session/request_permission":
+            self._acp_write(
+                {
+                    "jsonrpc": "2.0",
+                    "id": rid,
+                    "result": {
+                        "outcome": {
+                            "outcome": "selected",
+                            "optionId": _ACP_ALLOW_EDITS_SESSION,
+                        }
+                    },
+                }
+            )
+            log.debug("acp allow permission id=%s role=%s", rid, self.role)
+            return
+        # Capabilities are false; refuse any accidental fs/terminal calls.
+        if method.startswith("fs/") or method.startswith("terminal/"):
+            self._acp_write(
+                {
+                    "jsonrpc": "2.0",
+                    "id": rid,
+                    "error": {
+                        "code": -32601,
+                        "message": f"client capability not offered: {method}",
+                    },
+                }
+            )
+            log.warning("acp unexpected client request method=%s role=%s", method, self.role)
+            return
+        log.warning("acp unhandled server request method=%s role=%s", method, self.role)
+        if rid is not None:
+            self._acp_write(
+                {
+                    "jsonrpc": "2.0",
+                    "id": rid,
+                    "error": {"code": -32601, "message": f"method not found: {method}"},
+                }
+            )
 
     def turn(
         self,
@@ -258,7 +401,6 @@ class LiveCliSession:
                 else:
                     result = self._grok_turn_unlocked(prompt, deadline_s, progress)
             except TimeoutError:
-                # Wedged turn: kill child so the role is usable again.
                 log.warning("turn deadline exceeded role=%s; killing cli", self.role)
                 self._kill_unlocked()
                 return {
@@ -292,13 +434,21 @@ class LiveCliSession:
         except Exception as exc:  # noqa: BLE001
             log.debug("progress callback failed: %s", exc)
 
+    def _stderr_tail(self, n: int = 500) -> str:
+        path = self.tmp / f"cli-{self.role}.stderr.log"
+        try:
+            data = path.read_text(encoding="utf-8", errors="replace")
+            return data[-n:]
+        except OSError:
+            return ""
+
     def _claude_turn_unlocked(
         self,
         prompt: str,
         deadline_s: int,
         progress: Callable[[dict[str, Any]], None] | None,
     ) -> dict[str, Any]:
-        assert self.proc and self.proc.stdin and self.proc.stdout
+        assert self.proc and self.proc.stdin
         msg: dict[str, Any] = {
             "type": "user",
             "message": {"role": "user", "content": prompt},
@@ -313,9 +463,8 @@ class LiveCliSession:
         deadline = time.time() + deadline_s
         while time.time() < deadline:
             if self.proc.poll() is not None:
-                err = (self.proc.stderr.read() if self.proc.stderr else "") or ""
-                raise RuntimeError(f"claude exited early: {err[:500]}")
-            line = self._readline_timeout(self.proc.stdout, max(0.1, deadline - time.time()))
+                raise RuntimeError(f"claude exited early: {self._stderr_tail()}")
+            line = self._readline_timeout(max(0.1, deadline - time.time()))
             if line is None:
                 continue
             try:
@@ -364,7 +513,7 @@ class LiveCliSession:
         deadline_s: int,
         progress: Callable[[dict[str, Any]], None] | None,
     ) -> dict[str, Any]:
-        assert self.proc and self.proc.stdin and self.proc.stdout
+        assert self.proc and self.proc.stdin
         if not self.acp_session_id:
             self._acp_initialize_unlocked()
         self._rpc_id += 1
@@ -378,17 +527,15 @@ class LiveCliSession:
                 "prompt": [{"type": "text", "text": prompt}],
             },
         }
-        self.proc.stdin.write(json.dumps(req) + "\n")
-        self.proc.stdin.flush()
+        self._acp_write(req)
 
         chunks: list[str] = []
         result: dict[str, Any] | None = None
         deadline = time.time() + deadline_s
         while time.time() < deadline:
             if self.proc.poll() is not None:
-                err = (self.proc.stderr.read() if self.proc.stderr else "") or ""
-                raise RuntimeError(f"grok exited early: {err[:500]}")
-            line = self._readline_timeout(self.proc.stdout, max(0.1, deadline - time.time()))
+                raise RuntimeError(f"grok exited early: {self._stderr_tail()}")
+            line = self._readline_timeout(max(0.1, deadline - time.time()))
             if line is None:
                 continue
             try:
@@ -397,13 +544,20 @@ class LiveCliSession:
                 continue
             if not isinstance(obj, dict):
                 continue
+            # Notifications and progress
             if obj.get("method") == "session/update":
                 u = (obj.get("params") or {}).get("update") or {}
                 if u.get("sessionUpdate") == "agent_message_chunk":
                     piece = str((u.get("content") or {}).get("text") or "")
                     chunks.append(piece)
                     self._emit_progress(progress, piece)
-            elif obj.get("id") == mid:
+                continue
+            # B1/B2: agent→client requests (own id space) — answer, do not treat as result
+            if _is_jsonrpc_request(obj):
+                self._handle_acp_server_request(obj)
+                continue
+            # B2: only frames with result/error and no method are responses
+            if _is_jsonrpc_response(obj) and obj.get("id") == mid:
                 result = obj
                 break
         else:
@@ -416,7 +570,6 @@ class LiveCliSession:
                 "public_actions": [],
                 "artifacts": [],
             }
-        # stopReason end_turn is the turn-complete signal from #19.
         stop = ((result or {}).get("result") or {}).get("stopReason")
         if stop and stop != "end_turn":
             log.info("grok stopReason=%s role=%s", stop, self.role)
@@ -433,34 +586,42 @@ class LiveCliSession:
     def _read_jsonrpc_result(
         self, mid: int, *, timeout_s: float
     ) -> dict[str, Any] | None:
-        assert self.proc and self.proc.stdout
+        assert self.proc
         deadline = time.time() + timeout_s
         while time.time() < deadline:
             if self.proc.poll() is not None:
                 return None
-            line = self._readline_timeout(self.proc.stdout, max(0.1, deadline - time.time()))
+            line = self._readline_timeout(max(0.1, deadline - time.time()))
             if line is None:
                 continue
             try:
                 obj = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if isinstance(obj, dict) and obj.get("id") == mid:
+            if not isinstance(obj, dict):
+                continue
+            if _is_jsonrpc_request(obj):
+                self._handle_acp_server_request(obj)
+                continue
+            if _is_jsonrpc_response(obj) and obj.get("id") == mid:
                 return obj
         return None
 
-    @staticmethod
-    def _readline_timeout(stream: Any, timeout_s: float) -> str | None:
+    def _readline_timeout(self, timeout_s: float) -> str | None:
         if timeout_s <= 0:
             return None
-        fd = stream.fileno()
-        ready, _, _ = select.select([fd], [], [], timeout_s)
-        if not ready:
+        q = self._stdout_q
+        if q is None:
             return None
-        line = stream.readline()
-        if not line:
+        try:
+            line = q.get(timeout=timeout_s)
+        except queue.Empty:
             return None
-        return line.rstrip("\n")
+        if line is None:
+            # EOF — leave a sentinel for subsequent readers
+            q.put(None)
+            return None
+        return line
 
     def _sample_rss(self) -> None:
         if not self.proc or self.proc.pid is None:
@@ -490,6 +651,13 @@ def get_or_create_session(
         if existing is not None and existing.adapter == adapter and existing.is_alive():
             return existing
         if existing is not None:
+            if existing.adapter != adapter:
+                log.warning(
+                    "adapter swap role=%s %s→%s; killing live CLI (conversation reset, §5.3)",
+                    role,
+                    existing.adapter,
+                    adapter,
+                )
             existing.shutdown()
         sess = LiveCliSession(
             role=role,
