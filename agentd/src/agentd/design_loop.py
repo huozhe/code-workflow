@@ -366,10 +366,39 @@ class DesignLoop:
             status=None,
             summary=None,
         )
+        def _on_runner_notify(method: str, params: dict[str, Any]) -> None:
+            # Runner → gateway: artifact.register (M3-C / §14.2).
+            if method != "artifact.register":
+                return
+            ref = str(params.get("ref") or "").strip()
+            if not ref:
+                return
+            art_role = str(params.get("role") or role)
+            kind = str(params.get("kind") or "scratch")
+            self.store.register_artifact(
+                session_key=session_key,
+                role=art_role,
+                kind=kind,
+                ref=ref,
+            )
+            log.info(
+                "artifact.register notify session=%s role=%s kind=%s ref=%s",
+                session_key,
+                art_role,
+                kind,
+                ref,
+            )
+
         lock = _lock_for_project_role(project_key, role)
         try:
             with lock:
-                with RunnerClient(host, int(port_s), bearer, timeout_s=120) as cli:
+                with RunnerClient(
+                    host,
+                    int(port_s),
+                    bearer,
+                    timeout_s=120,
+                    on_notification=_on_runner_notify,
+                ) as cli:
                     result = cli.call(
                         "turn.dispatch",
                         {
@@ -417,6 +446,8 @@ class DesignLoop:
             )
             self.store._conn.commit()
 
+        # Model-reported artifacts are optional extras; primary ledger is
+        # supervisor-observed at ensure_session (M3-C).
         for art in (result or {}).get("artifacts") or []:
             if isinstance(art, dict) and art.get("ref"):
                 self.store.register_artifact(

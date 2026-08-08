@@ -703,16 +703,96 @@ class Store:
         kind: str,
         ref: str,
         created_at: int | None = None,
-    ) -> None:
+    ) -> int:
+        """Record a cleanup-ledger row (FR-4.3). Idempotent for open rows.
+
+        Returns artifact id (existing open row or newly inserted).
+        """
+        kind_s = str(kind or "scratch")
+        ref_s = str(ref or "").strip()
+        if not session_key or not ref_s:
+            raise ValueError("session_key and ref required for artifact.register")
+        role_s = str(role or "system")
         with self._lock:
-            self._conn.execute(
+            existing = self._conn.execute(
+                """
+                SELECT id FROM artifacts
+                WHERE session_key = ? AND kind = ? AND ref = ? AND removed_at IS NULL
+                LIMIT 1
+                """,
+                (session_key, kind_s, ref_s),
+            ).fetchone()
+            if existing:
+                return int(existing["id"])
+            cur = self._conn.execute(
                 """
                 INSERT INTO artifacts(session_key, role, kind, ref, created_at)
                 VALUES (?, ?, ?, ?, ?)
                 """,
-                (session_key, role, kind, ref, created_at or int(time.time())),
+                (session_key, role_s, kind_s, ref_s, created_at or int(time.time())),
             )
             self._conn.commit()
+            return int(cur.lastrowid or 0)
+
+    def list_artifacts(
+        self,
+        session_key: str,
+        *,
+        open_only: bool = True,
+    ) -> list[dict[str, Any]]:
+        with self._lock:
+            if open_only:
+                rows = self._conn.execute(
+                    """
+                    SELECT id, session_key, role, kind, ref, created_at, removed_at
+                    FROM artifacts
+                    WHERE session_key = ? AND removed_at IS NULL
+                    ORDER BY created_at ASC, id ASC
+                    """,
+                    (session_key,),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    """
+                    SELECT id, session_key, role, kind, ref, created_at, removed_at
+                    FROM artifacts
+                    WHERE session_key = ?
+                    ORDER BY created_at ASC, id ASC
+                    """,
+                    (session_key,),
+                ).fetchall()
+            return [dict(r) for r in rows]
+
+    def mark_artifact_removed(
+        self,
+        *,
+        session_key: str,
+        ref: str,
+        kind: str | None = None,
+        removed_at: int | None = None,
+    ) -> int:
+        """Set removed_at on matching open rows. Returns rows updated."""
+        ts = removed_at if removed_at is not None else int(time.time())
+        with self._lock:
+            if kind:
+                cur = self._conn.execute(
+                    """
+                    UPDATE artifacts SET removed_at = ?
+                    WHERE session_key = ? AND ref = ? AND kind = ?
+                      AND removed_at IS NULL
+                    """,
+                    (ts, session_key, ref, kind),
+                )
+            else:
+                cur = self._conn.execute(
+                    """
+                    UPDATE artifacts SET removed_at = ?
+                    WHERE session_key = ? AND ref = ? AND removed_at IS NULL
+                    """,
+                    (ts, session_key, ref),
+                )
+            self._conn.commit()
+            return int(cur.rowcount or 0)
 
     def open_escalation(
         self,

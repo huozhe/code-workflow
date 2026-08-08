@@ -25,11 +25,14 @@ class RunnerClient:
         bearer: str,
         *,
         timeout_s: float = 30.0,
+        on_notification: Any | None = None,
     ) -> None:
         self.host = host
         self.port = port
         self.bearer = bearer
         self.timeout_s = timeout_s
+        # Runner → gateway notifications (notify.progress, artifact.register).
+        self.on_notification = on_notification
         self._sock: socket.socket | None = None
         self._rfile = None
         self._wfile = None
@@ -91,7 +94,14 @@ class RunnerClient:
                 raise RuntimeError("RPC connection closed")
             resp = json.loads(raw.decode("utf-8"))
             if resp.get("id") is None and resp.get("method"):
-                log.debug("rpc notify %s params=%s", resp.get("method"), resp.get("params"))
+                method_n = str(resp.get("method") or "")
+                params_n = resp.get("params") if isinstance(resp.get("params"), dict) else {}
+                log.debug("rpc notify %s params=%s", method_n, params_n)
+                if self.on_notification is not None:
+                    try:
+                        self.on_notification(method_n, params_n)
+                    except Exception:  # noqa: BLE001
+                        log.exception("on_notification failed method=%s", method_n)
                 continue
             if resp.get("id") != req_id and resp.get("id") is not None:
                 log.warning(

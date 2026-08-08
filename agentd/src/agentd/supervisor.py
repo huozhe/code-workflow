@@ -323,6 +323,11 @@ class SessionSupervisor:
                     created_at=now,
                     updated_at=now,
                 )
+                self._register_session_layout_artifacts(
+                    session_key=session_key,
+                    repo=repo,
+                    issue_num=issue_num,
+                )
                 self.store.upsert_runner(
                     project_key,
                     container_id=handle.container_id,
@@ -470,6 +475,11 @@ class SessionSupervisor:
             developer=developer,
             created_at=now,
             updated_at=now,
+        )
+        self._register_session_layout_artifacts(
+            session_key=session_key,
+            repo=repo,
+            issue_num=issue_num,
         )
         self.store.upsert_runner(
             project_key,
@@ -621,6 +631,46 @@ class SessionSupervisor:
         worktree_add(clone, wt_arch, f"{branch_prefix}/architect")
         worktree_add(clone, wt_dev, f"{branch_prefix}/developer")
         return proj
+
+    def _register_session_layout_artifacts(
+        self,
+        *,
+        session_key: str,
+        repo: str,
+        issue_num: int,
+    ) -> list[dict[str, str]]:
+        """Ledger what ensure_session *created* — not model-reported (M3-C / §10.5).
+
+        Registration is driven by supervisor-observed worktrees, branches, and
+        scratch dirs so M5 teardown has a non-empty ledger even when adapters
+        return ``artifacts: []``.
+        """
+        proj = project_path(self.config.root, repo)
+        issue_host = proj / issue_session_rel(issue_num)
+        branch_prefix = f"agentd/{project_dir_name(repo)}/{issue_num}"
+        registered: list[dict[str, str]] = []
+        for role in ("architect", "developer"):
+            wt = issue_host / role / "worktrees" / f"issue-{issue_num}"
+            branch = f"{branch_prefix}/{role}"
+            scratch = issue_host / role / "scratch"
+            for kind, ref in (
+                ("worktree", str(wt)),
+                ("branch", branch),
+                ("scratch", str(scratch)),
+            ):
+                self.store.register_artifact(
+                    session_key=session_key,
+                    role=role,
+                    kind=kind,
+                    ref=ref,
+                )
+                registered.append({"role": role, "kind": kind, "ref": ref})
+        log.info(
+            "artifact ledger session=%s registered=%s (supervisor-observed)",
+            session_key,
+            len(registered),
+        )
+        return registered
 
     def _load_tokens(self) -> dict[str, str]:
         """Keychain PATs only — fail closed on miss (ADR-11 / B1 shape)."""
