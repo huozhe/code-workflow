@@ -14,10 +14,11 @@ log = logging.getLogger("agentd.db")
 
 # Bump when DDL changes require a rebuild. SQLite is a derived cache (ADR-2);
 # mismatch ⇒ wipe + recreate. GitHub remains source of truth (P1).
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Schema DDL only — connection pragmas are set separately (see Store.__init__).
 # v2 (#20): runners keyed by project (N sessions : 1 runner); sessions.project_key.
+# v3 (M3-A): sessions.resume_state for PAUSED_HUMAN → pre-pause restore (§8.5).
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS deliveries (
   delivery_id TEXT PRIMARY KEY,
@@ -59,6 +60,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   issue_num INTEGER NOT NULL,
   state TEXT NOT NULL,
   paused_reason TEXT,
+  resume_state TEXT,
   architect TEXT NOT NULL,
   developer TEXT NOT NULL,
   roles_locked INTEGER NOT NULL DEFAULT 0,
@@ -168,8 +170,14 @@ class Store:
                 f"state.db user_version={ver} is newer than agentd "
                 f"SCHEMA_VERSION={SCHEMA_VERSION}; upgrade the binary"
             )
-        if ver == 1 and SCHEMA_VERSION == 2:
+        # Incremental chain: preserve deliveries ledger.
+        if ver == 1:
             self._migrate_v1_to_v2()
+            ver = 2
+        if ver == 2 and SCHEMA_VERSION >= 3:
+            self._migrate_v2_to_v3()
+            return
+        if ver == SCHEMA_VERSION:
             return
         log.warning(
             "schema user_version=%s < SCHEMA_VERSION=%s; no incremental "
@@ -276,9 +284,20 @@ class Store:
 
         # Ensure full schema objects exist (IF NOT EXISTS).
         self._conn.executescript(SCHEMA)
-        self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        self._conn.execute("PRAGMA user_version = 2")
         self._conn.commit()
-        log.info("schema migration v1 → v2 complete; user_version=%s", SCHEMA_VERSION)
+        log.info("schema migration v1 → v2 complete; user_version=2")
+
+    def _migrate_v2_to_v3(self) -> None:
+        """M3-A: sessions.resume_state for PAUSED_HUMAN restore (§8.5)."""
+        log.info("migrating schema v2 → v3 (sessions.resume_state)")
+        cols = self._table_columns("sessions")
+        if cols and "resume_state" not in cols:
+            self._conn.execute("ALTER TABLE sessions ADD COLUMN resume_state TEXT")
+        self._conn.executescript(SCHEMA)
+        self._conn.execute("PRAGMA user_version = 3")
+        self._conn.commit()
+        log.info("schema migration v2 → v3 complete; user_version=3")
 
     def _rebuild_schema(self) -> None:
         tables = self._conn.execute(
@@ -512,6 +531,7 @@ class Store:
         allowed = {
             "state",
             "paused_reason",
+            "resume_state",
             "roles_locked",
             "design_pr",
             "feature_pr",
@@ -693,6 +713,49 @@ class Store:
             )
             self._conn.commit()
             return int(cur.lastrowid or 0)
+
+    def get_open_escalation(self, session_key: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT id, session_key, role, reason, comment_id, opened_at, resolved_at
+                FROM escalations
+                WHERE session_key = ? AND resolved_at IS NULL
+                ORDER BY opened_at DESC
+                LIMIT 1
+                """,
+                (session_key,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def close_escalation(
+        self,
+        session_key: str,
+        *,
+        escalation_id: int | None = None,
+        resolved_at: int | None = None,
+    ) -> int:
+        """Mark open escalation(s) resolved. Returns rows updated."""
+        ts = resolved_at if resolved_at is not None else int(time.time())
+        with self._lock:
+            if escalation_id is not None:
+                cur = self._conn.execute(
+                    """
+                    UPDATE escalations SET resolved_at = ?
+                    WHERE id = ? AND resolved_at IS NULL
+                    """,
+                    (ts, escalation_id),
+                )
+            else:
+                cur = self._conn.execute(
+                    """
+                    UPDATE escalations SET resolved_at = ?
+                    WHERE session_key = ? AND resolved_at IS NULL
+                    """,
+                    (ts, session_key),
+                )
+            self._conn.commit()
+            return int(cur.rowcount or 0)
 
     def get_runner(self, project_key: str) -> dict[str, Any] | None:
         """Look up the project runner. ``project_key`` is ``owner/repo``."""

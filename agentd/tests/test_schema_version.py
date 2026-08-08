@@ -136,20 +136,17 @@ def test_unknown_version_gap_rebuilds_with_honest_log(
         payload=b"{}",
     )
     with store._lock:
-        store._conn.execute("PRAGMA user_version = 0")
-        # Force a gap: pretend we are at ver 0 with data... actually ver 0 is fresh path.
-        # Use ver=99-n: set to SCHEMA_VERSION-1 when SCHEMA is high... use monkeypatch.
-        store._conn.execute("PRAGMA user_version = 1")
+        # Stuck at v3 with no path to a future SCHEMA_VERSION → rebuild.
+        store._conn.execute("PRAGMA user_version = 3")
         store._conn.commit()
     store.close()
 
     import agentd.db as dbmod
 
-    # SCHEMA_VERSION=3 with only v1→v2 path → gap rebuild
-    monkeypatch.setattr(dbmod, "SCHEMA_VERSION", 3)
+    monkeypatch.setattr(dbmod, "SCHEMA_VERSION", 99)
     with caplog.at_level("WARNING"):
         store2 = dbmod.Store(path)
-    assert store2._schema_version() == 3
+    assert store2._schema_version() == 99
     assert store2.delivery_count() == 0
     assert any("Reconciler is not implemented" in r.message for r in caplog.records)
     store2.close()

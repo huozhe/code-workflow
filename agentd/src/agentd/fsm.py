@@ -36,7 +36,8 @@ def transition(state: str, event_kind: str) -> Transition | None:
         return Transition("PAUSED_HUMAN", note="escalate.human")
 
     if k == "owner_reply" and s == "PAUSED_HUMAN":
-        return Transition("PLANNING", note="resume from pause (default PLANNING)")
+        # design_loop restores sessions.resume_state; PLANNING is fallback only.
+        return Transition("PLANNING", note="resume from pause (fallback PLANNING)")
 
     table: dict[tuple[str, str], Transition] = {
         ("INTAKE", "session_created"): Transition("PLANNING", note="roles resolved"),
