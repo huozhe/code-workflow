@@ -27,7 +27,10 @@ def build_digest(
         pr = data["pull_request"]
         d["pr"] = pr.get("number")
         d["pr_url"] = pr.get("html_url")
-        d["head_sha"] = (pr.get("head") or {}).get("sha")
+        head = pr.get("head") if isinstance(pr.get("head"), dict) else {}
+        d["head_sha"] = head.get("sha")
+        # Mechanical Design/Feature PR signal (M3-D B1) — not the title.
+        d["head_ref"] = head.get("ref")
         d["title"] = pr.get("title")
     if "issue" in data and isinstance(data["issue"], dict):
         d["issue_url"] = data["issue"].get("html_url")

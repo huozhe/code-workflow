@@ -14,7 +14,14 @@ from agentd.config import Config
 from agentd.db import Store, decompress_payload
 from agentd.digest import build_digest, digest_to_markdown
 from agentd.fsm import transition
-from agentd.gitops import project_key_from_repo, project_path
+from agentd.gitops import (
+    is_design_head_ref,
+    parse_role_branch,
+    project_dir_name,
+    project_key_from_repo,
+    project_path,
+    role_branch_name,
+)
 from agentd.github_fetch import (
     PrReviewThreadSnapshot,
     fetch_diff_stat,
@@ -107,12 +114,21 @@ class DesignLoop:
             self.store.set_delivery_status(delivery_id, "dropped")
             return
 
-        session_key = f"{repo}#{int(issue_num)}"
+        # Remap PR-keyed deliveries to the originating issue session (M3-D).
+        # GitHub shares one number space: webhook "issue_num" for PR events is
+        # the *PR* number, not the agentd issue session key.
+        issue_num, session_key, sess = self._resolve_session_for_delivery(
+            event=event,
+            repo=repo,
+            issue_num=int(issue_num),
+            data=data,
+        )
         # Defaults until session row exists; after that session bindings win (§5.3)
         default_arch = self.config.agent_login("claude") or "huozheclaude"
         default_dev = self.config.agent_login("grok") or "huozhegrok"
 
-        sess = self.store.get_session(session_key)
+        if sess is None:
+            sess = self.store.get_session(session_key)
         if sess is None:
             # §4.3: only an intake-passing *issues* event may create a session.
             # issue_comment / PR / push on a non-session issue must not conjure one
@@ -193,7 +209,7 @@ class DesignLoop:
             sender=sender,
             payload=data,
         )
-        kind = self._event_kind(event, action, data, sender)
+        kind = self._event_kind(event, action, data, sender, repo=repo)
 
         # §8.4: do not advance on unverified APPROVED (M3-3)
         if kind == "design_approved_unverified":
@@ -223,6 +239,20 @@ class DesignLoop:
                 return
             kind = "design_approved"
 
+        # Only the Design PR merge advances DESIGN_APPROVED → IMPLEMENTING (§8.3).
+        if kind == "design_merged":
+            tracked = sess.get("design_pr")
+            event_pr = dig.get("pr")
+            if not tracked or not event_pr or int(event_pr) != int(tracked):
+                log.info(
+                    "drop id=%s: merge of pr=%s is not design_pr=%s",
+                    delivery_id,
+                    event_pr,
+                    tracked,
+                )
+                self.store.set_delivery_status(delivery_id, "dropped")
+                return
+
         recipient_role, recipient_login = self._pick_recipient(
             kind, state, architect, developer, sender
         )
@@ -241,10 +271,7 @@ class DesignLoop:
             role_logins=role_logins,
             bot_logins=bot_logins,
         )
-        if decision.action == RouteAction.DROP:
-            self.store.set_delivery_status(delivery_id, "dropped")
-            log.info("route drop id=%s reason=%s", delivery_id, decision.reason)
-            return
+        # DEFER: leave queued — no FSM (session paused for non-owner).
         if decision.action == RouteAction.DEFER:
             log.info("route defer id=%s reason=%s", delivery_id, decision.reason)
             return
@@ -264,6 +291,10 @@ class DesignLoop:
             )
             return
 
+        # P1: gateway drives FSM from *observed* GitHub events even when routing
+        # drops the turn (self-echo). Architect merge of the Design PR is sent by
+        # the Architect identity — recipient is also Architect (§8.3), so without
+        # this the merge never advances DESIGN_APPROVED → IMPLEMENTING (M3-D).
         tr = transition(state, kind)
         if tr:
             fields: dict[str, Any] = {"state": tr.new_state}
@@ -275,7 +306,12 @@ class DesignLoop:
             state = tr.new_state
             log.info("fsm %s → %s (%s)", session_key, tr.new_state, tr.note)
 
-        if kind in ("design_changes_requested", "design_revised"):
+        # Stall only when a turn would be routed — self-echo under §5.3 adapter
+        # swap must not advance zero-thread (M3-D NB1).
+        if (
+            decision.action != RouteAction.DROP
+            and kind in ("design_changes_requested", "design_revised")
+        ):
             stalled = self._observe_stall_signals(
                 session_key=session_key,
                 sess=sess,
@@ -287,6 +323,18 @@ class DesignLoop:
             if stalled:
                 return
             sess = self.store.get_session(session_key) or sess
+
+        # DROP after FSM: no agent turn (self-echo, own-artifact, …).
+        if decision.action == RouteAction.DROP:
+            self.store.set_delivery_status(delivery_id, "done")
+            log.info(
+                "route drop after fsm id=%s reason=%s kind=%s state=%s",
+                delivery_id,
+                decision.reason,
+                kind,
+                state,
+            )
+            return
 
         # Dispatch turn to the session runner
         if self.dispatch_turns and self.supervisor and sess.get("endpoint"):
@@ -771,24 +819,143 @@ class DesignLoop:
             esc_role,
         )
 
+    def _resolve_session_for_delivery(
+        self,
+        *,
+        event: str,
+        repo: str,
+        issue_num: int,
+        data: dict[str, Any],
+    ) -> tuple[int, str, dict[str, Any] | None]:
+        """Map delivery → (issue_num, session_key, session_or_None).
+
+        1. Supervisor branch ``agentd/<proj>/<issue>/<role>`` (head.ref)
+        2. ``sessions.design_pr == PR number`` for PR-keyed comments/reviews
+        3. Fallback: treat issue_num as the issue session key
+        """
+        pr = data.get("pull_request") if isinstance(data.get("pull_request"), dict) else {}
+        head = pr.get("head") if isinstance(pr.get("head"), dict) else {}
+        head_ref = head.get("ref") if head else None
+
+        # pull_request_review_comment also nests pull_request
+        if event in (
+            "pull_request",
+            "pull_request_review",
+            "pull_request_review_comment",
+        ):
+            parsed = parse_role_branch(str(head_ref) if head_ref else None, repo)
+            if parsed is not None:
+                issue_num = parsed[0]
+                sk = f"{repo}#{int(issue_num)}"
+                return issue_num, sk, self.store.get_session(sk)
+
+        # issue_comment on a PR: payload.issue.pull_request is present and
+        # issue.number is the PR number (not the agentd issue).
+        pr_number: int | None = None
+        if event == "issue_comment":
+            issue = data.get("issue") if isinstance(data.get("issue"), dict) else {}
+            if isinstance(issue.get("pull_request"), dict):
+                try:
+                    pr_number = int(issue.get("number"))
+                except (TypeError, ValueError):
+                    pr_number = None
+        elif event in (
+            "pull_request",
+            "pull_request_review",
+            "pull_request_review_comment",
+        ):
+            try:
+                pr_number = int(pr.get("number") or issue_num)
+            except (TypeError, ValueError):
+                pr_number = int(issue_num)
+
+        if pr_number is not None:
+            # Direct session key may already match (issue == pr number — rare).
+            sk = f"{repo}#{int(issue_num)}"
+            sess = self.store.get_session(sk)
+            if sess is not None:
+                return int(issue_num), sk, sess
+            by_design = self.store.get_session_by_design_pr(repo, pr_number)
+            if by_design is not None:
+                real_issue = int(by_design["issue_num"])
+                log.info(
+                    "session remap via design_pr=%s → %s (event=%s)",
+                    pr_number,
+                    by_design["session_key"],
+                    event,
+                )
+                return real_issue, str(by_design["session_key"]), by_design
+
+        sk = f"{repo}#{int(issue_num)}"
+        return int(issue_num), sk, self.store.get_session(sk)
+
+    def _is_design_pr(
+        self,
+        *,
+        repo: str,
+        pr: dict[str, Any],
+        issue_num: int | None = None,
+    ) -> bool:
+        """Mechanical Design PR detection (M3-D B1).
+
+        Primary: ``head.ref`` is the supervisor Architect branch
+        ``agentd/<owner__repo>/<issue>/architect``. Title heuristic is fallback
+        only — model-written titles are not a control plane signal (§9.1).
+        """
+        head = pr.get("head") if isinstance(pr.get("head"), dict) else {}
+        head_ref = str(head.get("ref") or "")
+        title = str(pr.get("title") or "")
+        title_hit = "design" in title.lower() or "rfc" in title.lower()
+        branch_hit = is_design_head_ref(head_ref, repo)
+        # If head_ref is an agentd role branch for developer, never treat as design.
+        parsed = parse_role_branch(head_ref, repo)
+        if parsed is not None and parsed[1] == "developer":
+            if title_hit:
+                log.warning(
+                    "design title on developer branch head_ref=%s title=%r — treating as feature",
+                    head_ref,
+                    title,
+                )
+            return False
+        if branch_hit:
+            if not title_hit:
+                log.info(
+                    "design PR by branch head_ref=%s (title has no design/rfc: %r)",
+                    head_ref,
+                    title,
+                )
+            return True
+        if title_hit:
+            log.warning(
+                "design PR by title fallback only head_ref=%s title=%r "
+                "(expected branch agentd/%s/<issue>/architect)",
+                head_ref,
+                title,
+                project_dir_name(repo),
+            )
+            return True
+        return False
+
     def _event_kind(
         self,
         event: str,
         action: str | None,
         data: dict[str, Any],
         sender: str,
+        *,
+        repo: str = "",
     ) -> str:
         if event == "issues" and action in ("opened", "reopened", "labeled"):
             return "issue_opened"
         if event == "pull_request":
             pr = data.get("pull_request") or {}
-            title = str(pr.get("title") or "")
-            is_design = "design" in title.lower() or "rfc" in title.lower()
+            is_design = self._is_design_pr(repo=repo, pr=pr)
             if action == "opened" and is_design:
                 return "design_pr_opened"
             if action == "synchronize" and is_design:
                 return "design_revised"
-            if action == "closed" and pr.get("merged"):
+            # Merge of Design PR; session design_pr match is enforced later.
+            if action == "closed" and pr.get("merged") and is_design:
                 return "design_merged"
         if event == "pull_request_review":
             review = data.get("review") or {}
@@ -823,10 +990,20 @@ class DesignLoop:
         developer: str,
         sender: str,
     ) -> tuple[str, str]:
-        # Happy path: issue → architect; design_pr → developer; changes → architect; etc.
-        if kind in ("issue_opened", "design_changes_requested", "design_merged", "merge_design"):
+        # Happy path (§8.2 / §8.3):
+        #   issue → architect drafts Design PR
+        #   design_pr_opened / revised → developer reviews
+        #   design_approved → architect merges (merge actor is Architect)
+        #   design_merged → architect begins implementation
+        if kind in (
+            "issue_opened",
+            "design_changes_requested",
+            "design_approved",
+            "design_merged",
+            "merge_design",
+        ):
             return "architect", architect
-        if kind in ("design_pr_opened", "design_revised", "design_approved"):
+        if kind in ("design_pr_opened", "design_revised"):
             return "developer", developer
         # Default: route to the role that is not the sender bot
         if sender.lower() == architect.lower():

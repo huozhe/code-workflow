@@ -58,7 +58,7 @@ def test_deferred_issue_creates_planning_without_supervisor(tmp_path: Path) -> N
     store.close()
 
 
-def test_routing_drop_self_echo_marks_dropped(tmp_path: Path) -> None:
+def test_routing_self_echo_marks_done_no_turn(tmp_path: Path) -> None:
     store = Store(tmp_path / "state.db")
     cfg = Config(
         raw={
@@ -81,7 +81,8 @@ def test_routing_drop_self_echo_marks_dropped(tmp_path: Path) -> None:
         created_at=now,
         updated_at=now,
     )
-    # issue_opened routes to architect; sender=architect ⇒ self-echo drop
+    # issue_opened routes to architect; sender=architect ⇒ self-echo (no turn).
+    # M3-D: still terminal "done" after FSM, not stuck deferred.
     body = json.dumps(
         {
             "action": "opened",
@@ -107,5 +108,5 @@ def test_routing_drop_self_echo_marks_dropped(tmp_path: Path) -> None:
     )
     loop = DesignLoop(store, cfg, supervisor=None, dispatch_turns=False)
     loop.process_deferred_batch()
-    assert store.count_by_status().get("dropped") == 1
+    assert store.count_by_status().get("done") == 1
     store.close()

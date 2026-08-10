@@ -45,6 +45,34 @@ def project_dir_name(repo_full: str) -> str:
     return f"{owner}__{repo}"
 
 
+def role_branch_name(repo_full: str, issue_num: int, role: str) -> str:
+    """Supervisor-minted branch: agentd/<owner__repo>/<issue>/<role> (§6.2 / M3-D)."""
+    return f"agentd/{project_dir_name(repo_full)}/{int(issue_num)}/{role}"
+
+
+def parse_role_branch(head_ref: str | None, repo_full: str) -> tuple[int, str] | None:
+    """Parse ``agentd/<owner__repo>/<issue>/<role>`` → (issue_num, role) or None."""
+    if not head_ref or not repo_full:
+        return None
+    prefix = f"agentd/{project_dir_name(repo_full)}/"
+    if not head_ref.startswith(prefix):
+        return None
+    rest = head_ref[len(prefix) :]
+    num_s, sep, role = rest.partition("/")
+    if not sep or not role or "/" in role:
+        return None
+    try:
+        return int(num_s), role
+    except ValueError:
+        return None
+
+
+def is_design_head_ref(head_ref: str | None, repo_full: str) -> bool:
+    """True when head is the Architect worktree branch (mechanical Design PR signal)."""
+    parsed = parse_role_branch(head_ref, repo_full)
+    return parsed is not None and parsed[1] == "architect"
+
+
 def project_path(root: Path, repo_full: str) -> Path:
     return root / "projects" / project_dir_name(repo_full)
 

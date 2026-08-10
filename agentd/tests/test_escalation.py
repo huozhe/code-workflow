@@ -170,9 +170,9 @@ def test_escalation_echo_dropped_not_dispatched_after_unpause(tmp_path: Path) ->
         ).encode(),
         status="deferred",
     )
-    # While paused, marker → DROP (not DEFER)
+    # While paused, marker → DROP after FSM (done, not deferred, no turn)
     loop.process_deferred_batch()
-    assert store.count_by_status().get("dropped") == 1
+    assert store.count_by_status().get("done") == 1
     assert store.count_by_status().get("deferred") in (None, 0)
 
     # Owner unpause
