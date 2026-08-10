@@ -19,7 +19,12 @@ log = logging.getLogger("agentctl")
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="agentctl")
     sub = parser.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("status", help="Queue depth and host readiness snapshot")
+    p_status = sub.add_parser("status", help="Queue depth and host readiness snapshot")
+    p_status.add_argument(
+        "--json",
+        action="store_true",
+        help="Print as JSON (default output is already JSON; flag kept for scripts)",
+    )
     sub.add_parser("sessions", help="List sessions")
     p_logs = sub.add_parser("logs", help="Tail rotating app log (~/.agentd/logs/agentd.log)")
     p_logs.add_argument("-n", type=int, default=50)
