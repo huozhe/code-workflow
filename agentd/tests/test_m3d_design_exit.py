@@ -51,6 +51,12 @@ def _insert(
     )
 
 
+def _design_head_ref(issue: int = 100) -> str:
+    from agentd.gitops import role_branch_name
+
+    return role_branch_name("huozhe/code-workflow", issue, "architect")
+
+
 def test_design_half_happy_path_to_implementing(tmp_path: Path) -> None:
     """Exit condition skeleton: PLANNING → DESIGN_REVIEW → APPROVED → IMPLEMENTING."""
     store = Store(tmp_path / "state.db")
@@ -68,6 +74,7 @@ def test_design_half_happy_path_to_implementing(tmp_path: Path) -> None:
         created_at=now,
         updated_at=now,
     )
+    design_ref = _design_head_ref(100)
     # Fake runner endpoint so get_session join is happy; no turns dispatched.
     store.upsert_runner(
         "huozhe/code-workflow",
@@ -119,20 +126,23 @@ def test_design_half_happy_path_to_implementing(tmp_path: Path) -> None:
 
     vmod.verify_design_approval = patched  # type: ignore[assignment]
     try:
-        # 1) Architect opened Design PR
+        # 1) Architect opened Design PR — recognised by head.ref (not title).
+        # delivery issue_num is the *PR* number (GitHub webhook shape); branch
+        # embeds the real issue (100).
         _insert(
             store,
             did="d-pr-open",
             event="pull_request",
             action="opened",
             sender="huozheclaude",
+            issue=50,  # PR number as webhook would store
             payload={
                 "action": "opened",
                 "pull_request": {
                     "number": 50,
-                    "title": "Design: caching layer RFC",
+                    "title": "Add caching layer",  # no "design"/"rfc" in title
                     "html_url": "https://github.com/huozhe/code-workflow/pull/50",
-                    "head": {"sha": head},
+                    "head": {"sha": head, "ref": design_ref},
                     "user": {"login": "huozheclaude"},
                 },
                 "repository": {"full_name": "huozhe/code-workflow"},
@@ -163,12 +173,13 @@ def test_design_half_happy_path_to_implementing(tmp_path: Path) -> None:
                 },
                 "pull_request": {
                     "number": 50,
-                    "title": "Design: caching layer RFC",
-                    "head": {"sha": head},
+                    "title": "Add caching layer",
+                    "head": {"sha": head, "ref": design_ref},
                 },
                 "repository": {"full_name": "huozhe/code-workflow"},
                 "sender": {"login": "huozhegrok"},
             },
+            issue=50,
         )
         loop.process_deferred_batch()
         sess = store.get_session(sk)
@@ -181,13 +192,14 @@ def test_design_half_happy_path_to_implementing(tmp_path: Path) -> None:
             event="pull_request",
             action="closed",
             sender="huozheclaude",
+            issue=50,
             payload={
                 "action": "closed",
                 "pull_request": {
                     "number": 50,
-                    "title": "Design: caching layer RFC",
+                    "title": "Add caching layer",
                     "merged": True,
-                    "head": {"sha": head},
+                    "head": {"sha": head, "ref": design_ref},
                     "user": {"login": "huozheclaude"},
                 },
                 "repository": {"full_name": "huozhe/code-workflow"},
@@ -246,6 +258,30 @@ def test_non_design_merge_does_not_advance(tmp_path: Path) -> None:
     loop.process_deferred_batch()
     assert store.get_session(sk)["state"] == "DESIGN_APPROVED"
     store.close()
+
+
+def test_design_pr_by_branch_not_title() -> None:
+    from agentd.design_loop import DesignLoop
+    from agentd.gitops import role_branch_name
+
+    loop = DesignLoop.__new__(DesignLoop)
+    repo = "huozhe/code-workflow"
+    ref = role_branch_name(repo, 7, "architect")
+    assert loop._is_design_pr(
+        repo=repo,
+        pr={"title": "Add caching", "head": {"ref": ref, "sha": "x"}},
+    )
+    # Developer branch is never Design even with "design" in title
+    dev = role_branch_name(repo, 7, "developer")
+    assert not loop._is_design_pr(
+        repo=repo,
+        pr={"title": "Redesign the cache", "head": {"ref": dev, "sha": "x"}},
+    )
+    # Title fallback when head is not an agentd branch
+    assert loop._is_design_pr(
+        repo=repo,
+        pr={"title": "Design: RFC", "head": {"ref": "feat/other", "sha": "x"}},
+    )
 
 
 def test_design_approved_routes_to_architect_merge_actor() -> None:

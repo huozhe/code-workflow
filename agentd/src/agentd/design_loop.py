@@ -14,7 +14,14 @@ from agentd.config import Config
 from agentd.db import Store, decompress_payload
 from agentd.digest import build_digest, digest_to_markdown
 from agentd.fsm import transition
-from agentd.gitops import project_key_from_repo, project_path
+from agentd.gitops import (
+    is_design_head_ref,
+    parse_role_branch,
+    project_dir_name,
+    project_key_from_repo,
+    project_path,
+    role_branch_name,
+)
 from agentd.github_fetch import (
     PrReviewThreadSnapshot,
     fetch_diff_stat,
@@ -107,6 +114,16 @@ class DesignLoop:
             self.store.set_delivery_status(delivery_id, "dropped")
             return
 
+        # PR webhooks put the *PR number* in issue_num (shared GH number space is
+        # not the originating issue). Prefer the issue embedded in the supervisor
+        # branch name agentd/<proj>/<issue>/<role> (M3-D B1).
+        if event in ("pull_request", "pull_request_review"):
+            pr = data.get("pull_request") if isinstance(data.get("pull_request"), dict) else {}
+            head_ref = (pr.get("head") or {}).get("ref") if isinstance(pr.get("head"), dict) else None
+            parsed = parse_role_branch(head_ref, repo)
+            if parsed is not None:
+                issue_num = parsed[0]
+
         session_key = f"{repo}#{int(issue_num)}"
         # Defaults until session row exists; after that session bindings win (§5.3)
         default_arch = self.config.agent_login("claude") or "huozheclaude"
@@ -193,7 +210,7 @@ class DesignLoop:
             sender=sender,
             payload=data,
         )
-        kind = self._event_kind(event, action, data, sender)
+        kind = self._event_kind(event, action, data, sender, repo=repo)
 
         # §8.4: do not advance on unverified APPROVED (M3-3)
         if kind == "design_approved_unverified":
@@ -290,7 +307,12 @@ class DesignLoop:
             state = tr.new_state
             log.info("fsm %s → %s (%s)", session_key, tr.new_state, tr.note)
 
-        if kind in ("design_changes_requested", "design_revised"):
+        # Stall only when a turn would be routed — self-echo under §5.3 adapter
+        # swap must not advance zero-thread (M3-D NB1).
+        if (
+            decision.action != RouteAction.DROP
+            and kind in ("design_changes_requested", "design_revised")
+        ):
             stalled = self._observe_stall_signals(
                 session_key=session_key,
                 sess=sess,
@@ -798,24 +820,72 @@ class DesignLoop:
             esc_role,
         )
 
+    def _is_design_pr(
+        self,
+        *,
+        repo: str,
+        pr: dict[str, Any],
+        issue_num: int | None = None,
+    ) -> bool:
+        """Mechanical Design PR detection (M3-D B1).
+
+        Primary: ``head.ref`` is the supervisor Architect branch
+        ``agentd/<owner__repo>/<issue>/architect``. Title heuristic is fallback
+        only — model-written titles are not a control plane signal (§9.1).
+        """
+        head = pr.get("head") if isinstance(pr.get("head"), dict) else {}
+        head_ref = str(head.get("ref") or "")
+        title = str(pr.get("title") or "")
+        title_hit = "design" in title.lower() or "rfc" in title.lower()
+        branch_hit = is_design_head_ref(head_ref, repo)
+        # If head_ref is an agentd role branch for developer, never treat as design.
+        parsed = parse_role_branch(head_ref, repo)
+        if parsed is not None and parsed[1] == "developer":
+            if title_hit:
+                log.warning(
+                    "design title on developer branch head_ref=%s title=%r — treating as feature",
+                    head_ref,
+                    title,
+                )
+            return False
+        if branch_hit:
+            if not title_hit:
+                log.info(
+                    "design PR by branch head_ref=%s (title has no design/rfc: %r)",
+                    head_ref,
+                    title,
+                )
+            return True
+        if title_hit:
+            log.warning(
+                "design PR by title fallback only head_ref=%s title=%r "
+                "(expected branch agentd/%s/<issue>/architect)",
+                head_ref,
+                title,
+                project_dir_name(repo),
+            )
+            return True
+        return False
+
     def _event_kind(
         self,
         event: str,
         action: str | None,
         data: dict[str, Any],
         sender: str,
+        *,
+        repo: str = "",
     ) -> str:
         if event == "issues" and action in ("opened", "reopened", "labeled"):
             return "issue_opened"
         if event == "pull_request":
             pr = data.get("pull_request") or {}
-            title = str(pr.get("title") or "")
-            is_design = "design" in title.lower() or "rfc" in title.lower()
+            is_design = self._is_design_pr(repo=repo, pr=pr)
             if action == "opened" and is_design:
                 return "design_pr_opened"
             if action == "synchronize" and is_design:
                 return "design_revised"
-            # Merge of a Design-titled PR; session design_pr match is enforced later.
+            # Merge of Design PR; session design_pr match is enforced later.
             if action == "closed" and pr.get("merged") and is_design:
                 return "design_merged"
         if event == "pull_request_review":
