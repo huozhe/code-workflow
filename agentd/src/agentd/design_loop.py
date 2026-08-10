@@ -114,22 +114,21 @@ class DesignLoop:
             self.store.set_delivery_status(delivery_id, "dropped")
             return
 
-        # PR webhooks put the *PR number* in issue_num (shared GH number space is
-        # not the originating issue). Prefer the issue embedded in the supervisor
-        # branch name agentd/<proj>/<issue>/<role> (M3-D B1).
-        if event in ("pull_request", "pull_request_review"):
-            pr = data.get("pull_request") if isinstance(data.get("pull_request"), dict) else {}
-            head_ref = (pr.get("head") or {}).get("ref") if isinstance(pr.get("head"), dict) else None
-            parsed = parse_role_branch(head_ref, repo)
-            if parsed is not None:
-                issue_num = parsed[0]
-
-        session_key = f"{repo}#{int(issue_num)}"
+        # Remap PR-keyed deliveries to the originating issue session (M3-D).
+        # GitHub shares one number space: webhook "issue_num" for PR events is
+        # the *PR* number, not the agentd issue session key.
+        issue_num, session_key, sess = self._resolve_session_for_delivery(
+            event=event,
+            repo=repo,
+            issue_num=int(issue_num),
+            data=data,
+        )
         # Defaults until session row exists; after that session bindings win (§5.3)
         default_arch = self.config.agent_login("claude") or "huozheclaude"
         default_dev = self.config.agent_login("grok") or "huozhegrok"
 
-        sess = self.store.get_session(session_key)
+        if sess is None:
+            sess = self.store.get_session(session_key)
         if sess is None:
             # §4.3: only an intake-passing *issues* event may create a session.
             # issue_comment / PR / push on a non-session issue must not conjure one
@@ -819,6 +818,76 @@ class DesignLoop:
             session_key,
             esc_role,
         )
+
+    def _resolve_session_for_delivery(
+        self,
+        *,
+        event: str,
+        repo: str,
+        issue_num: int,
+        data: dict[str, Any],
+    ) -> tuple[int, str, dict[str, Any] | None]:
+        """Map delivery → (issue_num, session_key, session_or_None).
+
+        1. Supervisor branch ``agentd/<proj>/<issue>/<role>`` (head.ref)
+        2. ``sessions.design_pr == PR number`` for PR-keyed comments/reviews
+        3. Fallback: treat issue_num as the issue session key
+        """
+        pr = data.get("pull_request") if isinstance(data.get("pull_request"), dict) else {}
+        head = pr.get("head") if isinstance(pr.get("head"), dict) else {}
+        head_ref = head.get("ref") if head else None
+
+        # pull_request_review_comment also nests pull_request
+        if event in (
+            "pull_request",
+            "pull_request_review",
+            "pull_request_review_comment",
+        ):
+            parsed = parse_role_branch(str(head_ref) if head_ref else None, repo)
+            if parsed is not None:
+                issue_num = parsed[0]
+                sk = f"{repo}#{int(issue_num)}"
+                return issue_num, sk, self.store.get_session(sk)
+
+        # issue_comment on a PR: payload.issue.pull_request is present and
+        # issue.number is the PR number (not the agentd issue).
+        pr_number: int | None = None
+        if event == "issue_comment":
+            issue = data.get("issue") if isinstance(data.get("issue"), dict) else {}
+            if isinstance(issue.get("pull_request"), dict):
+                try:
+                    pr_number = int(issue.get("number"))
+                except (TypeError, ValueError):
+                    pr_number = None
+        elif event in (
+            "pull_request",
+            "pull_request_review",
+            "pull_request_review_comment",
+        ):
+            try:
+                pr_number = int(pr.get("number") or issue_num)
+            except (TypeError, ValueError):
+                pr_number = int(issue_num)
+
+        if pr_number is not None:
+            # Direct session key may already match (issue == pr number — rare).
+            sk = f"{repo}#{int(issue_num)}"
+            sess = self.store.get_session(sk)
+            if sess is not None:
+                return int(issue_num), sk, sess
+            by_design = self.store.get_session_by_design_pr(repo, pr_number)
+            if by_design is not None:
+                real_issue = int(by_design["issue_num"])
+                log.info(
+                    "session remap via design_pr=%s → %s (event=%s)",
+                    pr_number,
+                    by_design["session_key"],
+                    event,
+                )
+                return real_issue, str(by_design["session_key"]), by_design
+
+        sk = f"{repo}#{int(issue_num)}"
+        return int(issue_num), sk, self.store.get_session(sk)
 
     def _is_design_pr(
         self,

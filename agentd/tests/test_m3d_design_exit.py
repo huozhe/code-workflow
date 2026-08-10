@@ -260,6 +260,108 @@ def test_non_design_merge_does_not_advance(tmp_path: Path) -> None:
     store.close()
 
 
+def test_issue_comment_on_design_pr_resolves_session(tmp_path: Path) -> None:
+    """PR-keyed issue_comment maps to session via design_pr (M3-D approval NB)."""
+    store = Store(tmp_path / "state.db")
+    cfg = _cfg(tmp_path)
+    sk = "huozhe/code-workflow#100"
+    store.upsert_session(
+        session_key=sk,
+        repo="huozhe/code-workflow",
+        issue_num=100,
+        state="DESIGN_REVIEW",
+        architect="huozheclaude",
+        developer="huozhegrok",
+        created_at=1,
+        updated_at=1,
+        design_pr=50,
+    )
+    loop = DesignLoop(
+        store,
+        cfg,
+        supervisor=None,
+        dispatch_turns=False,
+        post_comment=lambda **k: 1,  # noqa: ARG005
+        gateway_token="gw",
+    )
+    # Owner comments *on the Design PR* (webhook issue_num = 50 = PR number)
+    store.insert_delivery(
+        delivery_id="d-pr-comment",
+        event="issue_comment",
+        action="created",
+        repo="huozhe/code-workflow",
+        issue_num=50,
+        sender="huozhe",
+        payload=json.dumps(
+            {
+                "action": "created",
+                "issue": {
+                    "number": 50,
+                    "pull_request": {
+                        "url": "https://api.github.com/repos/huozhe/code-workflow/pulls/50"
+                    },
+                },
+                "comment": {"id": 1, "body": "lgtm path"},
+                "repository": {"full_name": "huozhe/code-workflow"},
+                "sender": {"login": "huozhe"},
+            }
+        ).encode(),
+        status="deferred",
+    )
+    loop.process_deferred_batch()
+    # Must not drop as "no session for …#50"
+    assert store.count_by_status().get("dropped", 0) == 0
+    assert store.get_session(sk) is not None
+    # Owner comment while not paused → routed or done
+    counts = store.count_by_status()
+    assert (counts.get("routed") or 0) + (counts.get("done") or 0) >= 1
+    store.close()
+
+
+def test_review_comment_remaps_via_design_pr(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.db")
+    cfg = _cfg(tmp_path)
+    sk = "huozhe/code-workflow#7"
+    design_ref = _design_head_ref(7)
+    store.upsert_session(
+        session_key=sk,
+        repo="huozhe/code-workflow",
+        issue_num=7,
+        state="DESIGN_REVIEW",
+        architect="huozheclaude",
+        developer="huozhegrok",
+        created_at=1,
+        updated_at=1,
+        design_pr=88,
+    )
+    loop = DesignLoop(store, cfg, supervisor=None, dispatch_turns=False)
+    store.insert_delivery(
+        delivery_id="d-inline",
+        event="pull_request_review_comment",
+        action="created",
+        repo="huozhe/code-workflow",
+        issue_num=88,
+        sender="huozhegrok",
+        payload=json.dumps(
+            {
+                "action": "created",
+                "pull_request": {
+                    "number": 88,
+                    "title": "Add caching",
+                    "head": {"sha": "x", "ref": design_ref},
+                },
+                "comment": {"id": 9, "body": "nit", "path": "a.py"},
+                "repository": {"full_name": "huozhe/code-workflow"},
+                "sender": {"login": "huozhegrok"},
+            }
+        ).encode(),
+        status="deferred",
+    )
+    loop.process_deferred_batch()
+    assert store.count_by_status().get("dropped", 0) == 0
+    store.close()
+
+
 def test_design_pr_by_branch_not_title() -> None:
     from agentd.design_loop import DesignLoop
     from agentd.gitops import role_branch_name
