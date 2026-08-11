@@ -35,6 +35,10 @@ In `~/.agentd/config.yaml`:
 gateway:
   login: huozhegateway   # GitHub username for escalation comments
   docker_socket: unix:///var/run/docker.sock
+  # Turn liveness (#34): RPC read timeout = turn_deadline_s + grace.
+  # Do not set the socket shorter than the runner deadline.
+  turn_deadline_s: 900
+  rpc_timeout_grace_s: 60
 ```
 
 **Test-only env override (not for production LaunchAgent):**

@@ -42,6 +42,8 @@ gateway:
   # webhook HMAC secret keychain account: agentd / webhook-secret
   docker_socket: unix:///var/run/docker.sock
   docker_wait_timeout_s: 300
+  turn_deadline_s: 900          # per-turn deadline sent to the runner (§14.2)
+  rpc_timeout_grace_s: 60       # RPC read = turn_deadline_s + grace (#34)
 
 ingress:
   backend: funnel   # funnel | cloudflared | ngrok | smee | none
