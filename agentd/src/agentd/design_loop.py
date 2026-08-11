@@ -582,11 +582,14 @@ class DesignLoop:
                     on_notification=_on_runner_notify,
                 ) as cli:
                     call_started = True
+                    # #45: FSM state must reach the runner prompt (role obligations).
+                    session_state = str(sess.get("state") or "PLANNING")
                     result = cli.call(
                         "turn.dispatch",
                         {
                             "turn_id": turn_id,
                             "role": role,
+                            "session_state": session_state,
                             "deadline_s": deadline_s,
                             "event": dig,
                             "context": {
