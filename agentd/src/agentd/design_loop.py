@@ -27,7 +27,11 @@ from agentd.github_fetch import (
     fetch_diff_stat,
     fetch_pr_review_threads,
 )
-from agentd.github_write import format_escalation_comment, post_issue_comment
+from agentd.github_write import (
+    format_escalation_comment,
+    post_issue_comment,
+    reopen_issue,
+)
 from agentd.intake import evaluate_intake
 from agentd.keychain import get_password
 from agentd.loop_safety import BudgetState, StallTracker, progress_fingerprint
@@ -97,6 +101,7 @@ class DesignLoop:
         *,
         dispatch_turns: bool = True,
         post_comment: Any | None = None,
+        reopen_issue_fn: Any | None = None,
         gateway_token: str | None = None,
         fetch_threads: Any | None = None,
         fetch_diff: Any | None = None,
@@ -108,6 +113,7 @@ class DesignLoop:
         self.dispatch_turns = dispatch_turns
         # Injectables for unit tests (M3-A write / M3-B fetch boundary).
         self._post_comment = post_comment
+        self._reopen_issue = reopen_issue_fn
         self._gateway_token = gateway_token
         self._fetch_threads = fetch_threads
         self._fetch_diff = fetch_diff
@@ -215,6 +221,21 @@ class DesignLoop:
         # Include gateway login so §9.1 rule 6 cannot treat it as a human collaborator
         # (PR #27 B2 / Architect: without this, gateway comments route as human-or-other).
         bot_logins = {architect, developer} | self.config.all_bot_logins()
+
+        # §10.3 / #36: only the human owner may close a *session* issue.
+        # Non-session closes (e.g. Fixes #NN on a maintenance PR) never reach
+        # here — no sessions row ⇒ dropped above.
+        if event == "issues" and action == "closed":
+            self._handle_session_issue_closed(
+                session_key=session_key,
+                sess=sess,
+                repo=repo,
+                issue_num=int(issue_num),
+                delivery_id=delivery_id,
+                sender=sender,
+                bot_logins=bot_logins,
+            )
+            return
 
         state = str(sess.get("state") or "PLANNING")
         paused = state == "PAUSED_HUMAN" or bool(sess.get("paused_reason"))
@@ -845,6 +866,88 @@ class DesignLoop:
             session_key,
             reason,
         )
+
+    def _handle_session_issue_closed(
+        self,
+        *,
+        session_key: str,
+        sess: dict[str, Any],
+        repo: str,
+        issue_num: int,
+        delivery_id: str,
+        sender: str,
+        bot_logins: set[str],
+    ) -> None:
+        """§10.3: session issue closed — owner only; agent close → reopen + escalate.
+
+        Choice (stated for #36): **reopen** non-owner closes. Leaving the issue
+        closed would make the session's terminal GitHub state a lie and would
+        still be the teardown trigger once M5 lands. Reopen restores truth;
+        §8.5 tells the owner the verification gate was bypassed.
+        """
+        owner = str(self.config.owner or "")
+        sender_l = sender.lower()
+        owner_l = owner.lower()
+        bots_l = {b.lower() for b in bot_logins if b}
+
+        if sender_l == owner_l:
+            # Legitimate terminal signal. M5 will run teardown on this path;
+            # until then record and do not dispatch an agent "cleanup" turn.
+            log.info(
+                "issues.closed by owner session=%s issue=%s — human gate OK "
+                "(teardown reserved for M5)",
+                session_key,
+                issue_num,
+            )
+            self.store.set_delivery_status(delivery_id, "done")
+            return
+
+        # Agent / gateway / other non-owner closed a session issue.
+        who = "agent" if sender_l in bots_l else "non-owner"
+        reason = (
+            f"§10.3 violation: {who} `{sender}` closed session issue "
+            f"`{session_key}`. Only `@{owner}` may close a session issue "
+            f"(issues.closed is the sole teardown trigger). "
+            f"Gateway reopened the issue; no teardown. "
+            f"Reply after confirming work, or leave paused."
+        )
+        log.error(
+            "issues.closed by %s=%s session=%s — reopening and escalating",
+            who,
+            sender,
+            session_key,
+        )
+        try:
+            if self._reopen_issue is not None:
+                self._reopen_issue(
+                    repo=repo,
+                    issue_num=int(issue_num),
+                    token=self._gateway_github_token(),
+                )
+            else:
+                reopen_issue(
+                    repo=repo,
+                    issue_num=int(issue_num),
+                    token=self._gateway_github_token(),
+                )
+        except Exception as exc:  # noqa: BLE001
+            log.exception(
+                "reopen failed session=%s: %s — still escalating",
+                session_key,
+                exc,
+            )
+            reason = f"{reason} [reopen_failed: {exc}]"
+
+        state = str(sess.get("state") or "PLANNING")
+        paused = state == "PAUSED_HUMAN" or bool(sess.get("paused_reason"))
+        if not paused:
+            self._escalate(session_key, "system", reason)
+        else:
+            log.warning(
+                "session already paused; reopen done without re-escalating session=%s",
+                session_key,
+            )
+        self.store.set_delivery_status(delivery_id, "done")
 
     def _escalate(self, session_key: str, role: str, reason: str) -> None:
         """§8.5: pause, post @owner comment, record escalation with comment_id."""
