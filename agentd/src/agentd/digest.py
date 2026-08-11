@@ -48,6 +48,12 @@ def build_digest(
     if "review" in data and isinstance(data["review"], dict):
         d["review_state"] = data["review"].get("state")
         d["review_id"] = data["review"].get("id")
+        # #49: inline comments are not separate turns — load by review_id
+        # (references only; bodies stay out of the digest, §9.4).
+        if event == "pull_request_review" and data["review"].get("id") is not None:
+            d["review_comments"] = (
+                f"refs: pulls/{{pr}}/reviews/{data['review'].get('id')}/comments"
+            )
     # Optional stall inputs (§9.3) — gateway may attach after a GH fetch, or
     # tests inject them. Never derived from head_sha.
     if "open_thread_ids" in data:

@@ -41,6 +41,19 @@ from agentd.loop_safety import (
     progress_fingerprint,
 )
 
+# Review webhook *parts* — not turn drivers (#49). Verdict lives on
+# pull_request_review.submitted; inline comments and thread resolve/unresolve
+# are components of that review. Turning each part burned ~10 empty turns on
+# session #47 and false-tripped silent-turn (#42). Mark terminal (done), never
+# leave deferred. Standalone "Add single comment" still wakes once: GitHub
+# always emits review.submitted (state COMMENTED) for that path.
+_REVIEW_PART_EVENTS = frozenset(
+    {
+        "pull_request_review_comment",
+        "pull_request_review_thread",
+    }
+)
+
 # Webhook kinds that are observed GitHub progress (P1) — reset silent_turns
 # even when the FSM string does not change (e.g. design_revised while already
 # DESIGN_REVIEW). Claims in public_actions never reset (PR #42 B1).
@@ -233,6 +246,19 @@ class DesignLoop:
             sess = self.store.get_session(session_key)
 
         if not sess:
+            return
+
+        # #49: one review → one turn. Parts are terminal without a turn (not
+        # deferred — redelivery would re-wake and queue_depth 0 hides them).
+        if event in _REVIEW_PART_EVENTS:
+            self.store.set_delivery_status(delivery_id, "done")
+            log.info(
+                "delivery done id=%s event=%s action=%s — review part, no turn "
+                "(coalesce onto pull_request_review.submitted)",
+                delivery_id,
+                event,
+                action,
+            )
             return
 
         architect = str(sess.get("architect") or default_arch)
@@ -1237,11 +1263,12 @@ class DesignLoop:
         head = pr.get("head") if isinstance(pr.get("head"), dict) else {}
         head_ref = head.get("ref") if head else None
 
-        # pull_request_review_comment also nests pull_request
+        # PR-keyed events nest pull_request (incl. review threads, #49).
         if event in (
             "pull_request",
             "pull_request_review",
             "pull_request_review_comment",
+            "pull_request_review_thread",
         ):
             parsed = parse_role_branch(str(head_ref) if head_ref else None, repo)
             if parsed is not None:
@@ -1263,6 +1290,7 @@ class DesignLoop:
             "pull_request",
             "pull_request_review",
             "pull_request_review_comment",
+            "pull_request_review_thread",
         ):
             try:
                 pr_number = int(pr.get("number") or issue_num)
