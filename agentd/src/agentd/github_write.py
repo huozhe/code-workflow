@@ -39,9 +39,43 @@ def post_issue_comment(
     return int(cid)
 
 
+def reopen_issue(
+    *,
+    repo: str,
+    issue_num: int,
+    token: str | None,
+    http_patch: Callable[..., Any] | None = None,
+) -> None:
+    """PATCH issue state=open — undo a non-human close of a session issue (#36 / §10.3)."""
+    if not token:
+        raise RuntimeError("no token for gateway GitHub write")
+    if not repo or not issue_num:
+        raise RuntimeError("repo and issue_num required to reopen")
+
+    url = f"https://api.github.com/repos/{repo}/issues/{int(issue_num)}"
+    patch = http_patch or _gh_patch
+    patch(url, token=token, json_body={"state": "open"})
+    log.info("reopened issue repo=%s issue=%s", repo, issue_num)
+
+
 def _gh_post(url: str, *, token: str, json_body: dict[str, Any]) -> Any:
     with httpx.Client(timeout=20.0) as client:
         r = client.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Accept": "application/vnd.github+json",
+                "User-Agent": "agentd",
+            },
+            json=json_body,
+        )
+        r.raise_for_status()
+        return r.json()
+
+
+def _gh_patch(url: str, *, token: str, json_body: dict[str, Any]) -> Any:
+    with httpx.Client(timeout=20.0) as client:
+        r = client.patch(
             url,
             headers={
                 "Authorization": f"Bearer {token}",

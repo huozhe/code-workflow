@@ -112,6 +112,12 @@ def build_prompt(params: dict[str, Any], rehydrate: dict[str, Any] | None) -> st
             + Path(str(ctx["digest"])).read_text(encoding="utf-8", errors="replace")[:4000]
         )
     parts.append(
+        "Hard rule (§10.3): Never close the GitHub issue and never use closing "
+        "keywords (Fixes/Closes) on a PR that would close the *session* issue. "
+        "Only the human owner closes session issues — that event is the teardown "
+        "trigger. Agents must not call the issues close API."
+    )
+    parts.append(
         "Respond by performing the agent work for this event. "
         "When finished, summarize what you did."
     )
