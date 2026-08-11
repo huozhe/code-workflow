@@ -31,6 +31,7 @@ from agentd.github_write import format_escalation_comment, post_issue_comment
 from agentd.intake import evaluate_intake
 from agentd.keychain import get_password
 from agentd.loop_safety import BudgetState, StallTracker, progress_fingerprint
+from agentd.refusals import CapacityRefusal, StructuralRefusal
 from agentd.routing import RouteAction, provenance_footer, route_for_recipient
 from agentd.rpc_client import RunnerClient
 from agentd.supervisor import SessionSupervisor
@@ -152,17 +153,25 @@ class DesignLoop:
                     architect_login=default_arch,
                     developer_login=default_dev,
                 )
-            except RuntimeError as e:
-                # Capacity refusal: leave deferred for retry when a HOT slot frees.
-                # Warning only — no traceback every ~5s drain cycle.
-                if "max_hot_containers" in str(e):
-                    log.warning(
-                        "ensure_session deferred (capacity): %s — %s",
-                        session_key,
-                        e,
-                    )
-                    return
-                log.exception("ensure_session failed %s", session_key)
+            except CapacityRefusal as e:
+                # Transient: leave deferred for retry when a HOT slot frees.
+                # Typed — never match message text (#35).
+                log.warning(
+                    "ensure_session deferred (capacity): %s — %s",
+                    session_key,
+                    e,
+                )
+                return
+            except StructuralRefusal as e:
+                self._handle_structural_refusal(
+                    session_key=session_key,
+                    repo=repo,
+                    issue_num=int(issue_num),
+                    delivery_id=delivery_id,
+                    reason=str(e),
+                    architect=default_arch,
+                    developer=default_dev,
+                )
                 return
             except Exception:
                 log.exception("ensure_session failed %s", session_key)
@@ -678,6 +687,81 @@ class DesignLoop:
             return self._gateway_token or None
         return get_password("gateway")
 
+    def _handle_structural_refusal(
+        self,
+        *,
+        session_key: str,
+        repo: str,
+        issue_num: int,
+        delivery_id: str,
+        reason: str,
+        architect: str,
+        developer: str,
+    ) -> None:
+        """§8.5 once per project for layout/image/allowlist failure (#35).
+
+        Shape: create the issue session in PAUSED_HUMAN (no runner endpoint),
+        post one gateway escalation, open project_blocks so ensure_session
+        short-circuits without re-running worktree add, mark delivery done.
+        """
+        project_key = project_key_from_repo(repo)
+        now = int(time.time())
+        sess = self.store.get_session(session_key)
+        if not sess:
+            self.store.upsert_session(
+                session_key=session_key,
+                project_key=project_key,
+                repo=repo,
+                issue_num=int(issue_num),
+                state="PAUSED_HUMAN",
+                architect=architect,
+                developer=developer,
+                created_at=now,
+                updated_at=now,
+                paused_reason=reason[:500],
+            )
+            self.store.update_session_fields(
+                session_key,
+                resume_state="PLANNING",
+            )
+        else:
+            self.store.update_session_fields(
+                session_key,
+                state="PAUSED_HUMAN",
+                paused_reason=reason[:500],
+                resume_state=str(sess.get("state") or "PLANNING"),
+            )
+
+        block = self.store.get_open_project_block(project_key)
+        if block:
+            log.warning(
+                "structural refusal (project already blocked) project=%s session=%s: %s",
+                project_key,
+                session_key,
+                reason,
+            )
+            self.store.set_delivery_status(delivery_id, "done")
+            return
+
+        # First structural failure for this project — escalate once.
+        self._escalate(session_key, "system", reason)
+        esc = self.store.get_open_escalation(session_key)
+        comment_id = esc.get("comment_id") if esc else None
+        self.store.open_project_block(
+            project_key=project_key,
+            reason=reason,
+            session_key=session_key,
+            issue_num=int(issue_num),
+            comment_id=int(comment_id) if comment_id is not None else None,
+        )
+        self.store.set_delivery_status(delivery_id, "done")
+        log.error(
+            "structural refusal project=%s session=%s — escalated, delivery done: %s",
+            project_key,
+            session_key,
+            reason,
+        )
+
     def _escalate(self, session_key: str, role: str, reason: str) -> None:
         """§8.5: pause, post @owner comment, record escalation with comment_id."""
         sess = self.store.get_session(session_key) or {}
@@ -775,6 +859,11 @@ class DesignLoop:
         dig["resume_state"] = resume_state
 
         n = self.store.close_escalation(session_key)
+        project_key = str(
+            sess.get("project_key") or project_key_from_repo(str(sess.get("repo") or ""))
+        )
+        if project_key:
+            self.store.close_project_block(project_key)
         self.store.update_session_fields(
             session_key,
             state=resume_state,
@@ -788,6 +877,43 @@ class DesignLoop:
             n,
             resume_state,
         )
+
+        # Structural pause left no runner — retry ensure_session after owner
+        # fixed the host (project_block cleared above) (#35).
+        if self.supervisor and not sess.get("endpoint"):
+            try:
+                self.supervisor.ensure_session(
+                    session_key=session_key,
+                    repo=str(sess.get("repo") or ""),
+                    issue_num=int(issue_num),
+                    architect_login=str(sess.get("architect") or "") or None,
+                    developer_login=str(sess.get("developer") or "") or None,
+                )
+                sess = self.store.get_session(session_key) or sess
+            except CapacityRefusal as e:
+                log.warning(
+                    "ensure_session deferred on resume (capacity) %s: %s",
+                    session_key,
+                    e,
+                )
+                self.store.set_delivery_status(delivery_id, "deferred")
+                return
+            except StructuralRefusal as e:
+                # Re-wedge: escalate again (new block).
+                self._handle_structural_refusal(
+                    session_key=session_key,
+                    repo=str(sess.get("repo") or ""),
+                    issue_num=int(issue_num),
+                    delivery_id=delivery_id,
+                    reason=str(e),
+                    architect=str(sess.get("architect") or "huozheclaude"),
+                    developer=str(sess.get("developer") or "huozhegrok"),
+                )
+                return
+            except Exception:
+                log.exception("ensure_session on resume failed %s", session_key)
+                self.store.set_delivery_status(delivery_id, "deferred")
+                return
 
         if self.dispatch_turns and self.supervisor and sess.get("endpoint"):
             turn_id = "t-" + uuid.uuid4().hex[:12]
