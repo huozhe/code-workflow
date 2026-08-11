@@ -14,13 +14,14 @@ log = logging.getLogger("agentd.db")
 
 # Bump when DDL changes require a rebuild. SQLite is a derived cache (ADR-2);
 # mismatch ⇒ wipe + recreate. GitHub remains source of truth (P1).
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # Schema DDL only — connection pragmas are set separately (see Store.__init__).
 # v2 (#20): runners keyed by project (N sessions : 1 runner); sessions.project_key.
 # v3 (M3-A): sessions.resume_state for PAUSED_HUMAN → pre-pause restore (§8.5).
 # v4 (M3-B): sessions.stall_open_threads JSON for zero-thread delta (§9.3).
 # v5 (#35): project_blocks for structural ensure_session refusal (per project).
+# v6 (#39): turns.public_actions JSON; sessions.silent_turns for dead-end stall.
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS deliveries (
   delivery_id TEXT PRIMARY KEY,
@@ -75,6 +76,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   progress_fp TEXT,
   progress_repeat INTEGER NOT NULL DEFAULT 0,
   zero_thread_rounds INTEGER NOT NULL DEFAULT 0,
+  silent_turns INTEGER NOT NULL DEFAULT 0,
   gh_watermark INTEGER,
   verified_at INTEGER,
   created_at INTEGER NOT NULL,
@@ -93,6 +95,7 @@ CREATE TABLE IF NOT EXISTS turns (
   ended_at INTEGER,
   status TEXT,
   summary TEXT,
+  public_actions TEXT,
   FOREIGN KEY (session_key) REFERENCES sessions(session_key) ON DELETE CASCADE
 );
 
@@ -196,6 +199,9 @@ class Store:
         if ver == 4:
             self._migrate_v4_to_v5()
             ver = 5
+        if ver == 5:
+            self._migrate_v5_to_v6()
+            ver = 6
         if ver == SCHEMA_VERSION:
             return
         log.warning(
@@ -338,6 +344,22 @@ class Store:
         self._conn.execute("PRAGMA user_version = 5")
         self._conn.commit()
         log.info("schema migration v4 → v5 complete; user_version=5")
+
+    def _migrate_v5_to_v6(self) -> None:
+        """#39: turns.public_actions + sessions.silent_turns."""
+        log.info("migrating schema v5 → v6 (public_actions / silent_turns)")
+        scols = self._table_columns("sessions")
+        if scols and "silent_turns" not in scols:
+            self._conn.execute(
+                "ALTER TABLE sessions ADD COLUMN silent_turns INTEGER NOT NULL DEFAULT 0"
+            )
+        tcols = self._table_columns("turns")
+        if tcols and "public_actions" not in tcols:
+            self._conn.execute("ALTER TABLE turns ADD COLUMN public_actions TEXT")
+        self._conn.executescript(SCHEMA)
+        self._conn.execute("PRAGMA user_version = 6")
+        self._conn.commit()
+        log.info("schema migration v5 → v6 complete; user_version=6")
 
     def _rebuild_schema(self) -> None:
         tables = self._conn.execute(
@@ -603,6 +625,7 @@ class Store:
             "progress_fp",
             "progress_repeat",
             "zero_thread_rounds",
+            "silent_turns",
             "stall_open_threads",
             "updated_at",
         }
@@ -746,12 +769,17 @@ class Store:
         ended_at: int,
         status: str,
         summary: str | None,
+        public_actions: str | None = None,
     ) -> None:
         """Mark a turn row complete (success, failed, or gateway_timeout)."""
         with self._lock:
             self._conn.execute(
-                "UPDATE turns SET ended_at=?, status=?, summary=? WHERE turn_id=?",
-                (ended_at, status, summary, turn_id),
+                """
+                UPDATE turns
+                SET ended_at=?, status=?, summary=?, public_actions=COALESCE(?, public_actions)
+                WHERE turn_id=?
+                """,
+                (ended_at, status, summary, public_actions, turn_id),
             )
             self._conn.commit()
 

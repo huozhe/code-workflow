@@ -23,6 +23,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, IO, TextIO
 
+from agentd_runner.public_actions import (
+    dedupe_actions,
+    from_claude_stream_obj,
+    from_grok_session_update,
+)
+
 log = logging.getLogger("agentd_runner.cli_session")
 
 # Global registry: one live session per role (project container).
@@ -533,6 +539,7 @@ class LiveCliSession:
         self.proc.stdin.flush()
 
         texts: list[str] = []
+        public_actions: list[dict[str, Any]] = []
         result_obj: dict[str, Any] | None = None
         deadline = time.time() + deadline_s
         while time.time() < deadline:
@@ -549,6 +556,7 @@ class LiveCliSession:
                 continue
             if obj.get("session_id"):
                 self.claude_session_id = str(obj["session_id"])
+            public_actions.extend(from_claude_stream_obj(obj))
             if obj.get("type") == "assistant":
                 content = (obj.get("message") or {}).get("content")
                 piece = ""
@@ -577,7 +585,7 @@ class LiveCliSession:
         return {
             "status": "failed" if is_err else "done",
             "summary": summary,
-            "public_actions": [],
+            "public_actions": dedupe_actions(public_actions),
             "artifacts": [],
         }
 
@@ -604,6 +612,7 @@ class LiveCliSession:
         self._acp_write(req)
 
         chunks: list[str] = []
+        public_actions: list[dict[str, Any]] = []
         result: dict[str, Any] | None = None
         deadline = time.time() + deadline_s
         while time.time() < deadline:
@@ -621,10 +630,12 @@ class LiveCliSession:
             # Notifications and progress
             if obj.get("method") == "session/update":
                 u = (obj.get("params") or {}).get("update") or {}
-                if u.get("sessionUpdate") == "agent_message_chunk":
-                    piece = str((u.get("content") or {}).get("text") or "")
-                    chunks.append(piece)
-                    self._emit_progress(progress, piece)
+                if isinstance(u, dict):
+                    public_actions.extend(from_grok_session_update(u))
+                    if u.get("sessionUpdate") == "agent_message_chunk":
+                        piece = str((u.get("content") or {}).get("text") or "")
+                        chunks.append(piece)
+                        self._emit_progress(progress, piece)
                 continue
             # B1/B2: agent→client requests (own id space) — answer, do not treat as result
             if _is_jsonrpc_request(obj):
@@ -637,11 +648,12 @@ class LiveCliSession:
         else:
             raise TimeoutError("grok turn deadline")
 
+        actions = dedupe_actions(public_actions)
         if result and result.get("error"):
             return {
                 "status": "failed",
                 "summary": str(result["error"])[:800],
-                "public_actions": [],
+                "public_actions": actions,
                 "artifacts": [],
             }
         # B7: stopReason drives status — cancelled must not look like done.
@@ -657,7 +669,7 @@ class LiveCliSession:
             return {
                 "status": status,
                 "summary": summary[:4000],
-                "public_actions": [],
+                "public_actions": actions,
                 "artifacts": [],
                 "stop_reason": stop,
             }
@@ -665,14 +677,14 @@ class LiveCliSession:
             return {
                 "status": "failed",
                 "summary": "empty agent result (no text after end_turn)",
-                "public_actions": [],
+                "public_actions": actions,
                 "artifacts": [],
                 "stop_reason": stop or "end_turn",
             }
         return {
             "status": "done",
             "summary": text[:4000],
-            "public_actions": [],
+            "public_actions": actions,
             "artifacts": [],
             "stop_reason": stop or "end_turn",
         }

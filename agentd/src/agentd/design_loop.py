@@ -34,7 +34,27 @@ from agentd.github_write import (
 )
 from agentd.intake import evaluate_intake
 from agentd.keychain import get_password
-from agentd.loop_safety import BudgetState, StallTracker, progress_fingerprint
+from agentd.loop_safety import (
+    BudgetState,
+    SilentTurnTracker,
+    StallTracker,
+    progress_fingerprint,
+)
+
+# Webhook kinds that are observed GitHub progress (P1) — reset silent_turns
+# even when the FSM string does not change (e.g. design_revised while already
+# DESIGN_REVIEW). Claims in public_actions never reset (PR #42 B1).
+_OBSERVED_PROGRESS_KINDS = frozenset(
+    {
+        "issue_opened",
+        "design_pr_opened",
+        "design_revised",
+        "design_changes_requested",
+        "design_approved",
+        "design_merged",
+        "owner_reply",
+    }
+)
 from agentd.refusals import CapacityRefusal, StructuralRefusal
 from agentd.routing import RouteAction, provenance_footer, route_for_recipient
 from agentd.rpc_client import RunnerClient
@@ -329,7 +349,10 @@ class DesignLoop:
             return
 
         if decision.reset_consec:
-            self.store.update_session_fields(session_key, consec_agent_turns=0)
+            # Owner activity resets agent-turn budget and silent-turn dead-end (#39).
+            self.store.update_session_fields(
+                session_key, consec_agent_turns=0, silent_turns=0
+            )
 
         # M3-A / §8.5: owner reply while paused → unpause, inject reply, resume turn.
         if paused and kind == "owner_reply":
@@ -347,6 +370,7 @@ class DesignLoop:
         # drops the turn (self-echo). Architect merge of the Design PR is sent by
         # the Architect identity — recipient is also Architect (§8.3), so without
         # this the merge never advances DESIGN_APPROVED → IMPLEMENTING (M3-D).
+        state_changed = False
         tr = transition(state, kind)
         if tr:
             fields: dict[str, Any] = {"state": tr.new_state}
@@ -356,6 +380,7 @@ class DesignLoop:
                 fields["design_pr"] = dig["pr"]
             self.store.update_session_fields(session_key, **fields)
             state = tr.new_state
+            state_changed = True
             log.info("fsm %s → %s (%s)", session_key, tr.new_state, tr.note)
 
         # Stall only when a turn would be routed — self-echo under §5.3 adapter
@@ -408,11 +433,31 @@ class DesignLoop:
             # failed turn (#34). Successful / other failed paths count once.
             if status != "gateway_timeout":
                 budget.after_agent_turn()
-                self.store.update_session_fields(
-                    session_key,
-                    turn_count=budget.turn_count,
-                    consec_agent_turns=budget.consec_agent_turns,
+                fields_upd: dict[str, Any] = {
+                    "turn_count": budget.turn_count,
+                    "consec_agent_turns": budget.consec_agent_turns,
+                }
+                # #39 / PR #42 B1: count silent turns on *observed* progress only.
+                # public_actions are claims (tool_use) — diagnostic, not a reset.
+                silent = SilentTurnTracker(
+                    silent_count=int(sess.get("silent_turns") or 0),
+                    threshold=int(self.config.silent_turn_limit),
                 )
+                actions = (turn_result or {}).get("public_actions") or []
+                if not isinstance(actions, list):
+                    actions = []
+                observed = state_changed or kind in _OBSERVED_PROGRESS_KINDS
+                breach = silent.after_turn(
+                    public_actions=actions,
+                    observed_progress=observed,
+                    status=str(status) if status else None,
+                )
+                fields_upd["silent_turns"] = silent.silent_count
+                self.store.update_session_fields(session_key, **fields_upd)
+                if breach:
+                    self._escalate(session_key, "system", breach)
+                    self.store.set_delivery_status(delivery_id, "done")
+                    return
 
         self.store.set_delivery_status(delivery_id, "routed")
         log.info(
@@ -581,7 +626,11 @@ class DesignLoop:
             else:
                 log.exception("turn.dispatch failed: %s", exc)
             self.store.finish_turn(
-                turn_id, ended_at=ended, status=status, summary=summary
+                turn_id,
+                ended_at=ended,
+                status=status,
+                summary=summary,
+                public_actions="[]",
             )
             try:
                 _append_host_transcript(
@@ -593,18 +642,27 @@ class DesignLoop:
                         "kind": dig.get("kind"),
                         "status": status,
                         "summary": summary,
+                        "public_actions": [],
                         "source": "gateway",
                     },
                 )
             except OSError as texc:
                 log.warning("host transcript append failed: %s", texc)
-            return {"status": status, "summary": summary}
+            return {"status": status, "summary": summary, "public_actions": []}
 
         ended = int(time.time())
         status = str((result or {}).get("status") or "done")
         summary = str((result or {}).get("summary") or "")[:2000]
+        raw_actions = (result or {}).get("public_actions") or []
+        if not isinstance(raw_actions, list):
+            raw_actions = []
+        actions_json = json.dumps(raw_actions, separators=(",", ":"))[:8000]
         self.store.finish_turn(
-            turn_id, ended_at=ended, status=status, summary=summary
+            turn_id,
+            ended_at=ended,
+            status=status,
+            summary=summary,
+            public_actions=actions_json,
         )
 
         # Model-reported artifacts are optional extras; primary ledger is
@@ -623,11 +681,14 @@ class DesignLoop:
 
         # Provenance footer helper for agent comments (agents should append; we log it)
         log.info(
-            "turn complete id=%s footer=%s",
+            "turn complete id=%s public_actions=%s footer=%s",
             turn_id,
+            len(raw_actions),
             provenance_footer(session_key=session_key, role=role, turn_id=turn_id),
         )
-        return {"status": status, "summary": summary, **(result or {})}
+        out = {"status": status, "summary": summary, **(result or {})}
+        out["public_actions"] = raw_actions
+        return out
 
     def _github_api_token(self) -> str | None:
         """Token for gateway-initiated GitHub *reads* (stall observation).
@@ -1057,6 +1118,7 @@ class DesignLoop:
             paused_reason=None,
             resume_state=None,
             consec_agent_turns=0,
+            silent_turns=0,  # owner engagement resets dead-end counter (#39)
         )
         log.info(
             "escalation closed session=%s rows=%s → %s (owner reply)",
@@ -1122,11 +1184,29 @@ class DesignLoop:
                     review_rounds=int(sess.get("review_rounds") or 0),
                 )
                 budget.after_agent_turn()
+                # Owner unpause is observed progress; silent counter stays 0.
+                silent = SilentTurnTracker(
+                    silent_count=0,
+                    threshold=int(self.config.silent_turn_limit),
+                )
+                actions = (turn_result or {}).get("public_actions") or []
+                if not isinstance(actions, list):
+                    actions = []
+                breach = silent.after_turn(
+                    public_actions=actions,
+                    observed_progress=True,
+                    status=str(status) if status else None,
+                )
                 self.store.update_session_fields(
                     session_key,
                     turn_count=budget.turn_count,
                     consec_agent_turns=budget.consec_agent_turns,
+                    silent_turns=silent.silent_count,
                 )
+                if breach:
+                    self._escalate(session_key, "system", breach)
+                    self.store.set_delivery_status(delivery_id, "done")
+                    return
 
         self.store.set_delivery_status(delivery_id, "routed")
         log.info(
