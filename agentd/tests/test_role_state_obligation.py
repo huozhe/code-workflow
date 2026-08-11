@@ -23,8 +23,14 @@ def test_role_obligation_table() -> None:
     assert "Merge the Design PR" in role_obligation("architect", "DESIGN_APPROVED")
     assert "Feature PR" in role_obligation("developer", "IMPLEMENTING")
     assert "Revise" in role_obligation("architect", "DESIGN_REWORK")
-    assert role_obligation("developer", "PLANNING") == ""
-    assert role_obligation("architect", "IMPLEMENTING") == ""
+    # Idle / wait rows — PR #46 B1 (Architect post-merge is the live failure mode)
+    arch_impl = role_obligation("architect", "IMPLEMENTING")
+    assert "Wait for the Feature PR" in arch_impl
+    assert "Do not implement" in arch_impl
+    assert "do not close" in arch_impl.lower()
+    assert "Wait" in role_obligation("developer", "PLANNING")
+    assert "Wait" in role_obligation("developer", "DESIGN_APPROVED")
+    assert role_obligation("architect", "INTAKE") == ""
 
 
 def test_build_prompt_includes_state_and_obligation() -> None:
@@ -57,6 +63,23 @@ def test_build_prompt_developer_design_review() -> None:
     )
     assert "Session state: DESIGN_REVIEW" in text
     assert "request changes or approve" in text
+    assert "Do not implement" in text
+
+
+def test_build_prompt_architect_implementing_waits() -> None:
+    """Architect after Design PR merge must be told to wait (PR #46 B1)."""
+    text = build_prompt(
+        {
+            "role": "architect",
+            "turn_id": "t-45c",
+            "session_state": "IMPLEMENTING",
+            "event": {"kind": "design_merged"},
+        },
+        None,
+    )
+    assert "Session state: IMPLEMENTING" in text
+    assert "Your obligation in this state:" in text
+    assert "Wait for the Feature PR" in text
     assert "Do not implement" in text
 
 

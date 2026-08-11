@@ -84,6 +84,7 @@ def load_rehydration(role: str) -> dict[str, Any]:
 
 
 # Role × session-state obligations (§8.2). Keep short — prepended every turn (#45).
+# Active duties + idle "wait" rows so a mis-routed turn is never silent (PR #46 B1).
 _OBLIGATIONS: dict[tuple[str, str], str] = {
     ("architect", "PLANNING"): (
         "Write the RFC into the worktree and open the Design PR from the "
@@ -95,8 +96,18 @@ _OBLIGATIONS: dict[tuple[str, str], str] = {
     ("architect", "DESIGN_APPROVED"): (
         "Merge the Design PR (§8.3). Do not open a Feature PR yet."
     ),
+    ("architect", "IMPLEMENTING"): (
+        "The Developer is implementing. Wait for the Feature PR. "
+        "Do not implement, and do not close the issue."
+    ),
+    ("developer", "PLANNING"): (
+        "Architect is drafting the design. Wait. Do not implement."
+    ),
     ("developer", "DESIGN_REVIEW"): (
         "Review the Design PR: request changes or approve. Do not implement."
+    ),
+    ("developer", "DESIGN_APPROVED"): (
+        "Architect is merging the Design PR. Wait. Do not implement yet."
     ),
     ("developer", "IMPLEMENTING"): (
         "Implement against the approved design and open the Feature PR."
