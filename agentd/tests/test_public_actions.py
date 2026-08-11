@@ -57,6 +57,86 @@ def test_classify_local_git_not_public() -> None:
     assert classify_shell_command("ls -la") is None
 
 
+def test_classify_gh_api_read_not_public() -> None:
+    """#43: gh api defaults to GET — path is not a verb."""
+    # Live misclassification from Architect turn t-00dcd6b97188
+    assert (
+        classify_shell_command(
+            "gh api repos/huozhe/code-workflow/issues/comments/5248921867 2>&1"
+        )
+        is None
+    )
+    assert classify_shell_command("gh api repos/o/r/issues/32") is None
+    assert classify_shell_command("gh api repos/o/r/pulls/1/comments") is None
+    assert classify_shell_command("gh api repos/o/r/issues/32 -X GET") is None
+    assert classify_shell_command("gh api --method GET repos/o/r/issues/32") is None
+    assert classify_shell_command("gh issue view 32") is None
+    assert classify_shell_command("gh pr view 9") is None
+    assert classify_shell_command("gh pr view 9 --comments") is None
+
+
+def test_classify_gh_api_write_is_public() -> None:
+    """#43 + PR #44 B1: explicit write verb or body params (implicit POST)."""
+    for cmd in (
+        "gh api repos/o/r/issues/32/comments -X POST -f body=hi",
+        "gh api -X POST repos/o/r/issues/32/comments -f body=hi",
+        "gh api repos/o/r/pulls/1/reviews --method POST -f body=r",
+        "gh api --method PATCH repos/o/r/issues/32 -f title=x",
+        "gh api repos/o/r/pulls/1 -X PUT -f base=main",
+        "gh api repos/o/r/issues/32 --method DELETE",
+        # Implicit POST when body flags present (common gh api comment form)
+        "gh api repos/o/r/issues/32/comments -f body=hi",
+        "gh api repos/o/r/issues/32/comments -F body=@note.md",
+        "gh api --input body.json repos/o/r/issues/32/comments",
+        "gh api repos/o/r/issues/32/comments --raw-field body=hi",
+        "gh api repos/o/r/issues/32/comments --field body=hi",
+    ):
+        act = classify_shell_command(cmd)
+        assert act is not None, cmd
+        assert act["kind"] == "api_write", cmd
+
+
+def test_classify_gh_api_get_with_field_still_read() -> None:
+    """PR #44 B1: -X GET with -f is still a read (query params)."""
+    assert (
+        classify_shell_command("gh api -X GET -f per_page=100 repos/o/r/issues")
+        is None
+    )
+    assert (
+        classify_shell_command(
+            "gh api repos/o/r/issues --method GET -f per_page=100"
+        )
+        is None
+    )
+
+
+def test_classify_curl_github_requires_write_method() -> None:
+    assert (
+        classify_shell_command("curl https://api.github.com/repos/o/r/issues/32")
+        is None
+    )
+    assert (
+        classify_shell_command(
+            "curl -X GET https://api.github.com/repos/o/r/issues/32/comments"
+        )
+        is None
+    )
+    act = classify_shell_command(
+        "curl -X POST https://api.github.com/repos/o/r/issues/32/comments -d '{}'"
+    )
+    assert act is not None and act["kind"] == "api_write"
+    # curl -d implies POST without -X (PR #44 NB)
+    act2 = classify_shell_command(
+        "curl -d '{\"body\":\"hi\"}' https://api.github.com/repos/o/r/issues/32/comments"
+    )
+    assert act2 is not None and act2["kind"] == "api_write"
+    assert (
+        classify_shell_command(
+            "curl -X GET -d 'x=1' https://api.github.com/repos/o/r/issues/32"
+        )
+        is None
+    )
+
 def test_claude_stream_tool_use() -> None:
     obj = {
         "type": "assistant",
