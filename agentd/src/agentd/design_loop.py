@@ -378,9 +378,14 @@ class DesignLoop:
                 dig=dig,
                 issue_num=int(issue_num),
             )
+            status = (turn_result or {}).get("status")
+            # Role still held after prior gateway timeout — leave deferred so
+            # the single drain thread is not blocked (PR #37 B1 / #34).
+            if status == "role_busy":
+                return
             # Gateway timeout: runner may still finish; do not budget a phantom
             # failed turn (#34). Successful / other failed paths count once.
-            if (turn_result or {}).get("status") != "gateway_timeout":
+            if status != "gateway_timeout":
                 budget.after_agent_turn()
                 self.store.update_session_fields(
                     session_key,
@@ -441,6 +446,28 @@ class DesignLoop:
         digest_path.write_text(framed, encoding="utf-8")
         transcript_path = role_base / "transcript.jsonl"
 
+        rkey = _role_key(project_key, role)
+        # Residual busy after a prior gateway timeout: do **not** sleep on the
+        # single drain thread (PR #37 B1). Leave the delivery deferred; next
+        # drain cycle retries when busy expires.
+        busy_until = _role_busy_until.get(rkey, 0.0)
+        now = time.time()
+        if busy_until > now:
+            retry_in = busy_until - now
+            log.warning(
+                "role busy after gateway timeout project=%s role=%s "
+                "retry_in=%.1fs — leaving delivery deferred",
+                project_key,
+                role,
+                retry_in,
+            )
+            return {
+                "status": "role_busy",
+                "summary": f"role busy; retry_in={retry_in:.1f}s",
+            }
+        if rkey in _role_busy_until:
+            _role_busy_until.pop(rkey, None)
+
         started = time.time()  # float: residual busy-until needs sub-second accuracy
         self.store.insert_turn(
             turn_id=turn_id,
@@ -475,28 +502,12 @@ class DesignLoop:
                 ref,
             )
 
-        rkey = _role_key(project_key, role)
         lock = _lock_for_project_role(project_key, role)
         # True only after turn.dispatch is in flight — connect failures are not
         # mid-turn, so they must not mark the role busy (#34).
         call_started = False
         try:
             with lock:
-                # Residual busy from a prior gateway timeout — wait so we do
-                # not start a second turn while the runner may still be in one.
-                busy_until = _role_busy_until.get(rkey, 0.0)
-                now = time.time()
-                if busy_until > now:
-                    wait_s = busy_until - now
-                    log.warning(
-                        "role busy after gateway timeout project=%s role=%s "
-                        "wait_s=%.1f",
-                        project_key,
-                        role,
-                        wait_s,
-                    )
-                    time.sleep(wait_s)
-                    _role_busy_until.pop(rkey, None)
                 with RunnerClient(
                     host,
                     int(port_s),
@@ -548,12 +559,9 @@ class DesignLoop:
                 _role_busy_until[rkey] = started + float(deadline_s)
             else:
                 log.exception("turn.dispatch failed: %s", exc)
-            with self.store._lock:
-                self.store._conn.execute(
-                    "UPDATE turns SET ended_at=?, status=?, summary=? WHERE turn_id=?",
-                    (ended, status, summary, turn_id),
-                )
-                self.store._conn.commit()
+            self.store.finish_turn(
+                turn_id, ended_at=ended, status=status, summary=summary
+            )
             try:
                 _append_host_transcript(
                     transcript_path,
@@ -574,12 +582,9 @@ class DesignLoop:
         ended = int(time.time())
         status = str((result or {}).get("status") or "done")
         summary = str((result or {}).get("summary") or "")[:2000]
-        with self.store._lock:
-            self.store._conn.execute(
-                "UPDATE turns SET ended_at=?, status=?, summary=? WHERE turn_id=?",
-                (ended, status, summary, turn_id),
-            )
-            self.store._conn.commit()
+        self.store.finish_turn(
+            turn_id, ended_at=ended, status=status, summary=summary
+        )
 
         # Model-reported artifacts are optional extras; primary ledger is
         # supervisor-observed at ensure_session (M3-C).
@@ -1004,7 +1009,10 @@ class DesignLoop:
                 dig=dig,
                 issue_num=issue_num,
             )
-            if (turn_result or {}).get("status") != "gateway_timeout":
+            status = (turn_result or {}).get("status")
+            if status == "role_busy":
+                return
+            if status != "gateway_timeout":
                 budget = BudgetState(
                     turn_count=int(sess.get("turn_count") or 0),
                     consec_agent_turns=0,

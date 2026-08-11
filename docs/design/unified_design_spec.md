@@ -313,6 +313,10 @@ host:
 gateway:
   listen: 127.0.0.1:8787
   owner: huozhe
+  # Per-turn liveness pair (#34): RPC socket timeout must outlive the deadline
+  # sent to the runner. rpc_timeout_s = turn_deadline_s + rpc_timeout_grace_s.
+  turn_deadline_s: 900
+  rpc_timeout_grace_s: 60
 ingress:
   backend: tailscale-funnel     # | cloudflared | ngrok | smee
 

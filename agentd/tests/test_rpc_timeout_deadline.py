@@ -186,14 +186,13 @@ def test_gateway_timeout_records_turn_and_transcript(tmp_path: Path) -> None:
     store.close()
 
 
-def test_gateway_timeout_holds_role_busy(tmp_path: Path) -> None:
-    """Second dispatch waits for busy-until before starting another call."""
+def test_gateway_timeout_role_busy_returns_immediately(tmp_path: Path) -> None:
+    """Second dispatch returns role_busy without sleeping (PR #37 B1)."""
     store = Store(tmp_path / "state.db")
-    cfg = _cfg(tmp_path, turn_deadline_s=1, rpc_timeout_grace_s=0)
+    cfg = _cfg(tmp_path, turn_deadline_s=30, rpc_timeout_grace_s=0)
     _seed(store, tmp_path)
     _role_busy_until.clear()
 
-    order: list[str] = []
     calls = {"n": 0}
 
     class FlakyClient:
@@ -209,9 +208,7 @@ def test_gateway_timeout_holds_role_busy(tmp_path: Path) -> None:
         def call(self, method, params=None):  # noqa: ANN001
             calls["n"] += 1
             if calls["n"] == 1:
-                order.append("timeout")
                 raise TimeoutError("timed out")
-            order.append("ok")
             return {"status": "done", "summary": "recovered"}
 
     import agentd.design_loop as dl
@@ -238,15 +235,26 @@ def test_gateway_timeout_holds_role_busy(tmp_path: Path) -> None:
             issue_num=1,
         )
         elapsed = time.time() - t0
+        # After busy expires (or is cleared), a third dispatch may proceed.
+        _role_busy_until.clear()
+        r3 = loop._dispatch_turn(
+            session_key="o/r#1",
+            role="architect",
+            turn_id="t-c",
+            delivery_id="d-c",
+            dig={"kind": "test"},
+            issue_num=1,
+        )
     finally:
         dl.RunnerClient = orig  # type: ignore[misc]
         _role_busy_until.clear()
 
     assert r1 is not None and r1["status"] == "gateway_timeout"
-    assert r2 is not None and r2["status"] == "done"
-    assert order == ["timeout", "ok"]
-    # Second call waited for residual busy (~1s deadline).
-    assert elapsed >= 0.9
+    assert r2 is not None and r2["status"] == "role_busy"
+    assert r3 is not None and r3["status"] == "done"
+    assert calls["n"] == 2  # second attempt never opened RPC
+    # Must not block the drain thread for the residual deadline.
+    assert elapsed < 1.0
     store.close()
 
 

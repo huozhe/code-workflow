@@ -739,6 +739,22 @@ class Store:
             )
             self._conn.commit()
 
+    def finish_turn(
+        self,
+        turn_id: str,
+        *,
+        ended_at: int,
+        status: str,
+        summary: str | None,
+    ) -> None:
+        """Mark a turn row complete (success, failed, or gateway_timeout)."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE turns SET ended_at=?, status=?, summary=? WHERE turn_id=?",
+                (ended_at, status, summary, turn_id),
+            )
+            self._conn.commit()
+
     def register_artifact(
         self,
         *,
