@@ -343,6 +343,7 @@ budgets:
   min_dispatch_interval: 10s
   fingerprint_repeat_limit: 3
   zero_thread_rounds_limit: 3
+  silent_turn_limit: 3          # #39: consecutive turns with no public_actions
 
 resources:
   max_hot_containers: 4
@@ -676,7 +677,9 @@ Identical 3 **consecutive turns** → escalate, but only **after the session has
 
 **Zero-thread-progress** — 3 consecutive review rounds in which no review thread is resolved → escalate. Catches agents that make cosmetic changes each round, which the fingerprint's diff component alone can miss.
 
-**Coverage note for implementers.** The "arm after first head change" guard is **not** "only sample when head changes this turn." Once armed, count every turn's fingerprint. Do not re-introduce `head_sha` into the hash material: that makes identical progress after a cosmetic push impossible to observe. Comment-only loops before any code exists (two agents negotiating an RFC without pushing) are caught by the **turn budgets** and the **zero-thread-progress** signal, both of which are head-agnostic. The mechanisms are deliberately layered so that each covers the other's blind spot.
+**Silent turns** (#39) — 3 consecutive agent turns with empty `public_actions` *and* no FSM state change → escalate. Catches the dead-end where a turn reports `done` but changed nothing on GitHub (no PR, comment, or review). One quiet turn is legitimate; a run of them is silence without a failure. Adapters must populate `public_actions` from vendor tool streams (§14.3).
+
+**Coverage note for implementers.** The "arm after first head change" guard is **not** "only sample when head changes this turn." Once armed, count every turn's fingerprint. Do not re-introduce `head_sha` into the hash material: that makes identical progress after a cosmetic push impossible to observe. Comment-only loops before any code exists (two agents negotiating an RFC without pushing) are caught by the **turn budgets** and the **zero-thread-progress** signal, both of which are head-agnostic. Silent turns cover the case where there are no review rounds and no head at all. The mechanisms are deliberately layered so that each covers the other's blind spot.
 
 Spurious escalation is the preferred failure direction; all signals escalate to the human rather than aborting work.
 

@@ -78,6 +78,14 @@ class Config:
         return int(self.raw.get("host", {}).get("max_hot_containers", 4))
 
     @property
+    def silent_turn_limit(self) -> int:
+        """Consecutive silent agent turns before escalate (#39 / §9.3)."""
+        budgets = self.raw.get("budgets") or {}
+        if "silent_turn_limit" in budgets:
+            return int(budgets["silent_turn_limit"])
+        return int(self.raw.get("gateway", {}).get("silent_turn_limit", 3))
+
+    @property
     def state_db(self) -> Path:
         return self.root / "state.db"
 

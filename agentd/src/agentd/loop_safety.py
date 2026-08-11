@@ -35,6 +35,40 @@ class BudgetState:
         return None
 
 
+@dataclass
+class SilentTurnTracker:
+    """§9.3 third signal (#39): consecutive agent turns with no public action.
+
+    One quiet turn is legitimate. A *run* of silent turns with no FSM movement
+    means the loop has died without a failure or a stall fingerprint.
+    """
+
+    silent_count: int = 0
+    threshold: int = 3
+
+    def after_turn(
+        self,
+        *,
+        public_actions: list | None,
+        state_changed: bool,
+        status: str | None,
+    ) -> str | None:
+        # Only completed agent work counts; failures/timeouts are separate paths.
+        if status not in (None, "done", "changes_requested"):
+            return None
+        acted = bool(public_actions)
+        if acted or state_changed:
+            self.silent_count = 0
+            return None
+        self.silent_count += 1
+        if self.silent_count >= self.threshold:
+            return (
+                f"stall: {self.silent_count} consecutive silent turns "
+                f"(no public_actions, no state change)"
+            )
+        return None
+
+
 def progress_fingerprint(
     *,
     open_thread_ids: list[str],

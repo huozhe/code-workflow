@@ -351,6 +351,7 @@ def exec_turn_as_role(
         "event": params.get("event"),
         "status": result.get("status"),
         "summary": result.get("summary"),
+        "public_actions": result.get("public_actions") or [],
         "live_session": bool(result.get("live_session")),
     }
     try:

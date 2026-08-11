@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -93,14 +94,17 @@ def _run_script_adapter(prompt: str, cwd: Path, env: dict[str, str]) -> dict[str
 
 
 def _run_claude(prompt: str, cwd: Path, env: dict[str, str], deadline_s: int) -> dict[str, Any]:
+    from agentd_runner.public_actions import dedupe_actions, from_claude_stream_obj
+
     binary = shutil.which("claude") or env.get("CLAUDE_BIN") or "claude"
-    # Headless: -p/--print (OQ-4: non-interactive print mode)
+    # Headless: -p/--print with stream-json so tool_use is visible (#39).
     cmd = [
         binary,
         "-p",
         prompt,
         "--output-format",
-        "text",
+        "stream-json",
+        "--verbose",
         "--dangerously-skip-permissions",
     ]
     try:
@@ -126,25 +130,56 @@ def _run_claude(prompt: str, cwd: Path, env: dict[str, str], deadline_s: int) ->
             "public_actions": [],
             "artifacts": [],
         }
+    actions: list[dict[str, Any]] = []
+    texts: list[str] = []
+    result_summary = ""
+    for line in (proc.stdout or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            texts.append(line)
+            continue
+        if not isinstance(obj, dict):
+            continue
+        actions.extend(from_claude_stream_obj(obj))
+        if obj.get("type") == "assistant":
+            content = (obj.get("message") or {}).get("content")
+            if isinstance(content, list):
+                for c in content:
+                    if isinstance(c, dict) and c.get("type") == "text":
+                        texts.append(str(c.get("text") or ""))
+        if obj.get("type") == "result":
+            r = obj.get("result")
+            if isinstance(r, str):
+                result_summary = r
+    public_actions = dedupe_actions(actions)
     if proc.returncode != 0:
         return {
             "status": "failed",
             "summary": f"claude exit {proc.returncode}: {(proc.stderr or proc.stdout)[:800]}",
-            "public_actions": [],
+            "public_actions": public_actions,
             "artifacts": [],
         }
+    summary = result_summary or "".join(texts) or (proc.stdout or "")
     return {
         "status": "done",
-        "summary": (proc.stdout or "")[:4000],
-        "public_actions": [],
+        "summary": summary[:4000],
+        "public_actions": public_actions,
         "artifacts": [],
     }
 
 
 def _run_grok(prompt: str, cwd: Path, env: dict[str, str], deadline_s: int) -> dict[str, Any]:
+    from agentd_runner.public_actions import classify_shell_command, dedupe_actions
+
     binary = shutil.which("grok") or env.get("GROK_BIN") or "grok"
     # Headless single-turn: -p/--single (positional prompt opens the TUI and
     # fails with ENXIO when there is no controlling terminal — #24 B1).
+    # Oneshot text output does not carry ACP tool frames; best-effort scan
+    # stdout for gh write commands the agent echoes (#39). Live path uses ACP.
     cmd = [binary, "-p", prompt, "--always-approve", "--cwd", str(cwd)]
     try:
         proc = subprocess.run(
@@ -169,16 +204,28 @@ def _run_grok(prompt: str, cwd: Path, env: dict[str, str], deadline_s: int) -> d
             "public_actions": [],
             "artifacts": [],
         }
+    out = proc.stdout or ""
+    actions: list[dict[str, Any]] = []
+    for line in out.splitlines():
+        act = classify_shell_command(line)
+        if act:
+            actions.append(act)
+    # Also scan whole blob for multi-line commands
+    for m in re.finditer(r"gh\s+\S+(?:\s+[^\n]+)?", out):
+        act = classify_shell_command(m.group(0))
+        if act:
+            actions.append(act)
+    public_actions = dedupe_actions(actions)
     if proc.returncode != 0:
         return {
             "status": "failed",
-            "summary": f"grok exit {proc.returncode}: {(proc.stderr or proc.stdout)[:800]}",
-            "public_actions": [],
+            "summary": f"grok exit {proc.returncode}: {(proc.stderr or out)[:800]}",
+            "public_actions": public_actions,
             "artifacts": [],
         }
     return {
         "status": "done",
-        "summary": (proc.stdout or "")[:4000],
-        "public_actions": [],
+        "summary": out[:4000],
+        "public_actions": public_actions,
         "artifacts": [],
     }
