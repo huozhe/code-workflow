@@ -83,14 +83,52 @@ def load_rehydration(role: str) -> dict[str, Any]:
     }
 
 
+# Role × session-state obligations (§8.2). Keep short — prepended every turn (#45).
+_OBLIGATIONS: dict[tuple[str, str], str] = {
+    ("architect", "PLANNING"): (
+        "Write the RFC into the worktree and open the Design PR from the "
+        "architect branch. Do not implement."
+    ),
+    ("architect", "DESIGN_REWORK"): (
+        "Revise the RFC from review feedback and push. Do not implement."
+    ),
+    ("architect", "DESIGN_APPROVED"): (
+        "Merge the Design PR (§8.3). Do not open a Feature PR yet."
+    ),
+    ("developer", "DESIGN_REVIEW"): (
+        "Review the Design PR: request changes or approve. Do not implement."
+    ),
+    ("developer", "IMPLEMENTING"): (
+        "Implement against the approved design and open the Feature PR."
+    ),
+}
+
+
+def role_obligation(role: str, state: str) -> str:
+    """One-line obligation for (role, state); empty if none is defined."""
+    return _OBLIGATIONS.get((str(role or "").lower(), str(state or "")), "")
+
+
 def build_prompt(params: dict[str, Any], rehydrate: dict[str, Any] | None) -> str:
     event = params.get("event") or {}
     digest = params.get("digest") or event
+    role = str(params.get("role") or "")
+    # Gateway sends session_state (#45); missing → treat as unknown (still warn).
+    state = str(params.get("session_state") or "").strip()
     parts = [
-        f"Role: {params.get('role')}",
+        f"Role: {role}",
         f"Turn: {params.get('turn_id')}",
-        f"Event: {json.dumps(digest, indent=2)[:4000]}",
     ]
+    if state:
+        parts.append(f"Session state: {state}")
+        obl = role_obligation(role, state)
+        if obl:
+            parts.append(f"Your obligation in this state: {obl}")
+    parts.append(
+        "Invariant: no implementation code before DESIGN_APPROVED. "
+        "Until then, design artifacts only (RFC / Design PR)."
+    )
+    parts.append(f"Event: {json.dumps(digest, indent=2)[:4000]}")
     # Cwd decision (a) #25: CLI lives at project root; worktree is named per turn.
     worktree = (params.get("context") or {}).get("worktree")
     if worktree:
