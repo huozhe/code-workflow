@@ -13,6 +13,8 @@ Per #19 / #20: **one project container**, durable per-role HOME, manual auth at 
 
 Host `state.db` / `config.yaml` stay at `~/.agentd/` and are **never** mounted into the container.
 
+**Do not write scratch/demo dirs under `~/.agentd/projects/<project>/`.** The container mounts that tree at `/srv/agentd` and allowlists only `repo`, `sessions`, `home` (§6.2). Extra paths (e.g. a host demo `work/`) fail `assert_host_secrets_not_mounted` and wedge the project until removed (#35 / live demo residue).
+
 ## Claude (subscription)
 
 1. On a browser-capable host:

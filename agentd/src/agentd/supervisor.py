@@ -25,6 +25,7 @@ from agentd.gitops import (
     worktree_add,
 )
 from agentd.keychain import get_password
+from agentd.refusals import CapacityRefusal, StructuralRefusal
 from agentd.rpc_client import RunnerClient
 
 log = logging.getLogger("agentd.supervisor")
@@ -78,7 +79,7 @@ def assert_no_docker_sock_mount(container_id: str) -> None:
         src = str(m.get("Source") or "")
         dest = str(m.get("Destination") or "")
         if "docker.sock" in src or "docker.sock" in dest:
-            raise RuntimeError(
+            raise StructuralRefusal(
                 f"FORBIDDEN: docker.sock mount on container {container_id}: {m}"
             )
 
@@ -151,7 +152,7 @@ def assert_no_secrets_in_inspect_env(container_id: str) -> None:
             forbidden.append(key)
         # Image may inject non-secret keys (PYTHONPATH, etc.) — leave those alone.
     if forbidden:
-        raise RuntimeError(
+        raise StructuralRefusal(
             f"FORBIDDEN: secret or credential-shaped env in docker inspect on "
             f"{container_id}: {sorted(set(forbidden))}"
         )
@@ -193,7 +194,7 @@ def assert_bearer_not_readable_by_roles(container_id: str) -> None:
             check=False,
         )
         if "READABLE" in (r.stdout or "") or r.returncode == 0:
-            raise RuntimeError(
+            raise StructuralRefusal(
                 f"FORBIDDEN: RPC bearer readable as {label} ({uid}) on {container_id}"
             )
 
@@ -252,13 +253,17 @@ def assert_host_secrets_not_mounted(container_id: str) -> None:
     )
     out = (r.stdout or "") + (r.stderr or "")
     if "VISIBLE:" in out:
-        raise RuntimeError(f"FORBIDDEN: host secrets visible in container: {out!r}")
+        raise StructuralRefusal(
+            f"FORBIDDEN: host secrets visible in container: {out!r}"
+        )
     listed = [ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()]
     allowed = {"repo", "sessions", "home"}
     for name in listed:
         if name not in allowed:
-            raise RuntimeError(
-                f"FORBIDDEN: unexpected path under /srv/agentd: {name!r} (full={out!r})"
+            raise StructuralRefusal(
+                f"FORBIDDEN: unexpected path under /srv/agentd: {name!r} "
+                f"(full={out!r}). Remove stray paths under the project tree so "
+                f"only repo/, sessions/, home/ remain; then reply on the issue."
             )
 
 
@@ -288,6 +293,14 @@ class SessionSupervisor:
         project_key = project_key_from_repo(repo)
         architect = architect_login or self.config.agent_login("claude") or "huozheclaude"
         developer = developer_login or self.config.agent_login("grok") or "huozhegrok"
+
+        # #35: open project block short-circuits before clone/worktree churn.
+        block = self.store.get_open_project_block(project_key)
+        if block:
+            raise StructuralRefusal(
+                str(block.get("reason") or f"project {project_key} blocked")
+            )
+
         existing_runner = self.store.get_runner(project_key)
 
         if existing_runner and existing_runner.get("container_id"):
@@ -345,9 +358,15 @@ class SessionSupervisor:
         hot = self.store.count_hot_sessions()
         cap = self.config.max_hot_containers
         if hot >= cap and not (existing_runner and existing_runner.get("tier") == "hot"):
-            raise RuntimeError(
+            raise CapacityRefusal(
                 f"max_hot_containers={cap} reached (hot={hot}); refusing new project "
                 f"{project_key} for session {session_key}"
+            )
+
+        if not image_present():
+            raise StructuralRefusal(
+                f"session-runner image missing: {IMAGE}. Build/load the image on "
+                f"this host, then reply on the issue to retry."
             )
 
         self._prepare_project_issue_layout(
@@ -417,7 +436,9 @@ class SessionSupervisor:
         create_args.append(IMAGE)
 
         if any("docker.sock" in a for a in create_args):
-            raise RuntimeError("FORBIDDEN: docker.sock must not appear in create args")
+            raise StructuralRefusal(
+                "FORBIDDEN: docker.sock must not appear in create args"
+            )
 
         r = _docker(*create_args)
         cid = r.stdout.strip()
@@ -528,7 +549,7 @@ class SessionSupervisor:
             hot = self.store.count_hot_sessions()
             cap = self.config.max_hot_containers
             if hot >= cap:
-                raise RuntimeError(
+                raise CapacityRefusal(
                     f"max_hot_containers={cap} reached (hot={hot}); refusing promote "
                     f"of project {project_key}"
                 )

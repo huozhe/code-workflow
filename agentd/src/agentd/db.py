@@ -14,12 +14,13 @@ log = logging.getLogger("agentd.db")
 
 # Bump when DDL changes require a rebuild. SQLite is a derived cache (ADR-2);
 # mismatch ⇒ wipe + recreate. GitHub remains source of truth (P1).
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # Schema DDL only — connection pragmas are set separately (see Store.__init__).
 # v2 (#20): runners keyed by project (N sessions : 1 runner); sessions.project_key.
 # v3 (M3-A): sessions.resume_state for PAUSED_HUMAN → pre-pause restore (§8.5).
 # v4 (M3-B): sessions.stall_open_threads JSON for zero-thread delta (§9.3).
+# v5 (#35): project_blocks for structural ensure_session refusal (per project).
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS deliveries (
   delivery_id TEXT PRIMARY KEY,
@@ -115,6 +116,16 @@ CREATE TABLE IF NOT EXISTS escalations (
   opened_at INTEGER NOT NULL,
   resolved_at INTEGER
 );
+
+CREATE TABLE IF NOT EXISTS project_blocks (
+  project_key TEXT PRIMARY KEY,
+  reason TEXT NOT NULL,
+  session_key TEXT,
+  issue_num INTEGER,
+  comment_id INTEGER,
+  opened_at INTEGER NOT NULL,
+  resolved_at INTEGER
+);
 """
 
 
@@ -182,6 +193,9 @@ class Store:
         if ver == 3:
             self._migrate_v3_to_v4()
             ver = 4
+        if ver == 4:
+            self._migrate_v4_to_v5()
+            ver = 5
         if ver == SCHEMA_VERSION:
             return
         log.warning(
@@ -316,6 +330,14 @@ class Store:
         self._conn.execute("PRAGMA user_version = 4")
         self._conn.commit()
         log.info("schema migration v3 → v4 complete; user_version=4")
+
+    def _migrate_v4_to_v5(self) -> None:
+        """#35: project_blocks for structural ensure_session refusal."""
+        log.info("migrating schema v4 → v5 (project_blocks)")
+        self._conn.executescript(SCHEMA)
+        self._conn.execute("PRAGMA user_version = 5")
+        self._conn.commit()
+        log.info("schema migration v4 → v5 complete; user_version=5")
 
     def _rebuild_schema(self) -> None:
         tables = self._conn.execute(
@@ -926,6 +948,87 @@ class Store:
             )
             self._conn.commit()
 
+    def open_project_block(
+        self,
+        *,
+        project_key: str,
+        reason: str,
+        session_key: str | None,
+        issue_num: int | None,
+        comment_id: int | None,
+    ) -> None:
+        """Record a structural project wedge (#35). Idempotent while open."""
+        now = int(time.time())
+        with self._lock:
+            existing = self._conn.execute(
+                """
+                SELECT project_key FROM project_blocks
+                WHERE project_key = ? AND resolved_at IS NULL
+                """,
+                (project_key,),
+            ).fetchone()
+            if existing:
+                return
+            self._conn.execute(
+                """
+                INSERT INTO project_blocks(
+                  project_key, reason, session_key, issue_num, comment_id, opened_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(project_key) DO UPDATE SET
+                  reason = excluded.reason,
+                  session_key = excluded.session_key,
+                  issue_num = excluded.issue_num,
+                  comment_id = excluded.comment_id,
+                  opened_at = excluded.opened_at,
+                  resolved_at = NULL
+                """,
+                (
+                    project_key,
+                    reason,
+                    session_key,
+                    issue_num,
+                    comment_id,
+                    now,
+                ),
+            )
+            self._conn.commit()
+
+    def get_open_project_block(self, project_key: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT * FROM project_blocks
+                WHERE project_key = ? AND resolved_at IS NULL
+                """,
+                (project_key,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def close_project_block(self, project_key: str) -> int:
+        """Resolve open project block. Returns rows updated."""
+        now = int(time.time())
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                UPDATE project_blocks SET resolved_at = ?
+                WHERE project_key = ? AND resolved_at IS NULL
+                """,
+                (now, project_key),
+            )
+            self._conn.commit()
+            return int(cur.rowcount or 0)
+
+    def list_open_project_blocks(self) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT * FROM project_blocks
+                WHERE resolved_at IS NULL
+                ORDER BY opened_at ASC
+                """
+            ).fetchall()
+            return [dict(r) for r in rows]
+
     def status_snapshot(self) -> dict[str, Any]:
         with self._lock:
             total = self._conn.execute(
@@ -943,6 +1046,13 @@ class Store:
             sessions_n = self._conn.execute(
                 "SELECT COUNT(*) AS n FROM sessions"
             ).fetchone()
+            blocks = self._conn.execute(
+                """
+                SELECT project_key, reason, session_key, issue_num, comment_id, opened_at
+                FROM project_blocks WHERE resolved_at IS NULL
+                ORDER BY opened_at ASC
+                """
+            ).fetchall()
             return {
                 "db": str(self.path),
                 "deliveries_total": int(total["n"]) if total else 0,
@@ -954,4 +1064,5 @@ class Store:
                 "breaker_reason": br["reason"] if br else None,
                 "breaker_updated_at": int(br["updated_at"] or 0) if br else 0,
                 "sessions": int(sessions_n["n"]) if sessions_n else 0,
+                "project_blocks": [dict(r) for r in blocks],
             }

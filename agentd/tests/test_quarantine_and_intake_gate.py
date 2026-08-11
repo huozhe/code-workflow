@@ -211,10 +211,12 @@ def test_max_hot_containers_enforced(tmp_path: Path, monkeypatch) -> None:
         )
     sup = SessionSupervisor(store, cfg)
     monkeypatch.setattr(sup, "_load_tokens", lambda: {"architect": "x", "developer": "y"})
+    from agentd.refusals import CapacityRefusal
+
     try:
         # Third project should be refused
         sup.ensure_session(session_key="o/c#1", repo="o/c", issue_num=1)
         raise AssertionError("should have refused")
-    except RuntimeError as e:
+    except CapacityRefusal as e:
         assert "max_hot_containers" in str(e)
     store.close()
