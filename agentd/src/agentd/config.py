@@ -43,6 +43,21 @@ class Config:
         return int(self.raw.get("gateway", {}).get("docker_wait_timeout_s", 300))
 
     @property
+    def turn_deadline_s(self) -> int:
+        """Per-turn deadline sent to the runner (§14.2)."""
+        return int(self.raw.get("gateway", {}).get("turn_deadline_s", 900))
+
+    @property
+    def rpc_timeout_grace_s(self) -> int:
+        """Seconds beyond turn_deadline_s for the gateway RPC read (#34)."""
+        return int(self.raw.get("gateway", {}).get("rpc_timeout_grace_s", 60))
+
+    @property
+    def rpc_timeout_s(self) -> float:
+        """Socket timeout for turn.dispatch — must exceed deadline_s (#34)."""
+        return float(self.turn_deadline_s + self.rpc_timeout_grace_s)
+
+    @property
     def intake_mode(self) -> str:
         return str(self.raw.get("intake", {}).get("mode", "label"))
 

@@ -41,7 +41,10 @@ class RunnerClient:
     def connect(self) -> None:
         self.close()
         try:
-            s = socket.create_connection((self.host, self.port), timeout=self.timeout_s)
+            # Connect/handshake stay short; long timeout is for turn.dispatch
+            # reads (deadline_s + grace). A dead runner must fail fast.
+            connect_s = min(float(self.timeout_s), 30.0)
+            s = socket.create_connection((self.host, self.port), timeout=connect_s)
             s.settimeout(self.timeout_s)
             self._sock = s
             self._rfile = s.makefile("rb")

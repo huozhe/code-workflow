@@ -41,6 +41,10 @@ log = logging.getLogger("agentd.design_loop")
 # Serialize turns per (project, role) — one CLI conversation per role (#20).
 _role_locks: dict[str, threading.Lock] = {}
 _role_locks_guard = threading.Lock()
+# After a gateway RPC timeout the runner may still be inside the turn.
+# Hold the role busy until started_at + deadline_s so a second dispatch
+# does not interleave (#34). Cleared when the wait elapses.
+_role_busy_until: dict[str, float] = {}
 
 # Short-lived compare cache: same head ⇒ same tree; review *threads* can
 # resolve without a new commit, so they are never cached (PR #29 NB2).
@@ -54,6 +58,24 @@ def _lock_for_project_role(project_key: str, role: str) -> threading.Lock:
         if key not in _role_locks:
             _role_locks[key] = threading.Lock()
         return _role_locks[key]
+
+
+def _role_key(project_key: str, role: str) -> str:
+    return f"{project_key}::{role}"
+
+
+def _is_rpc_timeout(exc: BaseException) -> bool:
+    if isinstance(exc, TimeoutError):
+        return True
+    # socket.timeout is TimeoutError on 3.10+; OSError may still say "timed out".
+    return "timed out" in str(exc).lower()
+
+
+def _append_host_transcript(path: Path, record: dict[str, Any]) -> None:
+    """Append one JSON line to the host-side transcript (§6.3 / #34)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(record, separators=(",", ":")) + "\n")
 
 
 def _payload_dict(raw: bytes) -> dict[str, Any]:
@@ -348,7 +370,7 @@ class DesignLoop:
         # Dispatch turn to the session runner
         if self.dispatch_turns and self.supervisor and sess.get("endpoint"):
             turn_id = "t-" + uuid.uuid4().hex[:12]
-            self._dispatch_turn(
+            turn_result = self._dispatch_turn(
                 session_key=session_key,
                 role=recipient_role,
                 turn_id=turn_id,
@@ -356,12 +378,15 @@ class DesignLoop:
                 dig=dig,
                 issue_num=int(issue_num),
             )
-            budget.after_agent_turn()
-            self.store.update_session_fields(
-                session_key,
-                turn_count=budget.turn_count,
-                consec_agent_turns=budget.consec_agent_turns,
-            )
+            # Gateway timeout: runner may still finish; do not budget a phantom
+            # failed turn (#34). Successful / other failed paths count once.
+            if (turn_result or {}).get("status") != "gateway_timeout":
+                budget.after_agent_turn()
+                self.store.update_session_fields(
+                    session_key,
+                    turn_count=budget.turn_count,
+                    consec_agent_turns=budget.consec_agent_turns,
+                )
 
         self.store.set_delivery_status(delivery_id, "routed")
         log.info(
@@ -381,7 +406,8 @@ class DesignLoop:
         delivery_id: str,
         dig: dict[str, Any],
         issue_num: int,
-    ) -> None:
+    ) -> dict[str, Any] | None:
+        """Dispatch one turn. Returns result dict (status/summary) or None."""
         sess = self.store.get_session(session_key) or {}
         repo = str(sess.get("repo") or "")
         project_key = str(sess.get("project_key") or project_key_from_repo(repo))
@@ -389,10 +415,12 @@ class DesignLoop:
             session_key
         )
         if not runner:
-            return
+            return None
         endpoint = str(runner["endpoint"])
         host, _, port_s = endpoint.partition(":")
         bearer = str(runner["token"])
+        deadline_s = int(self.config.turn_deadline_s)
+        rpc_timeout_s = float(self.config.rpc_timeout_s)
         # Project layout: sessions/<issue>/<role>/…
         role_base = (
             project_path(self.config.root, repo or project_key)
@@ -411,14 +439,15 @@ class DesignLoop:
             f"{dig_md}"
         )
         digest_path.write_text(framed, encoding="utf-8")
+        transcript_path = role_base / "transcript.jsonl"
 
-        started = int(time.time())
+        started = time.time()  # float: residual busy-until needs sub-second accuracy
         self.store.insert_turn(
             turn_id=turn_id,
             session_key=session_key,
             role=role,
             delivery_id=delivery_id,
-            started_at=started,
+            started_at=int(started),
             ended_at=None,
             status=None,
             summary=None,
@@ -446,22 +475,42 @@ class DesignLoop:
                 ref,
             )
 
+        rkey = _role_key(project_key, role)
         lock = _lock_for_project_role(project_key, role)
+        # True only after turn.dispatch is in flight — connect failures are not
+        # mid-turn, so they must not mark the role busy (#34).
+        call_started = False
         try:
             with lock:
+                # Residual busy from a prior gateway timeout — wait so we do
+                # not start a second turn while the runner may still be in one.
+                busy_until = _role_busy_until.get(rkey, 0.0)
+                now = time.time()
+                if busy_until > now:
+                    wait_s = busy_until - now
+                    log.warning(
+                        "role busy after gateway timeout project=%s role=%s "
+                        "wait_s=%.1f",
+                        project_key,
+                        role,
+                        wait_s,
+                    )
+                    time.sleep(wait_s)
+                    _role_busy_until.pop(rkey, None)
                 with RunnerClient(
                     host,
                     int(port_s),
                     bearer,
-                    timeout_s=120,
+                    timeout_s=rpc_timeout_s,
                     on_notification=_on_runner_notify,
                 ) as cli:
+                    call_started = True
                     result = cli.call(
                         "turn.dispatch",
                         {
                             "turn_id": turn_id,
                             "role": role,
-                            "deadline_s": 900,
+                            "deadline_s": deadline_s,
                             "event": dig,
                             "context": {
                                 "worktree": (
@@ -480,18 +529,47 @@ class DesignLoop:
                         },
                     )
         except Exception as exc:
-            log.exception("turn.dispatch failed: %s", exc)
-            self.store.insert_turn(
-                turn_id=turn_id + "-err",
-                session_key=session_key,
-                role=role,
-                delivery_id=delivery_id,
-                started_at=started,
-                ended_at=int(time.time()),
-                status="failed",
-                summary=str(exc)[:500],
-            )
-            return
+            ended = int(time.time())
+            mid_turn_timeout = call_started and _is_rpc_timeout(exc)
+            status = "gateway_timeout" if mid_turn_timeout else "failed"
+            summary = str(exc)[:500]
+            if mid_turn_timeout:
+                log.error(
+                    "turn.dispatch gateway timeout id=%s role=%s "
+                    "deadline_s=%s rpc_timeout_s=%s: %s",
+                    turn_id,
+                    role,
+                    deadline_s,
+                    rpc_timeout_s,
+                    exc,
+                )
+                # Runner may still be inside the turn; keep role busy until
+                # the deadline the runner was given (not cancel — out of scope).
+                _role_busy_until[rkey] = started + float(deadline_s)
+            else:
+                log.exception("turn.dispatch failed: %s", exc)
+            with self.store._lock:
+                self.store._conn.execute(
+                    "UPDATE turns SET ended_at=?, status=?, summary=? WHERE turn_id=?",
+                    (ended, status, summary, turn_id),
+                )
+                self.store._conn.commit()
+            try:
+                _append_host_transcript(
+                    transcript_path,
+                    {
+                        "ts": ended,
+                        "turn_id": turn_id,
+                        "role": role,
+                        "kind": dig.get("kind"),
+                        "status": status,
+                        "summary": summary,
+                        "source": "gateway",
+                    },
+                )
+            except OSError as texc:
+                log.warning("host transcript append failed: %s", texc)
+            return {"status": status, "summary": summary}
 
         ended = int(time.time())
         status = str((result or {}).get("status") or "done")
@@ -523,6 +601,7 @@ class DesignLoop:
             turn_id,
             provenance_footer(session_key=session_key, role=role, turn_id=turn_id),
         )
+        return {"status": status, "summary": summary, **(result or {})}
 
     def _github_api_token(self) -> str | None:
         """Token for gateway-initiated GitHub *reads* (stall observation).
@@ -917,7 +996,7 @@ class DesignLoop:
 
         if self.dispatch_turns and self.supervisor and sess.get("endpoint"):
             turn_id = "t-" + uuid.uuid4().hex[:12]
-            self._dispatch_turn(
+            turn_result = self._dispatch_turn(
                 session_key=session_key,
                 role=esc_role,
                 turn_id=turn_id,
@@ -925,17 +1004,18 @@ class DesignLoop:
                 dig=dig,
                 issue_num=issue_num,
             )
-            budget = BudgetState(
-                turn_count=int(sess.get("turn_count") or 0),
-                consec_agent_turns=0,
-                review_rounds=int(sess.get("review_rounds") or 0),
-            )
-            budget.after_agent_turn()
-            self.store.update_session_fields(
-                session_key,
-                turn_count=budget.turn_count,
-                consec_agent_turns=budget.consec_agent_turns,
-            )
+            if (turn_result or {}).get("status") != "gateway_timeout":
+                budget = BudgetState(
+                    turn_count=int(sess.get("turn_count") or 0),
+                    consec_agent_turns=0,
+                    review_rounds=int(sess.get("review_rounds") or 0),
+                )
+                budget.after_agent_turn()
+                self.store.update_session_fields(
+                    session_key,
+                    turn_count=budget.turn_count,
+                    consec_agent_turns=budget.consec_agent_turns,
+                )
 
         self.store.set_delivery_status(delivery_id, "routed")
         log.info(
