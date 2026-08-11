@@ -84,11 +84,17 @@ def load_rehydration(role: str) -> dict[str, Any]:
 
 
 # Role × session-state obligations (§8.2). Keep short — prepended every turn (#45).
-# Active duties + idle "wait" rows so a mis-routed turn is never silent (PR #46 B1).
+# Covers every design-half (role, state) reachable at dispatch — active duty or
+# wait (owner/peer comment can wake the non-actor). INTAKE and PAUSED_HUMAN are
+# intentionally absent: FSM leaves INTAKE on the same delivery, and resume
+# restores resume_state before dispatch (PR #46 B1/B2).
 _OBLIGATIONS: dict[tuple[str, str], str] = {
     ("architect", "PLANNING"): (
         "Write the RFC into the worktree and open the Design PR from the "
         "architect branch. Do not implement."
+    ),
+    ("architect", "DESIGN_REVIEW"): (
+        "Developer is reviewing the Design PR. Wait. Do not implement."
     ),
     ("architect", "DESIGN_REWORK"): (
         "Revise the RFC from review feedback and push. Do not implement."
@@ -105,6 +111,9 @@ _OBLIGATIONS: dict[tuple[str, str], str] = {
     ),
     ("developer", "DESIGN_REVIEW"): (
         "Review the Design PR: request changes or approve. Do not implement."
+    ),
+    ("developer", "DESIGN_REWORK"): (
+        "Architect is revising the design. Wait. Do not implement."
     ),
     ("developer", "DESIGN_APPROVED"): (
         "Architect is merging the Design PR. Wait. Do not implement yet."

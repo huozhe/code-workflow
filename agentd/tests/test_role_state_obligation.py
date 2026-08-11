@@ -23,14 +23,18 @@ def test_role_obligation_table() -> None:
     assert "Merge the Design PR" in role_obligation("architect", "DESIGN_APPROVED")
     assert "Feature PR" in role_obligation("developer", "IMPLEMENTING")
     assert "Revise" in role_obligation("architect", "DESIGN_REWORK")
-    # Idle / wait rows — PR #46 B1 (Architect post-merge is the live failure mode)
+    # Idle / wait rows — PR #46 B1/B2 (owner/peer can wake the non-actor)
     arch_impl = role_obligation("architect", "IMPLEMENTING")
     assert "Wait for the Feature PR" in arch_impl
     assert "Do not implement" in arch_impl
     assert "do not close" in arch_impl.lower()
     assert "Wait" in role_obligation("developer", "PLANNING")
     assert "Wait" in role_obligation("developer", "DESIGN_APPROVED")
+    assert "Wait" in role_obligation("architect", "DESIGN_REVIEW")
+    assert "Wait" in role_obligation("developer", "DESIGN_REWORK")
+    # Unreachable at dispatch — must stay empty so they are not "fixed" later
     assert role_obligation("architect", "INTAKE") == ""
+    assert role_obligation("developer", "PAUSED_HUMAN") == ""
 
 
 def test_build_prompt_includes_state_and_obligation() -> None:
@@ -81,6 +85,20 @@ def test_build_prompt_architect_implementing_waits() -> None:
     assert "Your obligation in this state:" in text
     assert "Wait for the Feature PR" in text
     assert "Do not implement" in text
+
+
+def test_design_half_role_state_matrix_complete() -> None:
+    """Every design-half (role, state) reachable at dispatch has a line (B2)."""
+    states = (
+        "PLANNING",
+        "DESIGN_REVIEW",
+        "DESIGN_REWORK",
+        "DESIGN_APPROVED",
+        "IMPLEMENTING",
+    )
+    for role in ("architect", "developer"):
+        for state in states:
+            assert role_obligation(role, state), f"silent: ({role}, {state})"
 
 
 def test_build_prompt_invariant_without_state() -> None:
