@@ -539,6 +539,24 @@ class Store:
             ).fetchone()
             return dict(row) if row else None
 
+    def get_session_by_feature_pr(
+        self, repo: str, pr_number: int
+    ) -> dict[str, Any] | None:
+        """Resolve session whose Feature PR number is ``pr_number`` (M4-1)."""
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT s.*, r.container_id, r.endpoint, r.token AS runner_token, r.tier
+                FROM sessions s
+                LEFT JOIN runners r ON r.project_key = s.project_key
+                WHERE s.repo = ? AND s.feature_pr = ?
+                ORDER BY s.updated_at DESC
+                LIMIT 1
+                """,
+                (repo, int(pr_number)),
+            ).fetchone()
+            return dict(row) if row else None
+
     def upsert_session(
         self,
         *,

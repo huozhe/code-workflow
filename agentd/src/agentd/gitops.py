@@ -73,6 +73,12 @@ def is_design_head_ref(head_ref: str | None, repo_full: str) -> bool:
     return parsed is not None and parsed[1] == "architect"
 
 
+def is_feature_head_ref(head_ref: str | None, repo_full: str) -> bool:
+    """True when head is the Developer worktree branch (mechanical Feature PR signal)."""
+    parsed = parse_role_branch(head_ref, repo_full)
+    return parsed is not None and parsed[1] == "developer"
+
+
 def project_path(root: Path, repo_full: str) -> Path:
     return root / "projects" / project_dir_name(repo_full)
 

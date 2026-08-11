@@ -16,6 +16,7 @@ from agentd.digest import build_digest, digest_to_markdown
 from agentd.fsm import transition
 from agentd.gitops import (
     is_design_head_ref,
+    is_feature_head_ref,
     parse_role_branch,
     project_dir_name,
     project_key_from_repo,
@@ -65,6 +66,11 @@ _OBSERVED_PROGRESS_KINDS = frozenset(
         "design_changes_requested",
         "design_approved",
         "design_merged",
+        "feature_pr_opened",
+        "feature_revised",
+        "code_changes_requested",
+        "merge_authorized",
+        "feature_merged",
         "owner_reply",
     }
 )
@@ -351,6 +357,20 @@ class DesignLoop:
                 self.store.set_delivery_status(delivery_id, "dropped")
                 return
 
+        # Only the tracked Feature PR merge advances MERGING → AWAITING (§8.1).
+        if kind == "feature_merged":
+            tracked = sess.get("feature_pr")
+            event_pr = dig.get("pr")
+            if not tracked or not event_pr or int(event_pr) != int(tracked):
+                log.info(
+                    "drop id=%s: merge of pr=%s is not feature_pr=%s",
+                    delivery_id,
+                    event_pr,
+                    tracked,
+                )
+                self.store.set_delivery_status(delivery_id, "dropped")
+                return
+
         recipient_role, recipient_login = self._pick_recipient(
             kind, state, architect, developer, sender
         )
@@ -404,6 +424,8 @@ class DesignLoop:
                 fields["roles_locked"] = 1
             if kind == "design_pr_opened" and dig.get("pr"):
                 fields["design_pr"] = dig["pr"]
+            if kind == "feature_pr_opened" and dig.get("pr"):
+                fields["feature_pr"] = dig["pr"]
             self.store.update_session_fields(session_key, **fields)
             state = tr.new_state
             state_changed = True
@@ -413,7 +435,13 @@ class DesignLoop:
         # swap must not advance zero-thread (M3-D NB1).
         if (
             decision.action != RouteAction.DROP
-            and kind in ("design_changes_requested", "design_revised")
+            and kind
+            in (
+                "design_changes_requested",
+                "design_revised",
+                "code_changes_requested",
+                "feature_revised",
+            )
         ):
             stalled = self._observe_stall_signals(
                 session_key=session_key,
@@ -1313,6 +1341,16 @@ class DesignLoop:
                     event,
                 )
                 return real_issue, str(by_design["session_key"]), by_design
+            by_feature = self.store.get_session_by_feature_pr(repo, pr_number)
+            if by_feature is not None:
+                real_issue = int(by_feature["issue_num"])
+                log.info(
+                    "session remap via feature_pr=%s → %s (event=%s)",
+                    pr_number,
+                    by_feature["session_key"],
+                    event,
+                )
+                return real_issue, str(by_feature["session_key"]), by_feature
 
         sk = f"{repo}#{int(issue_num)}"
         return int(issue_num), sk, self.store.get_session(sk)
@@ -1364,6 +1402,20 @@ class DesignLoop:
             return True
         return False
 
+    def _is_feature_pr(
+        self,
+        *,
+        repo: str,
+        pr: dict[str, Any],
+    ) -> bool:
+        """Mechanical Feature PR detection (M4-1) — developer branch only (#31).
+
+        No title heuristic: model-written titles are not a control-plane signal.
+        """
+        head = pr.get("head") if isinstance(pr.get("head"), dict) else {}
+        head_ref = str(head.get("ref") or "")
+        return is_feature_head_ref(head_ref, repo)
+
     def _event_kind(
         self,
         event: str,
@@ -1378,21 +1430,38 @@ class DesignLoop:
         if event == "pull_request":
             pr = data.get("pull_request") or {}
             is_design = self._is_design_pr(repo=repo, pr=pr)
+            is_feature = self._is_feature_pr(repo=repo, pr=pr)
             if action == "opened" and is_design:
                 return "design_pr_opened"
+            if action == "opened" and is_feature:
+                return "feature_pr_opened"
             if action == "synchronize" and is_design:
                 return "design_revised"
-            # Merge of Design PR; session design_pr match is enforced later.
+            if action == "synchronize" and is_feature:
+                return "feature_revised"
+            # Merge; session design_pr / feature_pr match is enforced later.
             if action == "closed" and pr.get("merged") and is_design:
                 return "design_merged"
+            if action == "closed" and pr.get("merged") and is_feature:
+                return "feature_merged"
         if event == "pull_request_review":
             review = data.get("review") or {}
+            pr = data.get("pull_request") or {}
             st = str(review.get("state") or "").upper()
+            is_feature = self._is_feature_pr(repo=repo, pr=pr)
+            is_design = self._is_design_pr(repo=repo, pr=pr)
             if st == "CHANGES_REQUESTED":
-                return "design_changes_requested"
+                if is_feature:
+                    return "code_changes_requested"
+                if is_design:
+                    return "design_changes_requested"
             if st == "APPROVED":
-                # Unverified until §8.4 check runs
-                return "design_approved_unverified"
+                if is_feature:
+                    # Unverified until full §8.4 (M4-2); kind is diagnostic until then.
+                    return "feature_approved_unverified"
+                if is_design:
+                    # Unverified until §8.4 check runs (design path)
+                    return "design_approved_unverified"
         if event == "issue_comment" and action == "created":
             if sender.lower() == self.config.owner.lower():
                 return "owner_reply"
@@ -1418,20 +1487,32 @@ class DesignLoop:
         developer: str,
         sender: str,
     ) -> tuple[str, str]:
-        # Happy path (§8.2 / §8.3):
+        # Happy path (§8.2 / §8.3 / §8.4):
         #   issue → architect drafts Design PR
         #   design_pr_opened / revised → developer reviews
         #   design_approved → architect merges (merge actor is Architect)
-        #   design_merged → architect begins implementation
+        #   feature_pr_opened / revised → architect reviews
+        #   code_changes_requested → developer fixes
+        #   merge_authorized → developer merges (opposite actor from §8.3)
+        #   feature_merged → architect (verification block / idle)
         if kind in (
             "issue_opened",
             "design_changes_requested",
             "design_approved",
             "design_merged",
             "merge_design",
+            "feature_pr_opened",
+            "feature_revised",
+            "feature_merged",
         ):
             return "architect", architect
-        if kind in ("design_pr_opened", "design_revised"):
+        if kind in (
+            "design_pr_opened",
+            "design_revised",
+            "code_changes_requested",
+            "merge_authorized",
+            "feature_approved_unverified",
+        ):
             return "developer", developer
         # Default: route to the role that is not the sender bot
         if sender.lower() == architect.lower():
