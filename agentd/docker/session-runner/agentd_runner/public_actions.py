@@ -29,6 +29,9 @@ _GH_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\bgh\s+api\s+.*\s+--method\s+(POST|PATCH|PUT|DELETE)\b", re.I), "api_write"),
 ]
 
+# git push moves PR heads → pull_request.synchronize (PR #42 B2).
+_GIT_PUSH = re.compile(r"\bgit\s+push\b", re.I)
+
 _WRITE_METHODS = frozenset({"POST", "PATCH", "PUT", "DELETE"})
 
 
@@ -44,6 +47,14 @@ def classify_shell_command(cmd: str) -> dict[str, Any] | None:
                 "tool": "Bash",
                 "command": text[:500],
             }
+    # Push moves PR head → synchronize webhook (diagnostic record; counter
+    # resets only on *observed* progress — PR #42 B1/B2).
+    if _GIT_PUSH.search(text):
+        return {
+            "kind": "push",
+            "tool": "Bash",
+            "command": text[:500],
+        }
     # curl/httpie against api.github.com with write methods
     if "api.github.com" in text.lower():
         if re.search(r"\b-X\s*(POST|PATCH|PUT|DELETE)\b", text, re.I) or re.search(

@@ -39,8 +39,21 @@ def test_classify_gh_pr_create() -> None:
     assert act["kind"] == "pr_opened"
 
 
+def test_classify_git_push_is_public() -> None:
+    """PR #42 B2: push moves PR head → synchronize."""
+    act = classify_shell_command(
+        "git push origin agentd/huozhe__code-workflow/32/developer"
+    )
+    assert act is not None
+    assert act["kind"] == "push"
+    act2 = classify_shell_command("git push --force-with-lease")
+    assert act2 is not None
+    assert act2["kind"] == "push"
+
+
 def test_classify_local_git_not_public() -> None:
     assert classify_shell_command("git status") is None
+    assert classify_shell_command("git commit -m x") is None
     assert classify_shell_command("ls -la") is None
 
 
@@ -185,29 +198,51 @@ def test_claude_silent_turn_empty_actions(tmp_path: Path) -> None:
 
 def test_silent_tracker_escalates_after_n() -> None:
     t = SilentTurnTracker(threshold=3)
-    assert t.after_turn(public_actions=[], state_changed=False, status="done") is None
-    assert t.silent_count == 1
-    assert t.after_turn(public_actions=[], state_changed=False, status="done") is None
-    assert t.silent_count == 2
-    breach = t.after_turn(public_actions=[], state_changed=False, status="done")
-    assert breach is not None
-    assert "silent" in breach
-
-
-def test_silent_tracker_resets_on_action() -> None:
-    t = SilentTurnTracker(threshold=3)
-    t.after_turn(public_actions=[], state_changed=False, status="done")
-    t.after_turn(public_actions=[], state_changed=False, status="done")
-    t.after_turn(
-        public_actions=[{"kind": "comment"}], state_changed=False, status="done"
+    assert (
+        t.after_turn(public_actions=[], observed_progress=False, status="done")
+        is None
     )
-    assert t.silent_count == 0
+    assert t.silent_count == 1
+    assert (
+        t.after_turn(public_actions=[], observed_progress=False, status="done")
+        is None
+    )
+    assert t.silent_count == 2
+    breach = t.after_turn(
+        public_actions=[], observed_progress=False, status="done"
+    )
+    assert breach is not None
+    assert "silent_turns" in breach
 
 
-def test_silent_tracker_resets_on_state_change() -> None:
+def test_silent_tracker_does_not_reset_on_claimed_action() -> None:
+    """PR #42 B1: failed gh pr create still claims pr_opened — still count silent."""
     t = SilentTurnTracker(threshold=3)
-    t.after_turn(public_actions=[], state_changed=False, status="done")
-    t.after_turn(public_actions=[], state_changed=True, status="done")
+    t.after_turn(
+        public_actions=[{"kind": "pr_opened"}],
+        observed_progress=False,
+        status="done",
+    )
+    t.after_turn(
+        public_actions=[{"kind": "pr_opened"}],
+        observed_progress=False,
+        status="done",
+    )
+    breach = t.after_turn(
+        public_actions=[{"kind": "pr_opened"}],
+        observed_progress=False,
+        status="done",
+    )
+    assert t.silent_count == 3
+    assert breach is not None
+    assert "pr_opened" in breach
+    assert "claimed" in breach.lower() or "public_actions" in breach
+
+
+def test_silent_tracker_resets_on_observed_progress() -> None:
+    t = SilentTurnTracker(threshold=3)
+    t.after_turn(public_actions=[], observed_progress=False, status="done")
+    t.after_turn(public_actions=[], observed_progress=True, status="done")
     assert t.silent_count == 0
 
 
@@ -350,10 +385,10 @@ def test_design_loop_escalates_after_silent_run(tmp_path: Path) -> None:
 
     sess = store.get_session(sk)
     assert sess is not None
-    # Third silent → escalate
+    # Third silent → escalate (signal name is unambiguous vs turn budget)
     assert sess["state"] == "PAUSED_HUMAN"
     assert len(posts) == 1
-    assert "silent" in posts[0].lower()
+    assert "silent_turns" in posts[0]
     turn = store._conn.execute(
         "SELECT public_actions, status FROM turns ORDER BY started_at DESC LIMIT 1"
     ).fetchone()
@@ -362,6 +397,118 @@ def test_design_loop_escalates_after_silent_run(tmp_path: Path) -> None:
     assert turn["public_actions"] in ("[]", "null", None) or turn[
         "public_actions"
     ] == "[]"
+    store.close()
+
+
+def test_design_loop_claimed_action_without_observation_still_counts(
+    tmp_path: Path,
+) -> None:
+    """Claimed pr_opened with no FSM/webhook progress still increments silent."""
+    store = Store(tmp_path / "state.db")
+    cfg = Config(
+        raw={
+            "host": {"owner": "huozhe"},
+            "budgets": {"silent_turn_limit": 2},
+            "agents": {
+                "claude": {"login": "huozheclaude"},
+                "grok": {"login": "huozhegrok"},
+            },
+            "gateway": {"login": "huozhegateway"},
+        },
+        root=tmp_path,
+    )
+    sk = "o/r#8"
+    store.upsert_session(
+        session_key=sk,
+        project_key="o/r",
+        repo="o/r",
+        issue_num=8,
+        state="PLANNING",
+        architect="huozheclaude",
+        developer="huozhegrok",
+        created_at=1,
+        updated_at=1,
+    )
+    store.update_session_fields(sk, silent_turns=1)
+    store.upsert_runner(
+        "o/r",
+        container_id="c1",
+        endpoint="127.0.0.1:9",
+        token="tok",
+        tier="hot",
+    )
+    posts: list[str] = []
+
+    class FakeSup:
+        pass
+
+    import agentd.design_loop as dl
+
+    class FakeClient:
+        def __init__(self, *a, **k):  # noqa: ANN002, ANN003
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):  # noqa: ANN002
+            return False
+
+        def call(self, method, params=None):  # noqa: ANN001
+            return {
+                "status": "done",
+                "summary": "opened pr",
+                "public_actions": [
+                    {"kind": "pr_opened", "command": "gh pr create --title x"}
+                ],
+            }
+
+    orig = dl.RunnerClient
+    dl.RunnerClient = FakeClient  # type: ignore[misc, assignment]
+    try:
+        loop = DesignLoop(
+            store,
+            cfg,
+            supervisor=FakeSup(),  # type: ignore[arg-type]
+            dispatch_turns=True,
+            post_comment=lambda **k: posts.append(k["body"]) or 1,
+            gateway_token="gw",
+        )
+        body = json.dumps(
+            {
+                "action": "created",
+                "issue": {"number": 8},
+                "comment": {
+                    "body": (
+                        "ping <!-- agentd:turn session=o/r#8 "
+                        "role=developer turn=t-x -->"
+                    ),
+                    "user": {"login": "huozhegrok"},
+                },
+                "repository": {"full_name": "o/r"},
+                "sender": {"login": "huozhegrok"},
+            }
+        ).encode()
+        store.insert_delivery(
+            delivery_id="d-claim",
+            event="issue_comment",
+            action="created",
+            repo="o/r",
+            issue_num=8,
+            sender="huozhegrok",
+            payload=body,
+            status="deferred",
+        )
+        loop.process_deferred_batch()
+    finally:
+        dl.RunnerClient = orig  # type: ignore[misc]
+
+    sess = store.get_session(sk)
+    assert sess is not None
+    assert sess["state"] == "PAUSED_HUMAN"
+    assert len(posts) == 1
+    assert "pr_opened" in posts[0]
+    assert "silent_turns" in posts[0]
     store.close()
 
 

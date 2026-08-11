@@ -40,6 +40,21 @@ from agentd.loop_safety import (
     StallTracker,
     progress_fingerprint,
 )
+
+# Webhook kinds that are observed GitHub progress (P1) — reset silent_turns
+# even when the FSM string does not change (e.g. design_revised while already
+# DESIGN_REVIEW). Claims in public_actions never reset (PR #42 B1).
+_OBSERVED_PROGRESS_KINDS = frozenset(
+    {
+        "issue_opened",
+        "design_pr_opened",
+        "design_revised",
+        "design_changes_requested",
+        "design_approved",
+        "design_merged",
+        "owner_reply",
+    }
+)
 from agentd.refusals import CapacityRefusal, StructuralRefusal
 from agentd.routing import RouteAction, provenance_footer, route_for_recipient
 from agentd.rpc_client import RunnerClient
@@ -422,7 +437,8 @@ class DesignLoop:
                     "turn_count": budget.turn_count,
                     "consec_agent_turns": budget.consec_agent_turns,
                 }
-                # #39: consecutive silent turns (no public_actions, no FSM move).
+                # #39 / PR #42 B1: count silent turns on *observed* progress only.
+                # public_actions are claims (tool_use) — diagnostic, not a reset.
                 silent = SilentTurnTracker(
                     silent_count=int(sess.get("silent_turns") or 0),
                     threshold=int(self.config.silent_turn_limit),
@@ -430,9 +446,10 @@ class DesignLoop:
                 actions = (turn_result or {}).get("public_actions") or []
                 if not isinstance(actions, list):
                     actions = []
+                observed = state_changed or kind in _OBSERVED_PROGRESS_KINDS
                 breach = silent.after_turn(
                     public_actions=actions,
-                    state_changed=state_changed,
+                    observed_progress=observed,
                     status=str(status) if status else None,
                 )
                 fields_upd["silent_turns"] = silent.silent_count
@@ -1167,7 +1184,7 @@ class DesignLoop:
                     review_rounds=int(sess.get("review_rounds") or 0),
                 )
                 budget.after_agent_turn()
-                # Resume itself is a state change; first post-resume silence starts at 0.
+                # Owner unpause is observed progress; silent counter stays 0.
                 silent = SilentTurnTracker(
                     silent_count=0,
                     threshold=int(self.config.silent_turn_limit),
@@ -1175,10 +1192,9 @@ class DesignLoop:
                 actions = (turn_result or {}).get("public_actions") or []
                 if not isinstance(actions, list):
                     actions = []
-                # state_changed=True: owner unpause already moved the session.
                 breach = silent.after_turn(
                     public_actions=actions,
-                    state_changed=True,
+                    observed_progress=True,
                     status=str(status) if status else None,
                 )
                 self.store.update_session_fields(

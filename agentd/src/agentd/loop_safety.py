@@ -37,10 +37,15 @@ class BudgetState:
 
 @dataclass
 class SilentTurnTracker:
-    """§9.3 third signal (#39): consecutive agent turns with no public action.
+    """§9.3 third signal (#39): consecutive agent turns with no *observed* progress.
 
-    One quiet turn is legitimate. A *run* of silent turns with no FSM movement
-    means the loop has died without a failure or a stall fingerprint.
+    Reset only on webhook/FSM-observed progress (P1) — never on claimed
+    ``public_actions`` (same untrusted source as advisory ``status``; PR #42 B1).
+    ``public_actions`` are diagnostic: escalation names what the agent *claimed*
+    while nothing was observed.
+
+    One quiet turn is legitimate. A *run* with no observed movement means the
+    loop has died without a failure or a stall fingerprint.
     """
 
     silent_count: int = 0
@@ -50,23 +55,37 @@ class SilentTurnTracker:
         self,
         *,
         public_actions: list | None,
-        state_changed: bool,
+        observed_progress: bool,
         status: str | None,
     ) -> str | None:
         # Only completed agent work counts; failures/timeouts are separate paths.
         if status not in (None, "done", "changes_requested"):
             return None
-        acted = bool(public_actions)
-        if acted or state_changed:
+        if observed_progress:
             self.silent_count = 0
             return None
         self.silent_count += 1
-        if self.silent_count >= self.threshold:
+        if self.silent_count < self.threshold:
+            return None
+        claimed = public_actions or []
+        kinds = sorted(
+            {
+                str(a.get("kind") or "unknown")
+                for a in claimed
+                if isinstance(a, dict)
+            }
+        )
+        # Distinct signal name so §8.5 text is unambiguous vs turn-budget breach.
+        if claimed:
             return (
-                f"stall: {self.silent_count} consecutive silent turns "
-                f"(no public_actions, no state change)"
+                f"stall: silent_turns — {self.silent_count} consecutive agent turns "
+                f"with no observed GitHub/FSM progress; agent claimed "
+                f"public_actions={kinds} but no matching event arrived (P1)"
             )
-        return None
+        return (
+            f"stall: silent_turns — {self.silent_count} consecutive agent turns "
+            f"with no public_actions claimed and no observed GitHub/FSM progress"
+        )
 
 
 def progress_fingerprint(
