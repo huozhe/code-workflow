@@ -57,6 +57,56 @@ def test_classify_local_git_not_public() -> None:
     assert classify_shell_command("ls -la") is None
 
 
+def test_classify_gh_api_read_not_public() -> None:
+    """#43: gh api defaults to GET — path is not a verb."""
+    # Live misclassification from Architect turn t-00dcd6b97188
+    assert (
+        classify_shell_command(
+            "gh api repos/huozhe/code-workflow/issues/comments/5248921867 2>&1"
+        )
+        is None
+    )
+    assert classify_shell_command("gh api repos/o/r/issues/32") is None
+    assert classify_shell_command("gh api repos/o/r/pulls/1/comments") is None
+    assert classify_shell_command("gh api repos/o/r/issues/32 -X GET") is None
+    assert classify_shell_command("gh api --method GET repos/o/r/issues/32") is None
+    assert classify_shell_command("gh issue view 32") is None
+    assert classify_shell_command("gh pr view 9") is None
+    assert classify_shell_command("gh pr view 9 --comments") is None
+
+
+def test_classify_gh_api_write_is_public() -> None:
+    """#43: only explicit write methods on gh api count."""
+    for cmd in (
+        "gh api repos/o/r/issues/32/comments -X POST -f body=hi",
+        "gh api -X POST repos/o/r/issues/32/comments -f body=hi",
+        "gh api repos/o/r/pulls/1/reviews --method POST -f body=r",
+        "gh api --method PATCH repos/o/r/issues/32 -f title=x",
+        "gh api repos/o/r/pulls/1 -X PUT -f base=main",
+        "gh api repos/o/r/issues/32 --method DELETE",
+    ):
+        act = classify_shell_command(cmd)
+        assert act is not None, cmd
+        assert act["kind"] == "api_write", cmd
+
+
+def test_classify_curl_github_requires_write_method() -> None:
+    assert (
+        classify_shell_command("curl https://api.github.com/repos/o/r/issues/32")
+        is None
+    )
+    assert (
+        classify_shell_command(
+            "curl -X GET https://api.github.com/repos/o/r/issues/32/comments"
+        )
+        is None
+    )
+    act = classify_shell_command(
+        "curl -X POST https://api.github.com/repos/o/r/issues/32/comments -d '{}'"
+    )
+    assert act is not None and act["kind"] == "api_write"
+
+
 def test_claude_stream_tool_use() -> None:
     obj = {
         "type": "assistant",

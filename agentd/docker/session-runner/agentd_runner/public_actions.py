@@ -12,6 +12,8 @@ from typing import Any
 
 
 # gh subcommands that mutate GitHub (observed live as Bash/execute tools).
+# Note: `gh api` is *not* listed by path — it defaults to GET (#43). Writes
+# require an explicit -X / --method with a write verb (see _http_write_method).
 _GH_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\bgh\s+pr\s+create\b", re.I), "pr_opened"),
     (re.compile(r"\bgh\s+pr\s+edit\b", re.I), "pr_edit"),
@@ -24,15 +26,32 @@ _GH_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\bgh\s+issue\s+create\b", re.I), "issue_create"),
     (re.compile(r"\bgh\s+issue\s+edit\b", re.I), "issue_edit"),
     (re.compile(r"\bgh\s+issue\s+close\b", re.I), "issue_close"),
-    (re.compile(r"\bgh\s+api\s+\S*(comment|reviews|pulls|issues)\b", re.I), "api_write"),
-    (re.compile(r"\bgh\s+api\s+.*\s+-X\s*(POST|PATCH|PUT|DELETE)\b", re.I), "api_write"),
-    (re.compile(r"\bgh\s+api\s+.*\s+--method\s+(POST|PATCH|PUT|DELETE)\b", re.I), "api_write"),
 ]
 
 # git push moves PR heads → pull_request.synchronize (PR #42 B2).
 _GIT_PUSH = re.compile(r"\bgit\s+push\b", re.I)
+_GH_API = re.compile(r"\bgh\s+api\b", re.I)
+
+# Explicit HTTP method flags (order: method may appear before or after the path).
+_HTTP_METHOD = re.compile(
+    r"(?:(?:-X|--method|--request)\s+)(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\b",
+    re.I,
+)
 
 _WRITE_METHODS = frozenset({"POST", "PATCH", "PUT", "DELETE"})
+
+
+def _http_write_method(text: str) -> bool:
+    """True only when the command explicitly uses a write HTTP method.
+
+    `gh api` defaults to GET — a path containing issues/comments/pulls is not
+    a write (#43). Explicit `-X GET` / `--method GET` is never a public action.
+    """
+    methods = [m.group(1).upper() for m in _HTTP_METHOD.finditer(text)]
+    if not methods:
+        return False
+    # Last explicit method wins if the shell line is odd; any write is enough.
+    return any(m in _WRITE_METHODS for m in methods)
 
 
 def classify_shell_command(cmd: str) -> dict[str, Any] | None:
@@ -47,6 +66,13 @@ def classify_shell_command(cmd: str) -> dict[str, Any] | None:
                 "tool": "Bash",
                 "command": text[:500],
             }
+    # gh api: verb-only (POST/PATCH/PUT/DELETE), never path-only or GET (#43).
+    if _GH_API.search(text) and _http_write_method(text):
+        return {
+            "kind": "api_write",
+            "tool": "Bash",
+            "command": text[:500],
+        }
     # Push moves PR head → synchronize webhook (diagnostic record; counter
     # resets only on *observed* progress — PR #42 B1/B2).
     if _GIT_PUSH.search(text):
@@ -55,16 +81,13 @@ def classify_shell_command(cmd: str) -> dict[str, Any] | None:
             "tool": "Bash",
             "command": text[:500],
         }
-    # curl/httpie against api.github.com with write methods
-    if "api.github.com" in text.lower():
-        if re.search(r"\b-X\s*(POST|PATCH|PUT|DELETE)\b", text, re.I) or re.search(
-            r"\b--request\s+(POST|PATCH|PUT|DELETE)\b", text, re.I
-        ):
-            return {
-                "kind": "api_write",
-                "tool": "Bash",
-                "command": text[:500],
-            }
+    # curl/httpie against api.github.com — same write-method gate as gh api.
+    if "api.github.com" in text.lower() and _http_write_method(text):
+        return {
+            "kind": "api_write",
+            "tool": "Bash",
+            "command": text[:500],
+        }
     return None
 
 
