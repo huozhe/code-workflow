@@ -1,4 +1,4 @@
-"""agentctl status | sessions | logs | quarantine-deferred."""
+"""agentctl version | status | sessions | logs | quarantine-deferred."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import json
 import logging
 import sys
 import time
+from importlib.metadata import version as pkg_version
 
 from agentd.config import load_config
 from agentd.db import Store
@@ -19,6 +20,7 @@ log = logging.getLogger("agentctl")
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="agentctl")
     sub = parser.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("version", help="Print installed agentd distribution version")
     p_status = sub.add_parser("status", help="Queue depth and host readiness snapshot")
     p_status.add_argument(
         "--json",
@@ -45,6 +47,11 @@ def main(argv: list[str] | None = None) -> None:
         help="Print how many rows would be updated without changing the DB",
     )
     args = parser.parse_args(argv)
+
+    # ADR-13: version needs no host config — dispatch before load_config().
+    if args.cmd == "version":
+        print(pkg_version("agentd"))
+        return
 
     config = load_config()
     if args.cmd == "status":
