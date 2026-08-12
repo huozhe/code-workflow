@@ -121,6 +121,21 @@ def test_code_half_role_state_matrix_complete() -> None:
     assert "Wait" in role_obligation("architect", "CODE_REWORK")
 
 
+def test_teardown_role_state_matrix() -> None:
+    """M5-2: both roles have a TEARDOWN duty; stay inside own role paths."""
+    for role in ("architect", "developer"):
+        text = role_obligation(role, "TEARDOWN")
+        assert text, f"silent: ({role}, TEARDOWN)"
+        assert "container" in text.lower() or "do not touch" in text.lower()
+    dev = role_obligation("developer", "TEARDOWN")
+    assert "worktree" in dev.lower()
+    assert "branch" in dev.lower()
+    arch = role_obligation("architect", "TEARDOWN")
+    assert "scratch" in arch.lower()
+    assert role_obligation("architect", "CLOSED") == ""
+    assert role_obligation("developer", "CLOSED") == ""
+
+
 def test_build_prompt_invariant_without_state() -> None:
     """Missing session_state still states the no-code invariant."""
     text = build_prompt(

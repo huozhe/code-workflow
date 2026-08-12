@@ -17,11 +17,13 @@ from agentd.fsm import transition
 from agentd.gitops import (
     is_design_head_ref,
     is_feature_head_ref,
+    local_branch_gone,
     parse_role_branch,
     project_dir_name,
     project_key_from_repo,
     project_path,
     role_branch_name,
+    shared_clone_path,
 )
 from agentd.github_fetch import (
     PrReviewThreadSnapshot,
@@ -37,6 +39,7 @@ from agentd.github_write import (
 )
 from agentd.verification import (
     checkbox_is_checked,
+    classify_at_close,
     default_steps_for_session,
     extract_verification_block,
     neutralize_bare_verification_ticks,
@@ -306,6 +309,7 @@ class DesignLoop:
                 delivery_id=delivery_id,
                 sender=sender,
                 bot_logins=bot_logins,
+                data=data,
             )
             return
 
@@ -1478,6 +1482,7 @@ class DesignLoop:
         delivery_id: str,
         sender: str,
         bot_logins: set[str],
+        data: dict[str, Any],
     ) -> None:
         """§10.3: session issue closed — owner only; agent close → reopen + escalate.
 
@@ -1492,15 +1497,14 @@ class DesignLoop:
         bots_l = {b.lower() for b in bot_logins if b}
 
         if sender_l == owner_l:
-            # Legitimate terminal signal. M5 will run teardown on this path;
-            # until then record and do not dispatch an agent "cleanup" turn.
-            log.info(
-                "issues.closed by owner session=%s issue=%s — human gate OK "
-                "(teardown reserved for M5)",
-                session_key,
-                issue_num,
+            self._owner_close_teardown(
+                session_key=session_key,
+                sess=sess,
+                repo=repo,
+                issue_num=int(issue_num),
+                delivery_id=delivery_id,
+                data=data,
             )
-            self.store.set_delivery_status(delivery_id, "done")
             return
 
         # Agent / gateway / other non-owner closed a session issue.
@@ -1549,6 +1553,176 @@ class DesignLoop:
                 session_key,
             )
         self.store.set_delivery_status(delivery_id, "done")
+
+    def _owner_close_teardown(
+        self,
+        *,
+        session_key: str,
+        sess: dict[str, Any],
+        repo: str,
+        issue_num: int,
+        delivery_id: str,
+        data: dict[str, Any],
+    ) -> None:
+        """M5-2: classify at close, TEARDOWN, Developer then Architect turns.
+
+        Leaves the session in TEARDOWN. Archive + CLOSED flip is M5-3.
+        Never stops the project container (§10.3 / #20).
+        """
+        state = str(sess.get("state") or "")
+        if state == "CLOSED":
+            log.info(
+                "issues.closed by owner session=%s already CLOSED — no-op",
+                session_key,
+            )
+            self.store.set_delivery_status(delivery_id, "done")
+            return
+
+        existing = str(sess.get("classification") or "")
+        if existing in ("VERIFIED", "ABANDONED"):
+            classification = existing
+        else:
+            issue = data.get("issue") if isinstance(data.get("issue"), dict) else {}
+            body = issue.get("body") if isinstance(issue.get("body"), str) else ""
+            classification = classify_at_close(body)
+            self.store.update_session_fields(
+                session_key, classification=classification
+            )
+
+        if state != "TEARDOWN":
+            tr = transition(state, "issues_closed")
+            if tr:
+                self.store.update_session_fields(session_key, state=tr.new_state)
+                log.info(
+                    "fsm %s → %s (%s) class=%s",
+                    session_key,
+                    tr.new_state,
+                    tr.note,
+                    classification,
+                )
+
+        log.info(
+            "issues.closed by owner session=%s issue=%s class=%s — teardown turns",
+            session_key,
+            issue_num,
+            classification,
+        )
+
+        if self.dispatch_turns:
+            deferred = self._run_teardown_turns(
+                session_key=session_key,
+                sess=sess,
+                repo=repo,
+                issue_num=int(issue_num),
+                delivery_id=delivery_id,
+                classification=classification,
+            )
+            if deferred:
+                return
+
+        self.store.set_delivery_status(delivery_id, "done")
+
+    def _run_teardown_turns(
+        self,
+        *,
+        session_key: str,
+        sess: dict[str, Any],
+        repo: str,
+        issue_num: int,
+        delivery_id: str,
+        classification: str,
+    ) -> bool:
+        """Developer then Architect. Returns True if delivery should stay deferred."""
+        project_key = str(sess.get("project_key") or project_key_from_repo(repo))
+        runner = self.store.get_runner(project_key) or self.store.get_runner_for_session(
+            session_key
+        )
+        if not runner and self.supervisor is not None:
+            try:
+                self.supervisor.ensure_session(
+                    session_key=session_key,
+                    repo=repo,
+                    issue_num=int(issue_num),
+                    architect_login=str(sess.get("architect") or ""),
+                    developer_login=str(sess.get("developer") or ""),
+                )
+            except CapacityRefusal as exc:
+                log.warning(
+                    "teardown ensure_session deferred (capacity) %s: %s",
+                    session_key,
+                    exc,
+                )
+                return True
+            except Exception:  # noqa: BLE001
+                log.exception("teardown ensure_session failed %s", session_key)
+                return True
+            runner = self.store.get_runner(project_key)
+
+        if not runner:
+            log.warning(
+                "teardown turns skipped (no runner) session=%s — retry on redelivery",
+                session_key,
+            )
+            self._log_teardown_leaks(session_key)
+            return False
+
+        for role in ("developer", "architect"):
+            turn_id = "t-" + uuid.uuid4().hex[:12]
+            dig = {
+                "kind": "issues_closed",
+                "classification": classification,
+                "session_key": session_key,
+                "issue": int(issue_num),
+            }
+            result = self._dispatch_turn(
+                session_key=session_key,
+                role=role,
+                turn_id=turn_id,
+                delivery_id=delivery_id,
+                dig=dig,
+                issue_num=int(issue_num),
+            )
+            if result and result.get("status") == "role_busy":
+                return True
+            # Teardown turns produce no public_actions by design (#42).
+            # Do not count silent/budget — a terminating session must not
+            # escalate onto a closed issue (§8.5).
+            self._confirm_teardown_artifacts(session_key, repo)
+
+        self._log_teardown_leaks(session_key)
+        return False
+
+    def _confirm_teardown_artifacts(self, session_key: str, repo: str) -> None:
+        """Mark removed_at only after the gateway observes the ref is gone."""
+        clone = shared_clone_path(self.config.root, repo)
+        for row in self.store.list_artifacts(session_key, open_only=True):
+            kind = str(row.get("kind") or "")
+            ref = str(row.get("ref") or "")
+            if not ref:
+                continue
+            if kind == "branch":
+                gone = local_branch_gone(clone, ref)
+            else:
+                gone = not Path(ref).exists()
+            if not gone:
+                continue
+            n = self.store.mark_artifact_removed(
+                session_key=session_key, ref=ref, kind=kind
+            )
+            log.info(
+                "teardown confirmed removed session=%s kind=%s ref=%s n=%s",
+                session_key,
+                kind,
+                ref,
+                n,
+            )
+
+    def _log_teardown_leaks(self, session_key: str) -> None:
+        leftover = self.store.list_artifacts(session_key, open_only=True)
+        if not leftover:
+            return
+        refs = [f"{r.get('kind')}:{r.get('ref')}" for r in leftover]
+        log.warning("teardown leak session=%s still open: %s", session_key, refs)
 
     def _escalate(self, session_key: str, role: str, reason: str) -> None:
         """§8.5: pause, post @owner comment, record escalation with comment_id."""

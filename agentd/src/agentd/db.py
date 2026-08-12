@@ -14,7 +14,7 @@ log = logging.getLogger("agentd.db")
 
 # Bump when DDL changes require a rebuild. SQLite is a derived cache (ADR-2);
 # mismatch ⇒ wipe + recreate. GitHub remains source of truth (P1).
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # Schema DDL only — connection pragmas are set separately (see Store.__init__).
 # v2 (#20): runners keyed by project (N sessions : 1 runner); sessions.project_key.
@@ -22,6 +22,7 @@ SCHEMA_VERSION = 6
 # v4 (M3-B): sessions.stall_open_threads JSON for zero-thread delta (§9.3).
 # v5 (#35): project_blocks for structural ensure_session refusal (per project).
 # v6 (#39): turns.public_actions JSON; sessions.silent_turns for dead-end stall.
+# v7 (M5-2): sessions.classification — VERIFIED/ABANDONED at issues.closed.
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS deliveries (
   delivery_id TEXT PRIMARY KEY,
@@ -79,6 +80,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   silent_turns INTEGER NOT NULL DEFAULT 0,
   gh_watermark INTEGER,
   verified_at INTEGER,
+  classification TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
@@ -202,6 +204,9 @@ class Store:
         if ver == 5:
             self._migrate_v5_to_v6()
             ver = 6
+        if ver == 6:
+            self._migrate_v6_to_v7()
+            ver = 7
         if ver == SCHEMA_VERSION:
             return
         log.warning(
@@ -360,6 +365,17 @@ class Store:
         self._conn.execute("PRAGMA user_version = 6")
         self._conn.commit()
         log.info("schema migration v5 → v6 complete; user_version=6")
+
+    def _migrate_v6_to_v7(self) -> None:
+        """M5-2: sessions.classification (VERIFIED/ABANDONED at close)."""
+        log.info("migrating schema v6 → v7 (sessions.classification)")
+        cols = self._table_columns("sessions")
+        if cols and "classification" not in cols:
+            self._conn.execute("ALTER TABLE sessions ADD COLUMN classification TEXT")
+        self._conn.executescript(SCHEMA)
+        self._conn.execute("PRAGMA user_version = 7")
+        self._conn.commit()
+        log.info("schema migration v6 → v7 complete; user_version=7")
 
     def _rebuild_schema(self) -> None:
         tables = self._conn.execute(
@@ -646,6 +662,7 @@ class Store:
             "silent_turns",
             "stall_open_threads",
             "verified_at",  # §10.2 checkbox record (M5-1)
+            "classification",  # §10.3 VERIFIED/ABANDONED (M5-2)
             "updated_at",
         }
         cols = []

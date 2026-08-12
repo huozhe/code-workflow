@@ -151,6 +151,16 @@ _OBLIGATIONS: dict[tuple[str, str], str] = {
         "Wait for owner verification and issue close. Do not open work "
         "unless further work is requested."
     ),
+    ("developer", "TEARDOWN"): (
+        "Remove this issue's git worktrees and local design/feature "
+        "branches, then git worktree prune. Report what you removed. "
+        "Do not touch Architect scratch, other issues, or the project container."
+    ),
+    ("architect", "TEARDOWN"): (
+        "Delete this issue's scratch diffs, patch files, and review bundles "
+        "under your role paths. Report what you removed. Do not touch "
+        "Developer worktrees or branches, other issues, or the project container."
+    ),
 }
 
 

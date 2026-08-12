@@ -154,6 +154,13 @@ def checkbox_is_checked(
     return m.group(1).lower() == "x"
 
 
+def classify_at_close(body: str) -> str:
+    """§10.3: VERIFIED only from an in-sentinel tick at issues.closed."""
+    if checkbox_is_checked(body, strict=True) is True:
+        return "VERIFIED"
+    return "ABANDONED"
+
+
 def neutralize_bare_verification_ticks(body: str) -> str:
     """Uncheck bare Human Verification lines when no sentinel block is present.
 

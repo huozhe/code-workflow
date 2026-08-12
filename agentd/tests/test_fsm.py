@@ -44,3 +44,12 @@ def test_escalation_pause() -> None:
 def test_owner_reply_from_pause_fallback() -> None:
     t = transition("PAUSED_HUMAN", "owner_reply")
     assert t is not None and t.new_state == "PLANNING"
+
+
+def test_issues_closed_to_teardown() -> None:
+    t = transition("AWAITING_VERIFICATION", "issues_closed")
+    assert t is not None and t.new_state == "TEARDOWN"
+    t2 = transition("IMPLEMENTING", "issues_closed")
+    assert t2 is not None and t2.new_state == "TEARDOWN"
+    assert transition("TEARDOWN", "issues_closed") is None
+    assert transition("CLOSED", "issues_closed") is None
