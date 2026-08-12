@@ -1596,6 +1596,8 @@ class DesignLoop:
         #   issue → architect drafts Design PR
         #   design_pr_opened / revised → developer reviews
         #   design_approved → architect merges (merge actor is Architect)
+        #   design_merged → developer implements (Architect merge is self-echo;
+        #     routing architect here left sessions stuck in IMPLEMENTING — M4-4)
         #   feature_pr_opened / revised → architect reviews
         #   code_changes_requested → developer fixes
         #   merge_authorized → developer merges (opposite actor from §8.3)
@@ -1604,7 +1606,6 @@ class DesignLoop:
             "issue_opened",
             "design_changes_requested",
             "design_approved",
-            "design_merged",
             "merge_design",
             "feature_pr_opened",
             "feature_revised",
@@ -1614,6 +1615,7 @@ class DesignLoop:
         if kind in (
             "design_pr_opened",
             "design_revised",
+            "design_merged",
             "code_changes_requested",
             "merge_authorized",
             "feature_approved_unverified",
