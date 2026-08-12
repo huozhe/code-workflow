@@ -645,6 +645,7 @@ class Store:
             "zero_thread_rounds",
             "silent_turns",
             "stall_open_threads",
+            "verified_at",  # §10.2 checkbox record (M5-1)
             "updated_at",
         }
         cols = []

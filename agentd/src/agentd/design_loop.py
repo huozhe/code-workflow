@@ -36,8 +36,10 @@ from agentd.github_write import (
     reopen_issue,
 )
 from agentd.verification import (
+    checkbox_is_checked,
     default_steps_for_session,
     extract_verification_block,
+    set_checkbox_in_body,
     upsert_verification_block,
 )
 from agentd.intake import evaluate_intake
@@ -302,6 +304,19 @@ class DesignLoop:
                 delivery_id=delivery_id,
                 sender=sender,
                 bot_logins=bot_logins,
+            )
+            return
+
+        # §10.2 / M5-1: checkbox record + agent-edit restore (no agent turn).
+        if event == "issues" and action == "edited":
+            self._handle_session_issue_edited(
+                session_key=session_key,
+                sess=sess,
+                repo=repo,
+                issue_num=int(issue_num),
+                delivery_id=delivery_id,
+                sender=sender,
+                data=data,
             )
             return
 
@@ -1174,6 +1189,179 @@ class DesignLoop:
             session_key,
             reason,
         )
+
+    def _handle_session_issue_edited(
+        self,
+        *,
+        session_key: str,
+        sess: dict[str, Any],
+        repo: str,
+        issue_num: int,
+        delivery_id: str,
+        sender: str,
+        data: dict[str, Any],
+    ) -> None:
+        """§10.2: record owner checkbox flip; restore agent tampering (M5-1).
+
+        Classification at issues.closed is separate (M5 teardown) and is never
+        revised by a late tick — this handler only updates the *record*
+        (``verified_at``) and body integrity while the session is live.
+
+        Gateway body edits are ignored (#64 Architect note): the gateway is a
+        bot but not an agent, and it authors the verification scaffold.
+        """
+        changes = data.get("changes") if isinstance(data.get("changes"), dict) else {}
+        if "body" not in changes:
+            # Title/label/etc. — not a checkbox concern.
+            self.store.set_delivery_status(delivery_id, "done")
+            return
+
+        issue = data.get("issue") if isinstance(data.get("issue"), dict) else {}
+        body = issue.get("body") if isinstance(issue.get("body"), str) else ""
+        state = str(sess.get("state") or "")
+        owner = str(self.config.owner or "")
+        sender_l = (sender or "").lower()
+        owner_l = owner.lower()
+
+        # Agents = session roles + configured agent identities. Not gateway.
+        agent_ids = {
+            str(sess.get("architect") or "").lower(),
+            str(sess.get("developer") or "").lower(),
+        } | {a.lower() for a in self.config.agent_logins() if a}
+        agent_ids.discard("")
+        gw = self.config.gateway_login
+        gw_l = gw.lower() if gw else ""
+
+        if gw_l and sender_l == gw_l:
+            log.info(
+                "issues.edited by gateway session=%s — ignore (§10.1 scaffold)",
+                session_key,
+            )
+            self.store.set_delivery_status(delivery_id, "done")
+            return
+
+        is_agent = sender_l in agent_ids
+        is_owner = sender_l == owner_l and bool(owner_l)
+        want_checked = bool(sess.get("verified_at"))
+        have_checked = checkbox_is_checked(body)
+
+        # Agent body edit while AWAITING_VERIFICATION → restore checkbox line.
+        if is_agent and state == "AWAITING_VERIFICATION":
+            if extract_verification_block(body) is None:
+                log.warning(
+                    "issues.edited by agent session=%s — no verification block "
+                    "to restore",
+                    session_key,
+                )
+                self.store.set_delivery_status(delivery_id, "done")
+                return
+            restored = set_checkbox_in_body(body, checked=want_checked)
+            tampered = have_checked is not None and have_checked != want_checked
+            missing = have_checked is None
+            if restored != body and (tampered or missing):
+                try:
+                    patch_fn = self._patch_issue_body or patch_issue_body
+                    patch_fn(
+                        repo=repo,
+                        issue_num=int(issue_num),
+                        body=restored,
+                        token=self._gateway_github_token(),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    log.error(
+                        "checkbox restore failed session=%s: %s", session_key, exc
+                    )
+                # Warning only when the checkbox itself was wrong/missing.
+                if tampered or missing:
+                    warn = (
+                        f"**agentd** restored the `Human Verification Complete` "
+                        f"checkbox after an agent body edit while "
+                        f"`AWAITING_VERIFICATION` (§10.2).\n\n"
+                        f"Sender: `{sender}`\n"
+                        f"Restored to: "
+                        f"`{'checked' if want_checked else 'unchecked'}` "
+                        f"(last gateway-verified record).\n\n"
+                        f"Only `@{owner}` may tick the box — and only when that "
+                        f"login is not also a configured agent identity."
+                    )
+                    try:
+                        if self._post_comment is not None:
+                            self._post_comment(
+                                repo=repo,
+                                issue_num=int(issue_num),
+                                body=warn,
+                                token=self._gateway_github_token(),
+                            )
+                        else:
+                            post_issue_comment(
+                                repo=repo,
+                                issue_num=int(issue_num),
+                                body=warn,
+                                token=self._gateway_github_token(),
+                            )
+                    except Exception as exc:  # noqa: BLE001
+                        log.error(
+                            "checkbox warning comment failed session=%s: %s",
+                            session_key,
+                            exc,
+                        )
+                log.info(
+                    "issues.edited agent restore session=%s tampered=%s "
+                    "want_checked=%s",
+                    session_key,
+                    tampered or missing,
+                    want_checked,
+                )
+            else:
+                log.info(
+                    "issues.edited by agent session=%s — checkbox already "
+                    "matches snapshot (steps refine OK)",
+                    session_key,
+                )
+            self.store.set_delivery_status(delivery_id, "done")
+            return
+
+        # Record flip only: owner AND not an agent identity (§10.2).
+        if is_owner and not is_agent:
+            if have_checked is True and not want_checked:
+                self.store.update_session_fields(
+                    session_key, verified_at=int(time.time())
+                )
+                log.info(
+                    "verification checkbox recorded session=%s sender=%s",
+                    session_key,
+                    sender,
+                )
+            elif have_checked is False and want_checked:
+                self.store.update_session_fields(session_key, verified_at=None)
+                log.info(
+                    "verification checkbox cleared session=%s sender=%s",
+                    session_key,
+                    sender,
+                )
+            else:
+                log.info(
+                    "issues.edited by owner session=%s checked=%s verified_at=%s",
+                    session_key,
+                    have_checked,
+                    sess.get("verified_at"),
+                )
+        elif is_owner and is_agent:
+            log.warning(
+                "issues.edited: owner login %s is also an agent identity — "
+                "checkbox flip NOT recorded (§10.2 second test) session=%s",
+                sender,
+                session_key,
+            )
+        else:
+            log.info(
+                "issues.edited session=%s sender=%s — no checkbox record "
+                "(not owner, or not agent-restore path)",
+                session_key,
+                sender,
+            )
+
+        self.store.set_delivery_status(delivery_id, "done")
 
     def _handle_session_issue_closed(
         self,
