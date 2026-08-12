@@ -157,8 +157,8 @@ _OBLIGATIONS: dict[tuple[str, str], str] = {
         "Do not touch Architect scratch, other issues, or the project container."
     ),
     ("architect", "TEARDOWN"): (
-        "Delete this issue's scratch diffs, patch files, and review bundles "
-        "under your role paths. Report what you removed. Do not touch "
+        "Delete this issue's scratch directory and the diffs, patch files, "
+        "and review bundles under it. Report what you removed. Do not touch "
         "Developer worktrees or branches, other issues, or the project container."
     ),
 }

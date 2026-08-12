@@ -118,19 +118,30 @@ def _insert_close(
     )
 
 
+def _register_open(store: Store, sk: str, *, kind: str = "scratch", ref: str = "/tmp/x") -> None:
+    store.register_artifact(session_key=sk, role="developer", kind=kind, ref=ref)
+
+
 def _loop(
     store: Store,
     tmp: Path,
     *,
     dispatch: bool = False,
     client_factory=None,
+    supervisor=None,
+    posts: list | None = None,
 ) -> DesignLoop:
+    def _post(**k):  # noqa: ANN003
+        if posts is not None:
+            posts.append(k)
+        return 1
+
     loop = DesignLoop(
         store,
         _cfg(tmp),
-        supervisor=None,
+        supervisor=supervisor,
         dispatch_turns=dispatch,
-        post_comment=lambda **k: 1,
+        post_comment=_post,
         reopen_issue_fn=lambda **k: None,
         gateway_token="gw",
     )
@@ -320,6 +331,7 @@ class _RecordingClient:
 def test_owner_close_dispatches_developer_then_architect(tmp_path: Path) -> None:
     store = Store(tmp_path / "state.db")
     sk = _seed(store, tmp_path)
+    _register_open(store, sk)
     _RecordingClient.calls = []
     _insert_close(
         store,
@@ -354,7 +366,8 @@ def test_owner_close_dispatches_developer_then_architect(tmp_path: Path) -> None
 
 def test_teardown_never_calls_session_teardown_rpc(tmp_path: Path) -> None:
     store = Store(tmp_path / "state.db")
-    _seed(store, tmp_path)
+    sk = _seed(store, tmp_path)
+    _register_open(store, sk)
     _RecordingClient.calls = []
     _insert_close(
         store,
@@ -375,6 +388,7 @@ def test_teardown_never_calls_session_teardown_rpc(tmp_path: Path) -> None:
 def test_teardown_turns_do_not_trip_silent_or_budget(tmp_path: Path) -> None:
     store = Store(tmp_path / "state.db")
     sk = _seed(store, tmp_path)
+    _register_open(store, sk)
     store.update_session_fields(sk, silent_turns=2, consec_agent_turns=6)
     _RecordingClient.calls = []
     _insert_close(
@@ -417,7 +431,8 @@ def test_redelivery_while_teardown_does_not_reclassify(tmp_path: Path) -> None:
     sess = store.get_session(sk)
     assert sess is not None
     assert sess["classification"] == "ABANDONED"
-    # Idempotent retry of leftover cleanup is OK; must not flip class.
+    # B3: drained ledger → no second pair of turns.
+    assert _RecordingClient.calls == []
     store.close()
 
 
@@ -578,4 +593,173 @@ def test_branch_marked_removed_only_when_git_list_empty(tmp_path: Path) -> None:
         dl.RunnerClient = loop._orig_client  # type: ignore[attr-defined, misc]
     open_rows = store.list_artifacts(sk, open_only=True)
     assert open_rows == []
+    store.close()
+
+
+# --- B1: ensure_session must not leave INTAKE on the wire ---
+
+
+class _IntakeClobberSupervisor:
+    """Mirrors supervisor.ensure_session create path: upsert_session(INTAKE)."""
+
+    def __init__(self, store: Store) -> None:
+        self.store = store
+        self.calls = 0
+
+    def ensure_session(self, **k):  # noqa: ANN003
+        self.calls += 1
+        now = 9
+        self.store.upsert_session(
+            session_key=k["session_key"],
+            project_key="huozhe/code-workflow",
+            repo=k["repo"],
+            issue_num=k["issue_num"],
+            state="INTAKE",
+            architect="huozheclaude",
+            developer="huozhegrok",
+            created_at=now,
+            updated_at=now,
+        )
+        self.store.upsert_runner(
+            "huozhe/code-workflow",
+            container_id="c-recreated",
+            endpoint="127.0.0.1:9",
+            token="tok",
+            tier="hot",
+        )
+
+
+def test_no_runner_ensure_session_still_sends_teardown_state(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.db")
+    sk = _seed(store, tmp_path, with_runner=False)
+    _register_open(store, sk)
+    sup = _IntakeClobberSupervisor(store)
+    _RecordingClient.calls = []
+    _insert_close(
+        store,
+        did="d-norunner",
+        payload=_closed_payload(body=_block(checked=True)),
+    )
+    loop = _loop(
+        store,
+        tmp_path,
+        dispatch=True,
+        client_factory=_RecordingClient,
+        supervisor=sup,
+    )
+    try:
+        loop.process_deferred_batch()
+    finally:
+        import agentd.design_loop as dl
+
+        dl.RunnerClient = loop._orig_client  # type: ignore[attr-defined, misc]
+    assert sup.calls == 1
+    assert len(_RecordingClient.calls) == 2
+    states = [p.get("session_state") for _, p in _RecordingClient.calls]
+    assert states == ["TEARDOWN", "TEARDOWN"]
+    sess = store.get_session(sk)
+    assert sess is not None
+    assert sess["state"] == "TEARDOWN"
+    assert sess["classification"] == "VERIFIED"
+    store.close()
+
+
+# --- B2: empty scratch dir is gone ---
+
+
+def test_empty_scratch_directory_is_confirmed_removed(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.db")
+    sk = _seed(store, tmp_path)
+    scratch = (
+        tmp_path
+        / "projects"
+        / "huozhe__code-workflow"
+        / "sessions"
+        / "58"
+        / "architect"
+        / "scratch"
+    )
+    scratch.mkdir(parents=True)
+    store.register_artifact(
+        session_key=sk, role="architect", kind="scratch", ref=str(scratch)
+    )
+    _RecordingClient.calls = []
+    _insert_close(
+        store,
+        did="d-empty-scratch",
+        payload=_closed_payload(body=_block(checked=True)),
+    )
+    loop = _loop(store, tmp_path, dispatch=True, client_factory=_RecordingClient)
+    try:
+        loop.process_deferred_batch()
+    finally:
+        import agentd.design_loop as dl
+
+        dl.RunnerClient = loop._orig_client  # type: ignore[attr-defined, misc]
+    assert store.list_artifacts(sk, open_only=True) == []
+    store.close()
+
+
+# --- B3: leftover artifacts still retry ---
+
+
+def test_redelivery_retries_only_when_ledger_still_open(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.db")
+    sk = _seed(store, tmp_path, state="TEARDOWN", classification="ABANDONED")
+    _register_open(store, sk, ref="/still/there")
+    _RecordingClient.calls = []
+    _insert_close(
+        store,
+        did="d-retry",
+        payload=_closed_payload(body=_block(checked=True)),
+    )
+    loop = _loop(store, tmp_path, dispatch=True, client_factory=_RecordingClient)
+    try:
+        loop.process_deferred_batch()
+    finally:
+        import agentd.design_loop as dl
+
+        dl.RunnerClient = loop._orig_client  # type: ignore[attr-defined, misc]
+    assert len(_RecordingClient.calls) == 2
+    store.close()
+
+
+# --- B4: needs_human stays in TEARDOWN ---
+
+
+class _NeedsHumanClient(_RecordingClient):
+    def call(self, method, params=None):  # noqa: ANN001
+        super().call(method, params)
+        return {"status": "needs_human", "summary": "cleanup", "public_actions": []}
+
+
+def test_teardown_needs_human_does_not_pause(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.db")
+    sk = _seed(store, tmp_path)
+    _register_open(store, sk)
+    posts: list = []
+    _NeedsHumanClient.calls = []
+    _insert_close(
+        store,
+        did="d-nh",
+        payload=_closed_payload(body=_block(checked=True)),
+    )
+    loop = _loop(
+        store,
+        tmp_path,
+        dispatch=True,
+        client_factory=_NeedsHumanClient,
+        posts=posts,
+    )
+    try:
+        loop.process_deferred_batch()
+    finally:
+        import agentd.design_loop as dl
+
+        dl.RunnerClient = loop._orig_client  # type: ignore[attr-defined, misc]
+    sess = store.get_session(sk)
+    assert sess is not None
+    assert sess["state"] == "TEARDOWN"
+    assert store.get_open_escalation(sk) is None
+    assert posts == []
     store.close()

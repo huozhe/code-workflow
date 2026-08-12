@@ -114,6 +114,20 @@ _STALL_DIFF_CACHE: dict[str, str] = {}
 
 
 
+def _scratch_dir_cleared(ref: str) -> bool:
+    """Scratch ledger refs are directories. Empty (or missing) counts as gone.
+
+    Agents are told to delete contents; the dir itself may remain. M5's exit
+    metric is ``removed_at IS NULL`` → 0, so an empty scratch dir is done.
+    """
+    path = Path(ref)
+    if not path.exists():
+        return True
+    if path.is_dir() and not any(path.iterdir()):
+        return True
+    return False
+
+
 def _lock_for_project_role(project_key: str, role: str) -> threading.Lock:
     key = f"{project_key}::{role}"
     with _role_locks_guard:
@@ -882,7 +896,15 @@ class DesignLoop:
                 )
 
         if status == "needs_human":
-            self._escalate(session_key, role, summary or "needs_human")
+            if session_state == "TEARDOWN":
+                log.warning(
+                    "teardown turn needs_human session=%s role=%s — staying "
+                    "TEARDOWN (no escalate on closed issue); leftovers stay leaks",
+                    session_key,
+                    role,
+                )
+            else:
+                self._escalate(session_key, role, summary or "needs_human")
 
         # Provenance footer helper for agent comments (agents should append; we log it)
         log.info(
@@ -1633,6 +1655,12 @@ class DesignLoop:
         classification: str,
     ) -> bool:
         """Developer then Architect. Returns True if delivery should stay deferred."""
+        if not self.store.list_artifacts(session_key, open_only=True):
+            log.info(
+                "teardown skip turns session=%s — ledger already drained",
+                session_key,
+            )
+            return False
         project_key = str(sess.get("project_key") or project_key_from_repo(repo))
         runner = self.store.get_runner(project_key) or self.store.get_runner_for_session(
             session_key
@@ -1657,6 +1685,15 @@ class DesignLoop:
                 log.exception("teardown ensure_session failed %s", session_key)
                 return True
             runner = self.store.get_runner(project_key)
+            # ensure_session upserts state=INTAKE (create path). Re-assert
+            # TEARDOWN so the runner prompt gets the teardown obligation.
+            # Layout recreate (worktree add / ledger re-register) is expected
+            # when the project container is absent; teardown deletes it again.
+            self.store.update_session_fields(session_key, state="TEARDOWN")
+            log.info(
+                "teardown re-asserted TEARDOWN after ensure_session session=%s",
+                session_key,
+            )
 
         if not runner:
             log.warning(
@@ -1702,6 +1739,8 @@ class DesignLoop:
                 continue
             if kind == "branch":
                 gone = local_branch_gone(clone, ref)
+            elif kind == "scratch":
+                gone = _scratch_dir_cleared(ref)
             else:
                 gone = not Path(ref).exists()
             if not gone:
