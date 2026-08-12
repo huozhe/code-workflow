@@ -125,11 +125,23 @@ def extract_verification_block(body: str) -> str | None:
     return m.group(0) if m else None
 
 
-def checkbox_is_checked(block_or_body: str) -> bool | None:
-    """True/False from Human Verification line inside sentinels; None if absent."""
+def checkbox_is_checked(
+    block_or_body: str, *, strict: bool = False
+) -> bool | None:
+    """True/False from Human Verification line; None if absent.
+
+    By default (``strict=False``) falls back to a bare-line search when the
+    sentinel block is missing — useful for unit tests and restore probes.
+
+    Callers that classify a session (M5-2/3, §10.3) **must** pass
+    ``strict=True`` so only the in-sentinel line counts; a bare
+    ``- [x] Human Verification Complete`` outside the block is not verified.
+    """
     block = extract_verification_block(block_or_body)
     if block is None:
-        # Allow parsing a bare fragment (tests / restore path).
+        if strict:
+            return None
+        # Bare fragment fallback (tests / restore detection of B5 bare ticks).
         text = block_or_body or ""
         if SENTINEL_OPEN not in text and CHECKBOX_UNCHECKED[:10] not in text:
             if not _CHECKBOX_RE.search(text):
@@ -140,6 +152,68 @@ def checkbox_is_checked(block_or_body: str) -> bool | None:
     if not m:
         return None
     return m.group(1).lower() == "x"
+
+
+def neutralize_bare_verification_ticks(body: str) -> str:
+    """Uncheck bare Human Verification lines when no sentinel block is present.
+
+    B5: an agent can add ``- [x] Human Verification Complete`` outside the
+    protocol block; with no sentinels, ``set_checkbox_in_body`` is a no-op.
+    """
+    body = body or ""
+    if extract_verification_block(body) is not None:
+        return body
+    if not _CHECKBOX_RE.search(body):
+        return body
+    return _CHECKBOX_RE.sub(CHECKBOX_UNCHECKED, body)
+
+
+def set_checkbox_in_body(body: str, *, checked: bool) -> str:
+    """Force the Human Verification line inside sentinels; no-op if block absent.
+
+    Used to restore the checkbox after an agent edit that changed it (§10.2).
+    Steps / Not covered / prose outside sentinels are left alone.
+    """
+    body = body or ""
+    block = extract_verification_block(body)
+    if block is None:
+        return body
+    line = CHECKBOX_CHECKED if checked else CHECKBOX_UNCHECKED
+    if _CHECKBOX_RE.search(block):
+        new_block = _CHECKBOX_RE.sub(line, block, count=1)
+    else:
+        # Block exists but line missing — insert before close sentinel.
+        new_block = block.replace(
+            SENTINEL_CLOSE,
+            f"{line}\n\n{ORDERING_LINE}\n{SENTINEL_CLOSE}"
+            if ORDERING_LINE not in block
+            else f"{line}\n{SENTINEL_CLOSE}",
+        )
+    # replace(block, …) keeps the match that extract found — safer than
+    # independent .index() of OPEN/CLOSE (stray sentinels in prose).
+    return body.replace(block, new_block, 1)
+
+
+def reinsert_verification_block(body: str, block: str) -> str:
+    """Append a verification block when the body no longer has one.
+
+    Keeps agent prose outside the sentinels; used when an agent deletes the
+    whole §10.1 block (strictly worse than unticking — §10.3 would ABANDON).
+    """
+    body = body or ""
+    if not block or extract_verification_block(body) is not None:
+        return body
+    if body.strip():
+        if body.endswith("\n\n"):
+            sep = ""
+        elif body.endswith("\n"):
+            sep = "\n"
+        else:
+            sep = "\n\n"
+        out = body + sep + block
+    else:
+        out = block
+    return out if out.endswith("\n") else out + "\n"
 
 
 def default_steps_for_session(

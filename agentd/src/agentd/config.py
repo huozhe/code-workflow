@@ -112,14 +112,22 @@ class Config:
             return []
         return [str(c) for c in checks if str(c).strip()]
 
-    def all_bot_logins(self) -> set[str]:
-        """Agent logins + gateway login (must not be classified as human §9.1)."""
+    def agent_logins(self) -> set[str]:
+        """Configured agent identities only — not the gateway (#64 M5-1 note).
+
+        §10.2 treats agents as a separate class from the gateway voice. Gateway
+        body edits (verification scaffold) must not look like agent tampering.
+        """
         agents = self.raw.get("agents") or {}
-        logins = {
+        return {
             str(v["login"])
             for v in agents.values()
             if isinstance(v, dict) and "login" in v
         }
+
+    def all_bot_logins(self) -> set[str]:
+        """Agent logins + gateway login (must not be classified as human §9.1)."""
+        logins = set(self.agent_logins())
         gw = self.gateway_login
         if gw:
             logins.add(gw)
