@@ -73,6 +73,7 @@ def _seed(
     issue: int = 58,
     with_runner: bool = True,
     classification: str | None = None,
+    with_session_dir: bool = False,
 ) -> str:
     sk = f"huozhe/code-workflow#{issue}"
     store.upsert_session(
@@ -96,6 +97,10 @@ def _seed(
             token="tok",
             tier="hot",
         )
+    if with_session_dir:
+        d = tmp / "projects" / "huozhe__code-workflow" / "sessions" / str(issue)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "keep").write_text("x", encoding="utf-8")
     return sk
 
 
@@ -218,7 +223,7 @@ def test_issues_closed_from_teardown_or_closed_is_noop() -> None:
 
 def test_owner_close_ticked_is_verified_teardown(tmp_path: Path) -> None:
     store = Store(tmp_path / "state.db")
-    sk = _seed(store, tmp_path)
+    sk = _seed(store, tmp_path, with_session_dir=True)
     _insert_close(
         store,
         did="d-tick",
@@ -227,14 +232,14 @@ def test_owner_close_ticked_is_verified_teardown(tmp_path: Path) -> None:
     _loop(store, tmp_path).process_deferred_batch()
     sess = store.get_session(sk)
     assert sess is not None
-    assert sess["state"] == "TEARDOWN"
+    assert sess["state"] == "CLOSED"
     assert sess["classification"] == "VERIFIED"
     store.close()
 
 
 def test_owner_close_unticked_is_abandoned(tmp_path: Path) -> None:
     store = Store(tmp_path / "state.db")
-    sk = _seed(store, tmp_path, state="IMPLEMENTING")
+    sk = _seed(store, tmp_path, state="IMPLEMENTING", with_session_dir=True)
     _insert_close(
         store,
         did="d-untick",
@@ -243,7 +248,7 @@ def test_owner_close_unticked_is_abandoned(tmp_path: Path) -> None:
     _loop(store, tmp_path).process_deferred_batch()
     sess = store.get_session(sk)
     assert sess is not None
-    assert sess["state"] == "TEARDOWN"
+    assert sess["state"] == "CLOSED"
     assert sess["classification"] == "ABANDONED"
     store.close()
 
@@ -267,7 +272,7 @@ def test_owner_close_reads_payload_body_not_verified_at(tmp_path: Path) -> None:
 
 def test_classification_never_revised_after_close(tmp_path: Path) -> None:
     store = Store(tmp_path / "state.db")
-    sk = _seed(store, tmp_path)
+    sk = _seed(store, tmp_path, with_session_dir=True)
     _insert_close(
         store,
         did="d-first",
@@ -285,7 +290,7 @@ def test_classification_never_revised_after_close(tmp_path: Path) -> None:
     sess = store.get_session(sk)
     assert sess is not None
     assert sess["classification"] == "ABANDONED"
-    assert sess["state"] == "TEARDOWN"
+    assert sess["state"] == "CLOSED"
     store.close()
 
 
@@ -331,7 +336,7 @@ class _RecordingClient:
 
 def test_owner_close_dispatches_developer_then_architect(tmp_path: Path) -> None:
     store = Store(tmp_path / "state.db")
-    sk = _seed(store, tmp_path)
+    sk = _seed(store, tmp_path, with_session_dir=True)
     _register_open(store, sk)
     _RecordingClient.calls = []
     _insert_close(
@@ -357,7 +362,7 @@ def test_owner_close_dispatches_developer_then_architect(tmp_path: Path) -> None
         assert event.get("kind") == "issues_closed"
     sess = store.get_session(sk)
     assert sess is not None
-    assert sess["state"] == "TEARDOWN"
+    assert sess["state"] == "CLOSED"
     assert sess["classification"] == "VERIFIED"
     runner = store.get_runner("huozhe/code-workflow")
     assert runner is not None
@@ -388,7 +393,7 @@ def test_teardown_never_calls_session_teardown_rpc(tmp_path: Path) -> None:
 
 def test_teardown_turns_do_not_trip_silent_or_budget(tmp_path: Path) -> None:
     store = Store(tmp_path / "state.db")
-    sk = _seed(store, tmp_path)
+    sk = _seed(store, tmp_path, with_session_dir=True)
     _register_open(store, sk)
     store.update_session_fields(sk, silent_turns=2, consec_agent_turns=6)
     _RecordingClient.calls = []
@@ -406,7 +411,7 @@ def test_teardown_turns_do_not_trip_silent_or_budget(tmp_path: Path) -> None:
         dl.RunnerClient = loop._orig_client  # type: ignore[attr-defined, misc]
     sess = store.get_session(sk)
     assert sess is not None
-    assert sess["state"] == "TEARDOWN"
+    assert sess["state"] == "CLOSED"
     assert sess["silent_turns"] == 2
     assert sess["consec_agent_turns"] == 6
     assert store.get_open_escalation(sk) is None
@@ -632,7 +637,7 @@ class _IntakeClobberSupervisor:
 
 def test_no_runner_ensure_session_still_sends_teardown_state(tmp_path: Path) -> None:
     store = Store(tmp_path / "state.db")
-    sk = _seed(store, tmp_path, with_runner=False)
+    sk = _seed(store, tmp_path, with_runner=False, with_session_dir=True)
     _register_open(store, sk)
     sup = _IntakeClobberSupervisor(store)
     _RecordingClient.calls = []
@@ -660,7 +665,7 @@ def test_no_runner_ensure_session_still_sends_teardown_state(tmp_path: Path) -> 
     assert states == ["TEARDOWN", "TEARDOWN"]
     sess = store.get_session(sk)
     assert sess is not None
-    assert sess["state"] == "TEARDOWN"
+    assert sess["state"] == "CLOSED"
     assert sess["classification"] == "VERIFIED"
     store.close()
 
@@ -736,7 +741,7 @@ class _NeedsHumanClient(_RecordingClient):
 
 def test_teardown_needs_human_does_not_pause(tmp_path: Path) -> None:
     store = Store(tmp_path / "state.db")
-    sk = _seed(store, tmp_path)
+    sk = _seed(store, tmp_path, with_session_dir=True)
     _register_open(store, sk)
     posts: list = []
     _NeedsHumanClient.calls = []
@@ -760,9 +765,10 @@ def test_teardown_needs_human_does_not_pause(tmp_path: Path) -> None:
         dl.RunnerClient = loop._orig_client  # type: ignore[attr-defined, misc]
     sess = store.get_session(sk)
     assert sess is not None
-    assert sess["state"] == "TEARDOWN"
+    # Ledger ref is gone, so archive proceeds. needs_human must not pause.
+    assert sess["state"] == "CLOSED"
     assert store.get_open_escalation(sk) is None
-    assert posts == []
+    assert all("needs a decision" not in (p.get("body") or "") for p in posts)
     store.close()
 
 

@@ -178,6 +178,9 @@ def test_owner_close_session_no_escalate_no_reopen(tmp_path: Path) -> None:
         created_at=1,
         updated_at=1,
     )
+    sess_dir = tmp_path / "projects" / "o__r" / "sessions" / "9"
+    sess_dir.mkdir(parents=True)
+    (sess_dir / "keep").write_text("x", encoding="utf-8")
     posts: list[dict] = []
     reopens: list[dict] = []
 
@@ -206,8 +209,8 @@ def test_owner_close_session_no_escalate_no_reopen(tmp_path: Path) -> None:
     assert reopens == []
     sess = store.get_session(sk)
     assert sess is not None
-    # Owner close is the teardown trigger (M5-2). No escalate / no reopen.
-    assert sess["state"] == "TEARDOWN"
+    # Owner close is the teardown trigger. Empty ledger → archive → CLOSED.
+    assert sess["state"] == "CLOSED"
     assert sess["classification"] == "ABANDONED"
     row = store._conn.execute(
         "SELECT status FROM deliveries WHERE delivery_id=?", ("d-owner-close",)

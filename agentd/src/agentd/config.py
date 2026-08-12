@@ -133,6 +133,14 @@ class Config:
             logins.add(gw)
         return logins
 
+    @property
+    def archive_days(self) -> int:
+        """retention.archive_days — default 30 (ADR-12). Reader is M6 GC."""
+        ret = self.raw.get("retention") or {}
+        if isinstance(ret, dict) and "archive_days" in ret:
+            return int(ret["archive_days"])
+        return 30
+
 
 def load_config(root: Path | None = None) -> Config:
     root = ensure_layout(root)
