@@ -55,6 +55,11 @@ _REVIEW_PART_EVENTS = frozenset(
     }
 )
 
+# §8.4 merge-auth transient retries (PR #54 B1): delivery_id → attempt count.
+# In-memory is enough — restart resets the counter (more retries, not less).
+_merge_auth_attempts: dict[str, int] = {}
+_MERGE_AUTH_MAX_ATTEMPTS = 5
+
 # Webhook kinds that are observed GitHub progress (P1) — reset silent_turns
 # even when the FSM string does not change (e.g. design_revised while already
 # DESIGN_REVIEW). Claims in public_actions never reset (PR #42 B1).
@@ -347,10 +352,10 @@ class DesignLoop:
         # §8.4 Feature merge auth (M4-2): Architect APPROVED is not enough —
         # required_checks + mergeable_state must pass before merge_authorized.
         # Gateway verifies only; Developer merges (opposite of §8.3).
+        # Reads use gateway credential (#29 NB1 / PR #54 NB).
         if kind == "feature_approved_unverified":
             pr_num = dig.get("pr") or sess.get("feature_pr")
             head = dig.get("head_sha")
-            from agentd.keychain import get_password
             from agentd.verify import verify_feature_merge
 
             check = verify_feature_merge(
@@ -358,22 +363,53 @@ class DesignLoop:
                 pr_number=int(pr_num or 0),
                 expected_approver_login=architect,
                 head_sha=str(head) if head else None,
-                token=get_password("claude-bot") or get_password("grok-bot"),
+                token=self._github_api_token(),
                 required_checks=self.config.required_checks(repo),
             )
             if not check.ok:
+                if check.transient:
+                    n = int(_merge_auth_attempts.get(delivery_id, 0)) + 1
+                    _merge_auth_attempts[delivery_id] = n
+                    if n < _MERGE_AUTH_MAX_ATTEMPTS:
+                        log.warning(
+                            "feature merge_auth deferred (transient) id=%s "
+                            "attempt=%s/%s: %s",
+                            delivery_id,
+                            n,
+                            _MERGE_AUTH_MAX_ATTEMPTS,
+                            check.reason,
+                        )
+                        # Leave status=deferred for next drain cycle.
+                        return
+                    _merge_auth_attempts.pop(delivery_id, None)
+                    log.warning(
+                        "feature merge_auth exhausted retries id=%s: %s",
+                        delivery_id,
+                        check.reason,
+                    )
+                    self._escalate(
+                        session_key,
+                        "system",
+                        f"feature merge authorization still not ready after "
+                        f"{n} attempts (was transient): {check.reason}",
+                    )
+                    self.store.set_delivery_status(delivery_id, "done")
+                    return
+                _merge_auth_attempts.pop(delivery_id, None)
                 log.warning(
-                    "feature merge_authorized blocked id=%s: %s",
+                    "feature merge_authorized blocked (permanent) id=%s: %s",
                     delivery_id,
                     check.reason,
                 )
                 self._escalate(
                     session_key,
                     "system",
-                    f"unverified feature merge authorization: {check.reason}",
+                    f"unverified feature merge authorization (permanent): "
+                    f"{check.reason}",
                 )
                 self.store.set_delivery_status(delivery_id, "done")
                 return
+            _merge_auth_attempts.pop(delivery_id, None)
             kind = "merge_authorized"
             dig["kind"] = kind
             dig["merge_auth"] = check.reason

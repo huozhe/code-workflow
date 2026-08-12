@@ -15,6 +15,9 @@ log = logging.getLogger("agentd.verify")
 class ApprovalCheck:
     ok: bool
     reason: str
+    # True → timing/compute artefact: leave deferred and retry (PR #54 B1).
+    # False → permanent fault: escalate now.
+    transient: bool = False
 
 
 def verify_design_approval(
@@ -79,6 +82,14 @@ def verify_feature_merge(
 
     Gateway verifies only — it does **not** merge (ADR-8). On success the
     design loop emits ``merge_authorized`` so the **Developer** acts.
+
+    Failures are classified (PR #54 B1 / #38 split):
+
+    - **transient** (``transient=True``): GitHub still computing mergeability
+      (``unknown`` / null), or ``blocked`` while checks are pending — caller
+      must leave the delivery deferred and retry.
+    - **permanent** (``transient=False``): wrong approver, stale head,
+      ``dirty``, or a required check that has concluded ``failure``.
     """
     if not token:
         return ApprovalCheck(False, "no token for GitHub API verification")
@@ -98,7 +109,10 @@ def verify_feature_merge(
             token=token,
         )
     except Exception as exc:  # noqa: BLE001
-        return ApprovalCheck(False, f"GitHub API error: {exc}")
+        # Network blip — retry rather than page the owner.
+        return ApprovalCheck(
+            False, f"GitHub API error (transient): {exc}", transient=True
+        )
 
     approval = _check_approver_on_head(
         reviews=reviews,
@@ -107,41 +121,108 @@ def verify_feature_merge(
         head_sha=head_sha,
     )
     if not approval.ok:
-        return approval
+        # Approver / stale-head faults are permanent.
+        return ApprovalCheck(False, approval.reason, transient=False)
 
-    # Prefer live head after approval resolved it
     live_head = str((pr.get("head") or {}).get("sha") or head_sha)
+    wanted = [str(c) for c in (required_checks or []) if str(c).strip()]
 
-    mergeable_state = str(pr.get("mergeable_state") or "").lower()
-    if mergeable_state != "clean":
+    checks_pending = False
+    checks_all_success = True
+    checks_reason = ""
+    if wanted:
+        try:
+            chk = _classify_required_checks(
+                get=get,
+                repo=repo,
+                head_sha=live_head,
+                token=token,
+                required_checks=wanted,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return ApprovalCheck(
+                False, f"GitHub API error (checks, transient): {exc}", transient=True
+            )
+        if chk.permanent_fail:
+            return ApprovalCheck(False, chk.reason, transient=False)
+        checks_pending = chk.pending
+        checks_all_success = chk.all_success
+        checks_reason = chk.reason
+        if not checks_all_success and not checks_pending:
+            return ApprovalCheck(False, chk.reason, transient=False)
+
+    # mergeable_state is async — unknown/null right after review is normal.
+    raw_ms = pr.get("mergeable_state")
+    mergeable_state = "" if raw_ms is None else str(raw_ms).lower()
+    if mergeable_state in ("", "unknown", "unstable"):
+        label = mergeable_state or "null"
         return ApprovalCheck(
             False,
-            f"mergeable_state is {mergeable_state!r}, want 'clean'",
+            f"mergeable_state still computing ({label!r}) — will retry",
+            transient=True,
+        )
+    if mergeable_state == "dirty":
+        return ApprovalCheck(
+            False,
+            "mergeable_state is 'dirty' (permanent: conflicts or unmergeable)",
+            transient=False,
+        )
+    if mergeable_state == "blocked":
+        if checks_pending or not wanted:
+            # Checks still running, or no named checks yet — not ready.
+            detail = checks_reason or "settling"
+            return ApprovalCheck(
+                False,
+                f"mergeable_state is 'blocked' ({detail}) — will retry",
+                transient=True,
+            )
+        if checks_all_success:
+            return ApprovalCheck(
+                False,
+                "mergeable_state is 'blocked' with required checks already success "
+                "(permanent: branch protection or review rule)",
+                transient=False,
+            )
+        return ApprovalCheck(
+            False,
+            "mergeable_state is 'blocked' — will retry",
+            transient=True,
+        )
+    if mergeable_state != "clean":
+        # behind / draft / other — not a compute race; treat as permanent.
+        return ApprovalCheck(
+            False,
+            f"mergeable_state is {mergeable_state!r}, want 'clean' (permanent)",
+            transient=False,
         )
 
-    wanted = [str(c) for c in (required_checks or []) if str(c).strip()]
-    if not wanted:
+    if wanted and checks_pending:
+        return ApprovalCheck(
+            False,
+            f"{checks_reason} — will retry",
+            transient=True,
+        )
+    if wanted and not checks_all_success:
+        return ApprovalCheck(False, checks_reason or "required_checks not all success")
+
+    if wanted:
         return ApprovalCheck(
             True,
-            "approved on current head; mergeable_state=clean; no required_checks configured",
+            "approved on current head; required_checks success; mergeable_state=clean",
         )
-
-    try:
-        status_ok, status_reason = _required_checks_success(
-            get=get,
-            repo=repo,
-            head_sha=live_head,
-            token=token,
-            required_checks=wanted,
-        )
-    except Exception as exc:  # noqa: BLE001
-        return ApprovalCheck(False, f"GitHub API error (checks): {exc}")
-    if not status_ok:
-        return ApprovalCheck(False, status_reason)
     return ApprovalCheck(
         True,
-        "approved on current head; required_checks success; mergeable_state=clean",
+        "approved on current head; mergeable_state=clean; no required_checks configured",
     )
+
+
+@dataclass(frozen=True)
+class _CheckClass:
+    all_success: bool
+    pending: bool
+    permanent_fail: bool
+    reason: str
+
 
 
 def _check_approver_on_head(
@@ -183,15 +264,41 @@ def _check_approver_on_head(
     return ApprovalCheck(True, "approved on current head by other role")
 
 
-def _required_checks_success(
+# Commit-status / check-run states that mean "still running" (retry).
+_PENDING_CHECK_STATES = frozenset(
+    {
+        "pending",
+        "queued",
+        "in_progress",
+        "waiting",
+        "requested",
+        "expected",
+    }
+)
+# Concluded non-success (escalate).
+_FAILED_CHECK_STATES = frozenset(
+    {
+        "failure",
+        "error",
+        "cancelled",
+        "timed_out",
+        "action_required",
+        "startup_failure",
+        "stale",
+        "neutral",  # not success for required gates
+    }
+)
+
+
+def _classify_required_checks(
     *,
     get: Callable[..., Any],
     repo: str,
     head_sha: str,
     token: str,
     required_checks: list[str],
-) -> tuple[bool, str]:
-    """Every configured check name must be success (check-run or status context)."""
+) -> _CheckClass:
+    """Classify required checks: all success / pending / permanent failure."""
     check_runs_payload = get(
         f"https://api.github.com/repos/{repo}/commits/{head_sha}/check-runs",
         token=token,
@@ -202,19 +309,24 @@ def _required_checks_success(
     )
 
     by_name: dict[str, str] = {}
-    runs = check_runs_payload.get("check_runs") if isinstance(check_runs_payload, dict) else None
+    runs = (
+        check_runs_payload.get("check_runs")
+        if isinstance(check_runs_payload, dict)
+        else None
+    )
     if isinstance(runs, list):
         for run in runs:
             name = str(run.get("name") or "")
             if not name:
                 continue
-            # conclusion is set when completed; treat pending as not success
             if str(run.get("status") or "") != "completed":
-                by_name[name] = str(run.get("status") or "pending")
+                by_name[name] = str(run.get("status") or "pending").lower()
             else:
                 by_name[name] = str(run.get("conclusion") or "").lower()
 
-    statuses = status_payload.get("statuses") if isinstance(status_payload, dict) else None
+    statuses = (
+        status_payload.get("statuses") if isinstance(status_payload, dict) else None
+    )
     if isinstance(statuses, list):
         for st in statuses:
             ctx = str(st.get("context") or "")
@@ -222,21 +334,45 @@ def _required_checks_success(
                 by_name[ctx] = str(st.get("state") or "").lower()
 
     missing: list[str] = []
+    pending: list[str] = []
     failed: list[str] = []
     for name in required_checks:
         state = by_name.get(name)
         if state is None:
             missing.append(name)
-        elif state != "success":
+        elif state == "success":
+            continue
+        elif state in _PENDING_CHECK_STATES:
+            pending.append(f"{name}={state}")
+        elif state in _FAILED_CHECK_STATES or state != "success":
             failed.append(f"{name}={state}")
-    if missing or failed:
+
+    if failed:
+        return _CheckClass(
+            all_success=False,
+            pending=False,
+            permanent_fail=True,
+            reason="required_checks not success: " + ", ".join(failed),
+        )
+    # Missing often means not reported yet → treat as pending (retry).
+    if missing or pending:
         parts = []
         if missing:
-            parts.append(f"missing: {', '.join(missing)}")
-        if failed:
-            parts.append(f"not success: {', '.join(failed)}")
-        return False, "required_checks " + "; ".join(parts)
-    return True, "required_checks all success"
+            parts.append("missing/not-yet-reported: " + ", ".join(missing))
+        if pending:
+            parts.append("pending: " + ", ".join(pending))
+        return _CheckClass(
+            all_success=False,
+            pending=True,
+            permanent_fail=False,
+            reason="required_checks still settling (" + "; ".join(parts) + ")",
+        )
+    return _CheckClass(
+        all_success=True,
+        pending=False,
+        permanent_fail=False,
+        reason="required_checks all success",
+    )
 
 
 def _gh_get(url: str, *, token: str) -> Any:

@@ -188,7 +188,7 @@ def test_architect_approve_emits_merge_authorized(tmp_path: Path) -> None:
     store.close()
 
 
-def test_blocked_checks_do_not_advance(tmp_path: Path) -> None:
+def test_failed_check_escalates_permanent(tmp_path: Path) -> None:
     store = Store(tmp_path / "state.db")
     cfg = _cfg(tmp_path)
     sk = _seed(store, state="CODE_REVIEW")
@@ -244,6 +244,7 @@ def test_blocked_checks_do_not_advance(tmp_path: Path) -> None:
             dispatch_turns=False,
             post_comment=lambda **k: posts.append(k.get("body", "")) or 1,
             gateway_token="gw",
+            github_token="gw-read",
         )
         _insert(
             store,
@@ -269,8 +270,245 @@ def test_blocked_checks_do_not_advance(tmp_path: Path) -> None:
 
     sess = store.get_session(sk)
     assert sess["state"] == "PAUSED_HUMAN"
-    assert "unverified feature merge" in str(sess.get("paused_reason") or "")
+    reason = str(sess.get("paused_reason") or "")
+    assert "permanent" in reason
     assert posts and "@huozhe" in posts[0]
+    store.close()
+
+
+def test_unknown_mergeable_leaves_deferred(tmp_path: Path) -> None:
+    """PR #54 B1: unknown mergeable_state must not pause/page the owner."""
+    import agentd.design_loop as dl
+
+    store = Store(tmp_path / "state.db")
+    cfg = _cfg(tmp_path, required_checks=[])
+    sk = _seed(store, state="CODE_REVIEW")
+    feat_ref = _feature_ref(100)
+    head = "abc123"
+    posts: list[str] = []
+    dl._merge_auth_attempts.clear()
+
+    def fake_get(url: str, *, token: str):  # noqa: ARG001
+        if url.endswith("/reviews"):
+            return [
+                {
+                    "user": {"login": "huozheclaude"},
+                    "state": "APPROVED",
+                    "commit_id": head,
+                }
+            ]
+        if "/pulls/60" in url:
+            return {
+                "number": 60,
+                "head": {"sha": head, "ref": feat_ref},
+                "mergeable_state": "unknown",
+            }
+        raise AssertionError(url)
+
+    import agentd.verify as vmod
+
+    real = vmod.verify_feature_merge
+
+    def patched(**kwargs):
+        kwargs = dict(kwargs)
+        kwargs["http_get"] = fake_get
+        kwargs["token"] = "tok"
+        return real(**kwargs)
+
+    vmod.verify_feature_merge = patched  # type: ignore[assignment]
+    try:
+        loop = DesignLoop(
+            store,
+            cfg,
+            supervisor=None,
+            dispatch_turns=False,
+            post_comment=lambda **k: posts.append(k.get("body", "")) or 1,
+            gateway_token="gw",
+            github_token="gw-read",
+        )
+        _insert(
+            store,
+            did="d-unknown",
+            event="pull_request_review",
+            action="submitted",
+            sender="huozheclaude",
+            issue=60,
+            payload={
+                "action": "submitted",
+                "review": {"id": 1, "state": "APPROVED", "commit_id": head},
+                "pull_request": {
+                    "number": 60,
+                    "head": {"sha": head, "ref": feat_ref},
+                },
+                "repository": {"full_name": "huozhe/code-workflow"},
+                "sender": {"login": "huozheclaude"},
+            },
+        )
+        loop.process_deferred_batch()
+    finally:
+        vmod.verify_feature_merge = real  # type: ignore[assignment]
+
+    sess = store.get_session(sk)
+    # Still CODE_REVIEW — no escalate
+    assert sess["state"] == "CODE_REVIEW"
+    assert not sess.get("paused_reason")
+    assert posts == []
+    # Delivery left deferred for retry
+    assert store.count_by_status().get("deferred", 0) == 1
+    assert store.count_by_status().get("done", 0) == 0
+    store.close()
+
+
+def test_transient_exhausted_retries_escalate(tmp_path: Path) -> None:
+    import agentd.design_loop as dl
+
+    store = Store(tmp_path / "state.db")
+    cfg = _cfg(tmp_path, required_checks=[])
+    sk = _seed(store, state="CODE_REVIEW")
+    feat_ref = _feature_ref(100)
+    head = "abc123"
+    posts: list[str] = []
+    dl._merge_auth_attempts.clear()
+
+    def fake_get(url: str, *, token: str):  # noqa: ARG001
+        if url.endswith("/reviews"):
+            return [
+                {
+                    "user": {"login": "huozheclaude"},
+                    "state": "APPROVED",
+                    "commit_id": head,
+                }
+            ]
+        if "/pulls/60" in url:
+            return {
+                "number": 60,
+                "head": {"sha": head, "ref": feat_ref},
+                "mergeable_state": "unknown",
+            }
+        raise AssertionError(url)
+
+    import agentd.verify as vmod
+
+    real = vmod.verify_feature_merge
+
+    def patched(**kwargs):
+        kwargs = dict(kwargs)
+        kwargs["http_get"] = fake_get
+        kwargs["token"] = "tok"
+        return real(**kwargs)
+
+    vmod.verify_feature_merge = patched  # type: ignore[assignment]
+    try:
+        loop = DesignLoop(
+            store,
+            cfg,
+            supervisor=None,
+            dispatch_turns=False,
+            post_comment=lambda **k: posts.append(k.get("body", "")) or 1,
+            gateway_token="gw",
+            github_token="gw-read",
+        )
+        _insert(
+            store,
+            did="d-exhaust",
+            event="pull_request_review",
+            action="submitted",
+            sender="huozheclaude",
+            issue=60,
+            payload={
+                "action": "submitted",
+                "review": {"id": 1, "state": "APPROVED", "commit_id": head},
+                "pull_request": {
+                    "number": 60,
+                    "head": {"sha": head, "ref": feat_ref},
+                },
+                "repository": {"full_name": "huozhe/code-workflow"},
+                "sender": {"login": "huozheclaude"},
+            },
+        )
+        for _ in range(dl._MERGE_AUTH_MAX_ATTEMPTS):
+            loop.process_deferred_batch()
+    finally:
+        vmod.verify_feature_merge = real  # type: ignore[assignment]
+
+    sess = store.get_session(sk)
+    assert sess["state"] == "PAUSED_HUMAN"
+    reason = str(sess.get("paused_reason") or "")
+    assert "was transient" in reason or "attempts" in reason
+    assert posts and "@huozhe" in posts[0]
+    store.close()
+
+
+def test_merge_auth_uses_gateway_token(tmp_path: Path) -> None:
+    """PR #54 NB: privileged verify reads use gateway credential, not agent PAT."""
+    store = Store(tmp_path / "state.db")
+    cfg = _cfg(tmp_path, required_checks=[])
+    _seed(store, state="CODE_REVIEW")
+    feat_ref = _feature_ref(100)
+    head = "abc123"
+    seen_token: list[str | None] = []
+
+    def fake_get(url: str, *, token: str):
+        seen_token.append(token)
+        if url.endswith("/reviews"):
+            return [
+                {
+                    "user": {"login": "huozheclaude"},
+                    "state": "APPROVED",
+                    "commit_id": head,
+                }
+            ]
+        if "/pulls/60" in url:
+            return {
+                "number": 60,
+                "head": {"sha": head, "ref": feat_ref},
+                "mergeable_state": "clean",
+            }
+        raise AssertionError(url)
+
+    import agentd.verify as vmod
+
+    real = vmod.verify_feature_merge
+
+    def patched(**kwargs):
+        seen_token.append(kwargs.get("token"))
+        kwargs = dict(kwargs)
+        kwargs["http_get"] = fake_get
+        return real(**kwargs)
+
+    vmod.verify_feature_merge = patched  # type: ignore[assignment]
+    try:
+        loop = DesignLoop(
+            store,
+            cfg,
+            supervisor=None,
+            dispatch_turns=False,
+            gateway_token="gw",
+            github_token="gateway-read-token",
+        )
+        _insert(
+            store,
+            did="d-tok",
+            event="pull_request_review",
+            action="submitted",
+            sender="huozheclaude",
+            issue=60,
+            payload={
+                "action": "submitted",
+                "review": {"id": 1, "state": "APPROVED", "commit_id": head},
+                "pull_request": {
+                    "number": 60,
+                    "head": {"sha": head, "ref": feat_ref},
+                },
+                "repository": {"full_name": "huozhe/code-workflow"},
+                "sender": {"login": "huozheclaude"},
+            },
+        )
+        loop.process_deferred_batch()
+    finally:
+        vmod.verify_feature_merge = real  # type: ignore[assignment]
+
+    assert "gateway-read-token" in seen_token
     store.close()
 
 
