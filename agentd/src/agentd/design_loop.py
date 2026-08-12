@@ -1321,7 +1321,13 @@ class DesignLoop:
         body: str,
         changes: dict[str, Any],
     ) -> None:
-        """Restore checkbox/block using changes.body.from (PR #65 B1/B2)."""
+        """Restore checkbox/block using changes.body.from (PR #65 B1/B2/B3).
+
+        Invariant (B3): the box must never leave an agent edit *more checked*
+        than it entered. ``now is True and was is not True`` covers no prior
+        block, no prior line, and an explicit unticked prior — none of those
+        is an owner tick.
+        """
         body_change = changes.get("body")
         prev: str | None = None
         if isinstance(body_change, dict):
@@ -1352,21 +1358,31 @@ class DesignLoop:
             # B2: whole block deleted — re-splice prior block; keep agent prose.
             restored = reinsert_verification_block(body, prev_block)
             reason = "verification block removed"
-        elif prev_block is None:
-            log.info(
-                "issues.edited by agent session=%s — no prior block in "
-                "changes.body.from; nothing to restore",
-                session_key,
+        elif now is True and was is not True:
+            # B3: agent supplied a tick the owner never had on the pre-image
+            # (no block / no line / explicit [ ]). Force unchecked.
+            if curr_block is None:
+                # Ticked block inserted as new content without surviving extract?
+                # Unreachable if now is True (checkbox lives inside sentinels).
+                log.warning(
+                    "issues.edited by agent session=%s — checked without "
+                    "sentinel block; cannot restore",
+                    session_key,
+                )
+                self.store.set_delivery_status(delivery_id, "done")
+                return
+            restored = set_checkbox_in_body(body, checked=False)
+            reason = (
+                "checkbox ticked without prior owner tick "
+                f"(was={was!r} → now=True)"
             )
-            self.store.set_delivery_status(delivery_id, "done")
-            return
-        elif was is not None and now is not None and now != was:
-            # Checkbox flipped by this edit — restore to pre-edit value.
-            restored = set_checkbox_in_body(body, checked=was)
-            reason = f"checkbox {was} → {now}"
-        elif was is not None and now is None:
+        elif was is True and now is False:
+            # Owner tick was present before this edit; agent unticked — restore up.
+            restored = set_checkbox_in_body(body, checked=True)
+            reason = "checkbox True → False"
+        elif was is True and now is None:
             # Line removed inside an otherwise-present block.
-            restored = set_checkbox_in_body(body, checked=was)
+            restored = set_checkbox_in_body(body, checked=True)
             reason = "checkbox line removed"
         else:
             log.info(
@@ -1383,6 +1399,7 @@ class DesignLoop:
             self.store.set_delivery_status(delivery_id, "done")
             return
 
+        patch_ok = False
         try:
             patch_fn = self._patch_issue_body or patch_issue_body
             patch_fn(
@@ -1391,8 +1408,14 @@ class DesignLoop:
                 body=restored,
                 token=self._gateway_github_token(),
             )
+            patch_ok = True
         except Exception as exc:  # noqa: BLE001
             log.error("checkbox restore failed session=%s: %s", session_key, exc)
+
+        # Only claim "restored" after a successful PATCH (PR #65 NB).
+        if not patch_ok:
+            self.store.set_delivery_status(delivery_id, "done")
+            return
 
         owner_tag = f"@{owner}" if owner else "the owner"
         restore_state = checkbox_is_checked(restored)

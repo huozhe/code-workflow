@@ -400,6 +400,128 @@ def test_agent_refines_steps_no_patch_when_checkbox_ok(tmp_path: Path) -> None:
     store.close()
 
 
+def test_agent_adds_preticked_block_where_none_existed(tmp_path: Path) -> None:
+    """B3 P3: agent inserts a whole pre-ticked block → force unchecked."""
+    store = Store(tmp_path / "state.db")
+    cfg = _cfg(tmp_path)
+    _seed(store, verified_at=None)
+    prev = "## Goal\n\nSession work. No block yet.\n"
+    body = _body(checked=True, steps=["agent wrote steps"])
+    patches: list[str] = []
+    comments: list[str] = []
+
+    def fake_patch(*, repo, issue_num, body, token):  # noqa: ANN001
+        patches.append(body)
+
+    def fake_comment(*, repo, issue_num, body, token):  # noqa: ANN001
+        comments.append(body)
+        return 1
+
+    loop = DesignLoop(
+        store,
+        cfg,
+        supervisor=None,
+        dispatch_turns=False,
+        gateway_token="gw",
+        patch_issue_body_fn=fake_patch,
+        post_comment=fake_comment,
+    )
+    _insert(
+        store,
+        "d-p3",
+        _edited_payload(
+            issue=58, sender="huozheclaude", body=body, body_from=prev
+        ),
+        issue=58,
+        sender="huozheclaude",
+    )
+    loop.process_deferred_batch()
+    assert len(patches) == 1
+    assert checkbox_is_checked(patches[0]) is False
+    assert "agent wrote steps" in patches[0]
+    assert len(comments) == 1
+    assert "without prior owner tick" in comments[0]
+    store.close()
+
+
+def test_agent_inserts_tick_into_block_without_line(tmp_path: Path) -> None:
+    """B3 P4: block had no checkbox line; agent adds - [x] → force unchecked."""
+    store = Store(tmp_path / "state.db")
+    cfg = _cfg(tmp_path)
+    _seed(store, verified_at=None)
+    # Prior block without the Human Verification line.
+    prev = (
+        "## Goal\n\n"
+        "<!-- agentd:verification v1 -->\n"
+        "## Verification Protocol\n\n"
+        "1. pull\n\n"
+        "**Merged PRs:** #59\n"
+        "<!-- /agentd:verification -->\n"
+    )
+    body = _body(checked=True, steps=["pull"])
+    patches: list[str] = []
+    comments: list = []
+
+    loop = DesignLoop(
+        store,
+        cfg,
+        supervisor=None,
+        dispatch_turns=False,
+        gateway_token="gw",
+        patch_issue_body_fn=lambda **kw: patches.append(kw["body"]),  # noqa: ARG005
+        post_comment=lambda **kw: comments.append(kw) or 1,  # noqa: ARG005
+    )
+    _insert(
+        store,
+        "d-p4",
+        _edited_payload(
+            issue=58, sender="huozheclaude", body=body, body_from=prev
+        ),
+        issue=58,
+        sender="huozheclaude",
+    )
+    loop.process_deferred_batch()
+    assert len(patches) == 1
+    assert checkbox_is_checked(patches[0]) is False
+    assert len(comments) == 1
+    store.close()
+
+
+def test_failed_patch_does_not_claim_restored(tmp_path: Path) -> None:
+    """NB: do not tell the owner we restored if PATCH failed."""
+    store = Store(tmp_path / "state.db")
+    cfg = _cfg(tmp_path)
+    _seed(store, verified_at=None)
+    prev = _body(checked=False)
+    body = _body(checked=True)
+    comments: list = []
+
+    def boom(**kw):  # noqa: ANN001, ARG001
+        raise RuntimeError("github down")
+
+    loop = DesignLoop(
+        store,
+        cfg,
+        supervisor=None,
+        dispatch_turns=False,
+        gateway_token="gw",
+        patch_issue_body_fn=boom,
+        post_comment=lambda **kw: comments.append(kw) or 1,  # noqa: ARG005
+    )
+    _insert(
+        store,
+        "d-patch-fail",
+        _edited_payload(
+            issue=58, sender="huozheclaude", body=body, body_from=prev
+        ),
+        issue=58,
+        sender="huozheclaude",
+    )
+    loop.process_deferred_batch()
+    assert comments == []
+    store.close()
+
+
 def test_missing_body_from_skips_restore(tmp_path: Path) -> None:
     store = Store(tmp_path / "state.db")
     cfg = _cfg(tmp_path)
