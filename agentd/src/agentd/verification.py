@@ -145,7 +145,7 @@ def checkbox_is_checked(block_or_body: str) -> bool | None:
 def set_checkbox_in_body(body: str, *, checked: bool) -> str:
     """Force the Human Verification line inside sentinels; no-op if block absent.
 
-    Used to restore the last gateway-verified checkbox after an agent edit (§10.2).
+    Used to restore the checkbox after an agent edit that changed it (§10.2).
     Steps / Not covered / prose outside sentinels are left alone.
     """
     body = body or ""
@@ -163,9 +163,31 @@ def set_checkbox_in_body(body: str, *, checked: bool) -> str:
             if ORDERING_LINE not in block
             else f"{line}\n{SENTINEL_CLOSE}",
         )
-    start = body.index(SENTINEL_OPEN)
-    end = body.index(SENTINEL_CLOSE) + len(SENTINEL_CLOSE)
-    return body[:start] + new_block + body[end:]
+    # replace(block, …) keeps the match that extract found — safer than
+    # independent .index() of OPEN/CLOSE (stray sentinels in prose).
+    return body.replace(block, new_block, 1)
+
+
+def reinsert_verification_block(body: str, block: str) -> str:
+    """Append a verification block when the body no longer has one.
+
+    Keeps agent prose outside the sentinels; used when an agent deletes the
+    whole §10.1 block (strictly worse than unticking — §10.3 would ABANDON).
+    """
+    body = body or ""
+    if not block or extract_verification_block(body) is not None:
+        return body
+    if body.strip():
+        if body.endswith("\n\n"):
+            sep = ""
+        elif body.endswith("\n"):
+            sep = "\n"
+        else:
+            sep = "\n\n"
+        out = body + sep + block
+    else:
+        out = block
+    return out if out.endswith("\n") else out + "\n"
 
 
 def default_steps_for_session(

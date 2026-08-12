@@ -13,6 +13,8 @@ from agentd.verification import (
     CHECKBOX_CHECKED,
     CHECKBOX_UNCHECKED,
     checkbox_is_checked,
+    extract_verification_block,
+    reinsert_verification_block,
     render_verification_block,
     set_checkbox_in_body,
 )
@@ -81,11 +83,16 @@ def _edited_payload(
     issue: int,
     sender: str,
     body: str,
+    body_from: str | None = "old",
     body_changed: bool = True,
 ) -> dict:
     changes: dict = {}
     if body_changed:
-        changes["body"] = {"from": "old"}
+        if body_from is None:
+            # Explicit missing from (malformed / truncated delivery).
+            changes["body"] = {}
+        else:
+            changes["body"] = {"from": body_from}
     return {
         "action": "edited",
         "issue": {
@@ -125,15 +132,37 @@ def test_set_checkbox_preserves_steps() -> None:
     assert "1. alpha" in back
 
 
+def test_set_checkbox_survives_stray_close_sentinel() -> None:
+    """replace(block) must not mangle when prose quotes a close sentinel."""
+    prose = "## Goal\n\nSee `<!-- /agentd:verification -->` in the spec.\n\n"
+    block = render_verification_block(steps=["a"], merged_prs=[1], checked=False)
+    body = prose + block + "\n"
+    out = set_checkbox_in_body(body, checked=True)
+    assert out.startswith("## Goal")
+    assert "See `<!-- /agentd:verification -->`" in out
+    assert checkbox_is_checked(out) is True
+    assert out.count(CHECKBOX_CHECKED) == 1
+
+
+def test_reinsert_verification_block() -> None:
+    block = render_verification_block(steps=["x"], merged_prs=[1], checked=True)
+    body = "## Goal\n\nOnly prose.\n"
+    out = reinsert_verification_block(body, block)
+    assert extract_verification_block(out) == block
+    assert "## Goal" in out
+    assert checkbox_is_checked(out) is True
+
+
 def test_owner_tick_records_verified_at(tmp_path: Path) -> None:
     store = Store(tmp_path / "state.db")
     cfg = _cfg(tmp_path)
     sk = _seed(store)
+    prev = _body(checked=False)
     body = _body(checked=True)
     _insert(
         store,
         "d-owner-tick",
-        _edited_payload(issue=58, sender="huozhe", body=body),
+        _edited_payload(issue=58, sender="huozhe", body=body, body_from=prev),
         issue=58,
         sender="huozhe",
     )
@@ -149,11 +178,12 @@ def test_owner_untick_clears_verified_at(tmp_path: Path) -> None:
     store = Store(tmp_path / "state.db")
     cfg = _cfg(tmp_path)
     sk = _seed(store, verified_at=int(time.time()) - 10)
+    prev = _body(checked=True)
     body = _body(checked=False)
     _insert(
         store,
         "d-owner-untick",
-        _edited_payload(issue=58, sender="huozhe", body=body),
+        _edited_payload(issue=58, sender="huozhe", body=body, body_from=prev),
         issue=58,
         sender="huozhe",
     )
@@ -163,9 +193,11 @@ def test_owner_untick_clears_verified_at(tmp_path: Path) -> None:
 
 
 def test_agent_tick_restores_and_warns(tmp_path: Path) -> None:
+    """Agent flips unchecked → checked; restore to pre-edit (was=False)."""
     store = Store(tmp_path / "state.db")
     cfg = _cfg(tmp_path)
     sk = _seed(store, verified_at=None)
+    prev = _body(checked=False)
     body = _body(checked=True)
     patches: list[dict] = []
     comments: list[dict] = []
@@ -189,7 +221,9 @@ def test_agent_tick_restores_and_warns(tmp_path: Path) -> None:
     _insert(
         store,
         "d-agent-tick",
-        _edited_payload(issue=58, sender="huozheclaude", body=body),
+        _edited_payload(
+            issue=58, sender="huozheclaude", body=body, body_from=prev
+        ),
         issue=58,
         sender="huozheclaude",
     )
@@ -197,17 +231,19 @@ def test_agent_tick_restores_and_warns(tmp_path: Path) -> None:
     assert store.get_session(sk)["verified_at"] is None
     assert len(patches) == 1
     assert checkbox_is_checked(patches[0]["body"]) is False
-    assert "1. pull" in patches[0]["body"]  # steps preserved
+    assert "1. pull" in patches[0]["body"]
     assert len(comments) == 1
     assert "restored" in comments[0]["body"].lower()
-    assert "§10.2" in comments[0]["body"] or "10.2" in comments[0]["body"]
+    assert "changes.body.from" in comments[0]["body"]
     store.close()
 
 
-def test_agent_untick_after_owner_restores_checked(tmp_path: Path) -> None:
+def test_agent_untick_restores_checked_from_prev(tmp_path: Path) -> None:
+    """Agent flips checked → unchecked; restore was=True even if verified_at set."""
     store = Store(tmp_path / "state.db")
     cfg = _cfg(tmp_path)
     sk = _seed(store, verified_at=int(time.time()))
+    prev = _body(checked=True)
     body = _body(checked=False)
     patches: list[str] = []
 
@@ -229,7 +265,9 @@ def test_agent_untick_after_owner_restores_checked(tmp_path: Path) -> None:
     _insert(
         store,
         "d-agent-untick",
-        _edited_payload(issue=58, sender="huozhegrok", body=body),
+        _edited_payload(
+            issue=58, sender="huozhegrok", body=body, body_from=prev
+        ),
         issue=58,
         sender="huozhegrok",
     )
@@ -240,10 +278,100 @@ def test_agent_untick_after_owner_restores_checked(tmp_path: Path) -> None:
     store.close()
 
 
+def test_lost_owner_tick_is_not_reverted_by_agent_step_refinement(
+    tmp_path: Path,
+) -> None:
+    """B1: gateway was down for owner tick; agent refines steps — keep tick.
+
+    verified_at is None (missed delivery) but body was already checked before
+    and after the agent edit. Restore must not use verified_at as authority.
+    """
+    store = Store(tmp_path / "state.db")
+    cfg = _cfg(tmp_path)
+    _seed(store, verified_at=None)
+
+    prev_body = _body(checked=True, steps=["pull", "test"])
+    new_body = _body(checked=True, steps=["pull", "test", "smoke the CLI"])
+
+    patches: list = []
+    comments: list = []
+    loop = DesignLoop(
+        store,
+        cfg,
+        supervisor=None,
+        dispatch_turns=False,
+        gateway_token="gw",
+        patch_issue_body_fn=lambda **kw: patches.append(kw),  # noqa: ARG005
+        post_comment=lambda **kw: comments.append(kw) or 1,  # noqa: ARG005
+    )
+    _insert(
+        store,
+        "d-lost-tick",
+        _edited_payload(
+            issue=58,
+            sender="huozheclaude",
+            body=new_body,
+            body_from=prev_body,
+        ),
+        issue=58,
+        sender="huozheclaude",
+    )
+    loop.process_deferred_batch()
+    assert patches == [], "gateway must not revert a tick it never recorded"
+    assert comments == []
+    store.close()
+
+
+def test_agent_deletes_block_restored_from_prev(tmp_path: Path) -> None:
+    """B2: deleting the whole block is restored from changes.body.from."""
+    store = Store(tmp_path / "state.db")
+    cfg = _cfg(tmp_path)
+    _seed(store, verified_at=int(time.time()))
+    prev = _body(checked=True, steps=["pull", "test"])
+    new_body = "## Goal\n\nSession work — block deleted by agent.\n"
+    patches: list[str] = []
+    comments: list[str] = []
+
+    def fake_patch(*, repo, issue_num, body, token):  # noqa: ANN001
+        patches.append(body)
+
+    def fake_comment(*, repo, issue_num, body, token):  # noqa: ANN001
+        comments.append(body)
+        return 1
+
+    loop = DesignLoop(
+        store,
+        cfg,
+        supervisor=None,
+        dispatch_turns=False,
+        gateway_token="gw",
+        patch_issue_body_fn=fake_patch,
+        post_comment=fake_comment,
+    )
+    _insert(
+        store,
+        "d-del-block",
+        _edited_payload(
+            issue=58, sender="huozheclaude", body=new_body, body_from=prev
+        ),
+        issue=58,
+        sender="huozheclaude",
+    )
+    loop.process_deferred_batch()
+    assert len(patches) == 1
+    assert extract_verification_block(patches[0]) is not None
+    assert checkbox_is_checked(patches[0]) is True
+    assert "Session work — block deleted by agent." in patches[0]
+    assert len(comments) == 1
+    assert "block" in comments[0].lower()
+    store.close()
+
+
 def test_agent_refines_steps_no_patch_when_checkbox_ok(tmp_path: Path) -> None:
     store = Store(tmp_path / "state.db")
     cfg = _cfg(tmp_path)
     _seed(store, verified_at=None)
+    prev = _body(checked=False, steps=["scaffold"])
     body = _body(checked=False, steps=["human-runnable step A"])
     patches: list = []
     comments: list = []
@@ -260,7 +388,9 @@ def test_agent_refines_steps_no_patch_when_checkbox_ok(tmp_path: Path) -> None:
     _insert(
         store,
         "d-agent-steps",
-        _edited_payload(issue=58, sender="huozheclaude", body=body),
+        _edited_payload(
+            issue=58, sender="huozheclaude", body=body, body_from=prev
+        ),
         issue=58,
         sender="huozheclaude",
     )
@@ -270,11 +400,39 @@ def test_agent_refines_steps_no_patch_when_checkbox_ok(tmp_path: Path) -> None:
     store.close()
 
 
+def test_missing_body_from_skips_restore(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.db")
+    cfg = _cfg(tmp_path)
+    _seed(store, verified_at=None)
+    body = _body(checked=True)
+    patches: list = []
+    loop = DesignLoop(
+        store,
+        cfg,
+        supervisor=None,
+        dispatch_turns=False,
+        gateway_token="gw",
+        patch_issue_body_fn=lambda **kw: patches.append(kw),  # noqa: ARG005
+    )
+    _insert(
+        store,
+        "d-no-from",
+        _edited_payload(
+            issue=58, sender="huozheclaude", body=body, body_from=None
+        ),
+        issue=58,
+        sender="huozheclaude",
+    )
+    loop.process_deferred_batch()
+    assert patches == []
+    store.close()
+
+
 def test_gateway_edit_ignored(tmp_path: Path) -> None:
     store = Store(tmp_path / "state.db")
     cfg = _cfg(tmp_path)
     sk = _seed(store)
-    body = _body(checked=True)  # would look like a tick if misclassified
+    body = _body(checked=True)
     patches: list = []
     loop = DesignLoop(
         store,
@@ -300,10 +458,9 @@ def test_gateway_edit_ignored(tmp_path: Path) -> None:
 def test_owner_who_is_agent_not_recorded(tmp_path: Path) -> None:
     """§10.2 second test: agent listed as owner must not stamp verified_at."""
     store = Store(tmp_path / "state.db")
-    # Misconfig: owner == grok agent login
     cfg = _cfg(tmp_path, owner="huozhegrok")
     sk = _seed(store)
-    # Session developer is also huozhegrok → is_agent
+    prev = _body(checked=False)
     body = _body(checked=True)
     patches: list = []
     comments: list = []
@@ -319,13 +476,14 @@ def test_owner_who_is_agent_not_recorded(tmp_path: Path) -> None:
     _insert(
         store,
         "d-owner-agent",
-        _edited_payload(issue=58, sender="huozhegrok", body=body),
+        _edited_payload(
+            issue=58, sender="huozhegrok", body=body, body_from=prev
+        ),
         issue=58,
         sender="huozhegrok",
     )
     loop.process_deferred_batch()
     assert store.get_session(sk)["verified_at"] is None
-    # Treated as agent tamper while AWAITING → restore unchecked + warn
     assert len(patches) == 1
     assert checkbox_is_checked(patches[0]) is False
     assert len(comments) == 1
@@ -340,7 +498,10 @@ def test_title_only_edit_noop(tmp_path: Path) -> None:
         store,
         "d-title",
         _edited_payload(
-            issue=58, sender="huozhe", body=_body(checked=True), body_changed=False
+            issue=58,
+            sender="huozhe",
+            body=_body(checked=True),
+            body_changed=False,
         ),
         issue=58,
         sender="huozhe",
@@ -354,6 +515,7 @@ def test_agent_edit_outside_awaiting_no_restore(tmp_path: Path) -> None:
     store = Store(tmp_path / "state.db")
     cfg = _cfg(tmp_path)
     sk = _seed(store, state="IMPLEMENTING", verified_at=None)
+    prev = _body(checked=False)
     body = _body(checked=True)
     patches: list = []
     loop = DesignLoop(
@@ -367,7 +529,9 @@ def test_agent_edit_outside_awaiting_no_restore(tmp_path: Path) -> None:
     _insert(
         store,
         "d-impl",
-        _edited_payload(issue=58, sender="huozheclaude", body=body),
+        _edited_payload(
+            issue=58, sender="huozheclaude", body=body, body_from=prev
+        ),
         issue=58,
         sender="huozheclaude",
     )

@@ -39,6 +39,7 @@ from agentd.verification import (
     checkbox_is_checked,
     default_steps_for_session,
     extract_verification_block,
+    reinsert_verification_block,
     set_checkbox_in_body,
     upsert_verification_block,
 )
@@ -1203,9 +1204,15 @@ class DesignLoop:
     ) -> None:
         """§10.2: record owner checkbox flip; restore agent tampering (M5-1).
 
-        Classification at issues.closed is separate (M5 teardown) and is never
-        revised by a late tick — this handler only updates the *record*
-        (``verified_at``) and body integrity while the session is live.
+        Classification at issues.closed (M5-2/3) must read the checkbox from the
+        **closed payload's issue.body** — GitHub is source of truth (P1).
+        ``verified_at`` is only an audit record of when this gateway observed a
+        valid owner tick; it is never the authority for restore or classification.
+
+        Agent restore compares checkbox state **across this edit** via
+        ``changes.body.from`` (PR #65 B1). Local ``verified_at`` is not used for
+        restore: a missed delivery while the daemon is down must not let a later
+        agent step-refine untick a real owner mark.
 
         Gateway body edits are ignored (#64 Architect note): the gateway is a
         bot but not an agent, and it authors the verification scaffold.
@@ -1242,88 +1249,27 @@ class DesignLoop:
 
         is_agent = sender_l in agent_ids
         is_owner = sender_l == owner_l and bool(owner_l)
-        want_checked = bool(sess.get("verified_at"))
         have_checked = checkbox_is_checked(body)
+        already_recorded = bool(sess.get("verified_at"))
 
-        # Agent body edit while AWAITING_VERIFICATION → restore checkbox line.
+        # Agent body edit while AWAITING_VERIFICATION → restore only if *this*
+        # edit changed the checkbox / removed the block (B1/B2).
         if is_agent and state == "AWAITING_VERIFICATION":
-            if extract_verification_block(body) is None:
-                log.warning(
-                    "issues.edited by agent session=%s — no verification block "
-                    "to restore",
-                    session_key,
-                )
-                self.store.set_delivery_status(delivery_id, "done")
-                return
-            restored = set_checkbox_in_body(body, checked=want_checked)
-            tampered = have_checked is not None and have_checked != want_checked
-            missing = have_checked is None
-            if restored != body and (tampered or missing):
-                try:
-                    patch_fn = self._patch_issue_body or patch_issue_body
-                    patch_fn(
-                        repo=repo,
-                        issue_num=int(issue_num),
-                        body=restored,
-                        token=self._gateway_github_token(),
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    log.error(
-                        "checkbox restore failed session=%s: %s", session_key, exc
-                    )
-                # Warning only when the checkbox itself was wrong/missing.
-                if tampered or missing:
-                    warn = (
-                        f"**agentd** restored the `Human Verification Complete` "
-                        f"checkbox after an agent body edit while "
-                        f"`AWAITING_VERIFICATION` (§10.2).\n\n"
-                        f"Sender: `{sender}`\n"
-                        f"Restored to: "
-                        f"`{'checked' if want_checked else 'unchecked'}` "
-                        f"(last gateway-verified record).\n\n"
-                        f"Only `@{owner}` may tick the box — and only when that "
-                        f"login is not also a configured agent identity."
-                    )
-                    try:
-                        if self._post_comment is not None:
-                            self._post_comment(
-                                repo=repo,
-                                issue_num=int(issue_num),
-                                body=warn,
-                                token=self._gateway_github_token(),
-                            )
-                        else:
-                            post_issue_comment(
-                                repo=repo,
-                                issue_num=int(issue_num),
-                                body=warn,
-                                token=self._gateway_github_token(),
-                            )
-                    except Exception as exc:  # noqa: BLE001
-                        log.error(
-                            "checkbox warning comment failed session=%s: %s",
-                            session_key,
-                            exc,
-                        )
-                log.info(
-                    "issues.edited agent restore session=%s tampered=%s "
-                    "want_checked=%s",
-                    session_key,
-                    tampered or missing,
-                    want_checked,
-                )
-            else:
-                log.info(
-                    "issues.edited by agent session=%s — checkbox already "
-                    "matches snapshot (steps refine OK)",
-                    session_key,
-                )
-            self.store.set_delivery_status(delivery_id, "done")
+            self._restore_agent_verification_edit(
+                session_key=session_key,
+                repo=repo,
+                issue_num=int(issue_num),
+                delivery_id=delivery_id,
+                sender=sender,
+                owner=owner,
+                body=body,
+                changes=changes,
+            )
             return
 
         # Record flip only: owner AND not an agent identity (§10.2).
         if is_owner and not is_agent:
-            if have_checked is True and not want_checked:
+            if have_checked is True and not already_recorded:
                 self.store.update_session_fields(
                     session_key, verified_at=int(time.time())
                 )
@@ -1332,7 +1278,7 @@ class DesignLoop:
                     session_key,
                     sender,
                 )
-            elif have_checked is False and want_checked:
+            elif have_checked is False and already_recorded:
                 self.store.update_session_fields(session_key, verified_at=None)
                 log.info(
                     "verification checkbox cleared session=%s sender=%s",
@@ -1361,6 +1307,138 @@ class DesignLoop:
                 sender,
             )
 
+        self.store.set_delivery_status(delivery_id, "done")
+
+    def _restore_agent_verification_edit(
+        self,
+        *,
+        session_key: str,
+        repo: str,
+        issue_num: int,
+        delivery_id: str,
+        sender: str,
+        owner: str,
+        body: str,
+        changes: dict[str, Any],
+    ) -> None:
+        """Restore checkbox/block using changes.body.from (PR #65 B1/B2)."""
+        body_change = changes.get("body")
+        prev: str | None = None
+        if isinstance(body_change, dict):
+            raw_from = body_change.get("from")
+            if isinstance(raw_from, str):
+                prev = raw_from
+
+        if prev is None:
+            # Missing before-image: do nothing. A missed restore costs one
+            # re-tick; a wrong restore can ABANDON a verified session (B1).
+            log.warning(
+                "issues.edited by agent session=%s — no changes.body.from; "
+                "skip restore (safe default)",
+                session_key,
+            )
+            self.store.set_delivery_status(delivery_id, "done")
+            return
+
+        was = checkbox_is_checked(prev)
+        now = checkbox_is_checked(body)
+        prev_block = extract_verification_block(prev)
+        curr_block = extract_verification_block(body)
+
+        restored: str | None = None
+        reason = ""
+
+        if prev_block is not None and curr_block is None:
+            # B2: whole block deleted — re-splice prior block; keep agent prose.
+            restored = reinsert_verification_block(body, prev_block)
+            reason = "verification block removed"
+        elif prev_block is None:
+            log.info(
+                "issues.edited by agent session=%s — no prior block in "
+                "changes.body.from; nothing to restore",
+                session_key,
+            )
+            self.store.set_delivery_status(delivery_id, "done")
+            return
+        elif was is not None and now is not None and now != was:
+            # Checkbox flipped by this edit — restore to pre-edit value.
+            restored = set_checkbox_in_body(body, checked=was)
+            reason = f"checkbox {was} → {now}"
+        elif was is not None and now is None:
+            # Line removed inside an otherwise-present block.
+            restored = set_checkbox_in_body(body, checked=was)
+            reason = "checkbox line removed"
+        else:
+            log.info(
+                "issues.edited by agent session=%s — checkbox unchanged across "
+                "edit (steps refine OK) was=%s now=%s",
+                session_key,
+                was,
+                now,
+            )
+            self.store.set_delivery_status(delivery_id, "done")
+            return
+
+        if restored is None or restored == body:
+            self.store.set_delivery_status(delivery_id, "done")
+            return
+
+        try:
+            patch_fn = self._patch_issue_body or patch_issue_body
+            patch_fn(
+                repo=repo,
+                issue_num=int(issue_num),
+                body=restored,
+                token=self._gateway_github_token(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.error("checkbox restore failed session=%s: %s", session_key, exc)
+
+        owner_tag = f"@{owner}" if owner else "the owner"
+        restore_state = checkbox_is_checked(restored)
+        state_label = (
+            "checked"
+            if restore_state is True
+            else ("unchecked" if restore_state is False else "block restored")
+        )
+        warn = (
+            f"**agentd** restored the §10.1 verification "
+            f"{'block' if 'block' in reason else 'checkbox'} after an agent "
+            f"body edit while `AWAITING_VERIFICATION` (§10.2).\n\n"
+            f"Sender: `{sender}`\n"
+            f"Reason: {reason}\n"
+            f"Restored to: `{state_label}` (pre-edit body via "
+            f"`changes.body.from` — not local `verified_at`).\n\n"
+            f"Only {owner_tag} may tick the box — and only when that "
+            f"login is not also a configured agent identity."
+        )
+        try:
+            if self._post_comment is not None:
+                self._post_comment(
+                    repo=repo,
+                    issue_num=int(issue_num),
+                    body=warn,
+                    token=self._gateway_github_token(),
+                )
+            else:
+                post_issue_comment(
+                    repo=repo,
+                    issue_num=int(issue_num),
+                    body=warn,
+                    token=self._gateway_github_token(),
+                )
+        except Exception as exc:  # noqa: BLE001
+            log.error(
+                "checkbox warning comment failed session=%s: %s",
+                session_key,
+                exc,
+            )
+        log.info(
+            "issues.edited agent restore session=%s reason=%s restored=%s",
+            session_key,
+            reason,
+            state_label,
+        )
         self.store.set_delivery_status(delivery_id, "done")
 
     def _handle_session_issue_closed(
