@@ -175,6 +175,21 @@ def worktree_add(
         return elapsed
 
 
+def local_branch_gone(clone: Path, branch: str) -> bool:
+    """True only after we listed the clone and the branch is absent.
+
+    A missing clone is *not* confirmation — do not mark the ledger.
+    """
+    if not branch:
+        return False
+    if not clone.exists():
+        return False
+    if not (clone / ".git").exists() and not (clone / "HEAD").exists():
+        return False
+    listed = _git(clone, "branch", "--list", branch, check=False)
+    return not bool((listed.stdout or "").strip())
+
+
 def _git(cwd: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", *args],

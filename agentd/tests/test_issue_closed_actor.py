@@ -206,8 +206,9 @@ def test_owner_close_session_no_escalate_no_reopen(tmp_path: Path) -> None:
     assert reopens == []
     sess = store.get_session(sk)
     assert sess is not None
-    # Owner close is legitimate — session not forced to PAUSED_HUMAN; M5 teardown later.
-    assert sess["state"] == "IMPLEMENTING"
+    # Owner close is the teardown trigger (M5-2). No escalate / no reopen.
+    assert sess["state"] == "TEARDOWN"
+    assert sess["classification"] == "ABANDONED"
     row = store._conn.execute(
         "SELECT status FROM deliveries WHERE delivery_id=?", ("d-owner-close",)
     ).fetchone()

@@ -6,6 +6,8 @@ from dataclasses import dataclass
 
 
 # Design half (M3) + code half (M4-1). TEARDOWN/CLOSED are M5.
+# VERIFIED/ABANDONED are close *classifications* (sessions.classification),
+# not FSM states.
 DESIGN_STATES = frozenset(
     {
         "INTAKE",
@@ -28,7 +30,10 @@ CODE_STATES = frozenset(
     }
 )
 
-SESSION_STATES = DESIGN_STATES | CODE_STATES
+# M5-2: terminal FSM states. Leave in TEARDOWN until M5-3 archives + flips.
+TERMINAL_STATES = frozenset({"TEARDOWN", "CLOSED"})
+
+SESSION_STATES = DESIGN_STATES | CODE_STATES | TERMINAL_STATES
 
 
 @dataclass(frozen=True)
@@ -49,6 +54,14 @@ def transition(state: str, event_kind: str) -> Transition | None:
     if k == "owner_reply" and s == "PAUSED_HUMAN":
         # design_loop restores sessions.resume_state; PLANNING is fallback only.
         return Transition("PLANNING", note="resume from pause (fallback PLANNING)")
+
+    # Owner close from any live state. Diagram draws AWAITING_VERIFICATION →
+    # TEARDOWN as the happy path; ABANDONED fixtures close from IMPLEMENTING
+    # (#47) or earlier. Already-terminal is a no-op (redelivery / re-close).
+    if k == "issues_closed":
+        if s in TERMINAL_STATES:
+            return None
+        return Transition("TEARDOWN", note="owner closed issue")
 
     table: dict[tuple[str, str], Transition] = {
         ("INTAKE", "session_created"): Transition("PLANNING", note="roles resolved"),
