@@ -152,14 +152,15 @@ _OBLIGATIONS: dict[tuple[str, str], str] = {
         "unless further work is requested."
     ),
     ("developer", "TEARDOWN"): (
-        "Remove this issue's git worktrees and local design/feature "
-        "branches, then git worktree prune. Report what you removed. "
-        "Do not touch Architect scratch, other issues, or the project container."
+        "Remove this issue's developer worktree and developer branch, then "
+        "git worktree prune. Report what you removed. Do not touch Architect "
+        "paths, other issues, or the project container."
     ),
     ("architect", "TEARDOWN"): (
-        "Delete this issue's scratch directory and the diffs, patch files, "
-        "and review bundles under it. Report what you removed. Do not touch "
-        "Developer worktrees or branches, other issues, or the project container."
+        "Remove this issue's architect worktree and architect branch, delete "
+        "the scratch directory, then git worktree prune. Report what you "
+        "removed. Do not touch Developer paths, other issues, or the "
+        "project container."
     ),
 }
 

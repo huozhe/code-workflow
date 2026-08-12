@@ -122,16 +122,23 @@ def test_code_half_role_state_matrix_complete() -> None:
 
 
 def test_teardown_role_state_matrix() -> None:
-    """M5-2: both roles have a TEARDOWN duty; stay inside own role paths."""
+    """#68: each role tears down its own worktree/branch; Architect also scratch."""
     for role in ("architect", "developer"):
         text = role_obligation(role, "TEARDOWN")
         assert text, f"silent: ({role}, TEARDOWN)"
-        assert "container" in text.lower() or "do not touch" in text.lower()
+        assert "prune" in text.lower()
+        assert "container" in text.lower()
     dev = role_obligation("developer", "TEARDOWN")
+    assert "developer" in dev.lower()
     assert "worktree" in dev.lower()
     assert "branch" in dev.lower()
+    assert "architect" in dev.lower()  # stay out of the other role
     arch = role_obligation("architect", "TEARDOWN")
+    assert "architect" in arch.lower()
+    assert "worktree" in arch.lower()
+    assert "branch" in arch.lower()
     assert "scratch" in arch.lower()
+    assert "developer" in arch.lower()
     assert role_obligation("architect", "CLOSED") == ""
     assert role_obligation("developer", "CLOSED") == ""
 
