@@ -10,6 +10,7 @@ from pathlib import Path
 from agentd.config import Config
 from agentd.db import Store
 from agentd.design_loop import DesignLoop
+from agentd.refusals import CapacityRefusal
 from agentd.fsm import SESSION_STATES, TERMINAL_STATES, transition
 from agentd.gitops import role_branch_name, shared_clone_path
 from agentd.verification import (
@@ -815,6 +816,9 @@ def test_failed_teardown_turn_leaves_delivery_deferred(tmp_path: Path) -> None:
     sk = _seed(store, tmp_path)
     _register_open(store, sk)
     _FailedClient.calls = []
+    import agentd.design_loop as dl
+
+    dl._teardown_attempts.clear()
     _insert_close(
         store,
         did="d-refused",
@@ -824,8 +828,6 @@ def test_failed_teardown_turn_leaves_delivery_deferred(tmp_path: Path) -> None:
     try:
         loop.process_deferred_batch()
     finally:
-        import agentd.design_loop as dl
-
         dl.RunnerClient = loop._orig_client  # type: ignore[attr-defined, misc]
     row = store._conn.execute(
         "SELECT status FROM deliveries WHERE delivery_id=?", ("d-refused",)
@@ -834,4 +836,91 @@ def test_failed_teardown_turn_leaves_delivery_deferred(tmp_path: Path) -> None:
     sess = store.get_session(sk)
     assert sess is not None
     assert sess["state"] == "TEARDOWN"
+    store.close()
+
+
+def test_failed_teardown_exhausts_and_escalates(tmp_path: Path) -> None:
+    """#69 B1/B2: 5 failed drains then done + escalate. No unbounded loop."""
+    store = Store(tmp_path / "state.db")
+    sk = _seed(store, tmp_path)
+    wt = tmp_path / "worktree"
+    wt.mkdir()
+    (wt / "keep").write_text("x", encoding="utf-8")
+    _register_open(store, sk, kind="worktree", ref=str(wt))
+    posts: list = []
+    _FailedClient.calls = []
+    import agentd.design_loop as dl
+
+    dl._teardown_attempts.clear()
+    _insert_close(
+        store,
+        did="d-exhaust",
+        payload=_closed_payload(body=_block(checked=True)),
+    )
+    loop = _loop(
+        store,
+        tmp_path,
+        dispatch=True,
+        client_factory=_FailedClient,
+        posts=posts,
+    )
+    try:
+        for _ in range(7):
+            loop.process_deferred_batch()
+    finally:
+        dl.RunnerClient = loop._orig_client  # type: ignore[attr-defined, misc]
+    row = store._conn.execute(
+        "SELECT status FROM deliveries WHERE delivery_id=?", ("d-exhaust",)
+    ).fetchone()
+    assert row["status"] == "done"
+    # 2 roles × 5 attempts, not more (idle_wait would otherwise spin forever)
+    assert len(_FailedClient.calls) == 10
+    sess = store.get_session(sk)
+    assert sess is not None
+    assert sess["state"] == "PAUSED_HUMAN"
+    assert store.get_open_escalation(sk) is not None
+    assert posts and "@huozhe" in posts[0]["body"]
+    assert "teardown" in posts[0]["body"].lower()
+    store.close()
+
+
+class _CapacitySupervisor:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def ensure_session(self, **k):  # noqa: ANN003
+        self.calls += 1
+        raise CapacityRefusal("hot slots full")
+
+
+def test_teardown_capacity_refusal_uses_same_retry_bound(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.db")
+    sk = _seed(store, tmp_path)
+    _register_open(store, sk, kind="worktree", ref=str(tmp_path / "wt"))
+    (tmp_path / "wt").mkdir()
+    (tmp_path / "wt" / "f").write_text("x", encoding="utf-8")
+    posts: list = []
+    import agentd.design_loop as dl
+
+    dl._teardown_attempts.clear()
+    _insert_close(
+        store,
+        did="d-cap",
+        payload=_closed_payload(body=_block(checked=True)),
+    )
+    loop = _loop(
+        store,
+        tmp_path,
+        dispatch=True,
+        supervisor=_CapacitySupervisor(),
+        posts=posts,
+    )
+    for _ in range(7):
+        loop.process_deferred_batch()
+    row = store._conn.execute(
+        "SELECT status FROM deliveries WHERE delivery_id=?", ("d-cap",)
+    ).fetchone()
+    assert row["status"] == "done"
+    assert store.get_session(sk)["state"] == "PAUSED_HUMAN"
+    assert posts and "capacity" in posts[0]["body"].lower()
     store.close()
