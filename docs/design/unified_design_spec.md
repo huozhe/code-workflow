@@ -700,7 +700,9 @@ Agents receive a compact rendered digest — event kind, actor, human-readable d
 
 ### 10.1 The Managed Block (FR-3.1)
 
-Before the final merge, the Architect writes a sentinel-delimited block into the **issue body**:
+On `feature_merged → AWAITING_VERIFICATION`, the **gateway** upserts a sentinel-delimited verification block into the **issue body**. The Architect does not own the first write: if only an agent turn wrote the block, a failed turn would leave every subsequent close classified `ABANDONED` (§10.3) for want of a checkbox that never existed. That is the same reliability reason escalation comments and non-owner reopen are gateway writes.
+
+The gateway writes a scaffold (merged PR numbers from the session row, placeholder steps, unchecked box, ordering line). On the post-merge turn the **Architect** may refine **steps** and **Not covered** between the sentinels; it must not remove the checkbox or the ordering line.
 
 ```markdown
 <!-- agentd:verification v1 -->
@@ -720,7 +722,7 @@ Before the final merge, the Architect writes a sentinel-delimited block into the
 <!-- /agentd:verification -->
 ```
 
-Sentinels exist so agents can rewrite the block idempotently across multiple PRs without touching the human's prose. `agentd` parses only between sentinels; a stray checkbox elsewhere in the body is ignored.
+Sentinels exist so the **gateway and agents** can rewrite the block idempotently (across redelivery and across multiple PRs) without touching the human's prose. `agentd` parses only between sentinels; a stray checkbox elsewhere in the body is ignored. Gateway upsert preserves an already-checked box unless an explicit override is passed.
 
 **The ordering line is part of the block, not decoration.** Ticking and closing are two separate human acts, and the natural order — close the issue, tick later — silently produces the wrong terminal classification, because `issues.closed` is evaluated against the checkbox state *at that moment* (§10.3). The block therefore states the required order where the human is already reading. Found by hand-running this block against M2 (#10), which closed unticked and so recorded as `ABANDONED`.
 
