@@ -12,7 +12,16 @@ class BudgetState:
     consec_agent_turns: int = 0
     review_rounds: int = 0
     max_turns: int = 40
-    max_consec_agent: int = 12
+    # 12 was set before any loop had run end to end. M4-4 (#58) showed a full
+    # design+code loop — issue open → Design PR → review → merge → Feature PR →
+    # one CODE_REWORK round → merge — is ~13 turns with review coalescing (#49),
+    # and every one of them is an agent turn: nothing resets consec until a human
+    # speaks. So 12 tripped on the *successful* path and the run only completed
+    # because the budget was raised by hand. 30 gives roughly 2x headroom over an
+    # observed clean loop, which still stops a genuine runaway long before it is
+    # expensive. Raised on evidence, not preference: if a real loop exceeds 30,
+    # raise it again with that run's numbers rather than guessing higher now.
+    max_consec_agent: int = 30
     max_review_rounds: int = 8
 
     def after_agent_turn(self) -> None:
