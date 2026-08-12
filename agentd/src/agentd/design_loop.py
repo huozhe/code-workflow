@@ -10,6 +10,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from agentd.archive import archive_and_purge, format_completion_summary
 from agentd.config import Config
 from agentd.db import Store, decompress_payload
 from agentd.digest import build_digest, digest_to_markdown
@@ -1591,9 +1592,8 @@ class DesignLoop:
         delivery_id: str,
         data: dict[str, Any],
     ) -> None:
-        """M5-2: classify at close, TEARDOWN, Developer then Architect turns.
+        """M5-2 + M5-3: classify, teardown turns, archive, purge, CLOSED.
 
-        Leaves the session in TEARDOWN. Archive + CLOSED flip is M5-3.
         Never stops the project container (§10.3 / #20).
         """
         state = str(sess.get("state") or "")
@@ -1647,7 +1647,86 @@ class DesignLoop:
             if deferred:
                 return
 
+        if self.store.list_artifacts(session_key, open_only=True):
+            self._log_teardown_leaks(session_key)
+            self.store.set_delivery_status(delivery_id, "done")
+            return
+
+        try:
+            self._archive_and_close(
+                session_key=session_key,
+                sess=sess,
+                repo=repo,
+                issue_num=int(issue_num),
+                classification=classification,
+            )
+        except Exception:  # noqa: BLE001
+            log.exception(
+                "archive failed session=%s — leave deferred for retry",
+                session_key,
+            )
+            return
         self.store.set_delivery_status(delivery_id, "done")
+
+    def _archive_and_close(
+        self,
+        *,
+        session_key: str,
+        sess: dict[str, Any],
+        repo: str,
+        issue_num: int,
+        classification: str,
+    ) -> None:
+        """§10.5 step 3: archive, purge, then CLOSED. Summary only for VERIFIED."""
+        fresh = self.store.get_session(session_key) or sess
+        dest = archive_and_purge(
+            root=self.config.root,
+            repo=repo,
+            issue_num=int(issue_num),
+            session_key=session_key,
+            project_key=str(fresh.get("project_key") or project_key_from_repo(repo)),
+            terminal_state=classification,
+            design_pr=fresh.get("design_pr"),
+            feature_pr=fresh.get("feature_pr"),
+            turn_count=int(fresh.get("turn_count") or 0),
+        )
+        self.store.update_session_fields(session_key, state="CLOSED")
+        log.info(
+            "session CLOSED session=%s class=%s archive=%s",
+            session_key,
+            classification,
+            dest,
+        )
+        if classification != "VERIFIED":
+            return
+        body = format_completion_summary(
+            session_key=session_key,
+            classification=classification,
+            design_pr=fresh.get("design_pr"),
+            feature_pr=fresh.get("feature_pr"),
+            turn_count=int(fresh.get("turn_count") or 0),
+        )
+        try:
+            if self._post_comment is not None:
+                self._post_comment(
+                    repo=repo,
+                    issue_num=int(issue_num),
+                    body=body,
+                    token=self._gateway_github_token(),
+                )
+            else:
+                post_issue_comment(
+                    repo=repo,
+                    issue_num=int(issue_num),
+                    body=body,
+                    token=self._gateway_github_token(),
+                )
+        except Exception as exc:  # noqa: BLE001
+            log.exception(
+                "completion summary failed session=%s: %s — already CLOSED",
+                session_key,
+                exc,
+            )
 
     def _run_teardown_turns(
         self,

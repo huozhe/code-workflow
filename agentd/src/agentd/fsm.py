@@ -30,7 +30,7 @@ CODE_STATES = frozenset(
     }
 )
 
-# M5-2: terminal FSM states. Leave in TEARDOWN until M5-3 archives + flips.
+# M5-2/3: TEARDOWN after close; CLOSED after archive + purge.
 TERMINAL_STATES = frozenset({"TEARDOWN", "CLOSED"})
 
 SESSION_STATES = DESIGN_STATES | CODE_STATES | TERMINAL_STATES

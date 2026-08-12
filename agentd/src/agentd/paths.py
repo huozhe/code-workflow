@@ -63,4 +63,7 @@ agents:
     login: huozhegrok
     credential: keychain://agentd/grok-bot
     # Option D: durable HOME under projects/<owner>__<repo>/home/<role>/
+
+retention:
+  archive_days: 30          # §10.5 / §12.3 / ADR-12 — reader is M6 GC
 """

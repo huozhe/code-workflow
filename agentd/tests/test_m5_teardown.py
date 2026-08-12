@@ -227,7 +227,7 @@ def test_owner_close_ticked_is_verified_teardown(tmp_path: Path) -> None:
     _loop(store, tmp_path).process_deferred_batch()
     sess = store.get_session(sk)
     assert sess is not None
-    assert sess["state"] == "TEARDOWN"
+    assert sess["state"] == "CLOSED"
     assert sess["classification"] == "VERIFIED"
     store.close()
 
@@ -243,7 +243,7 @@ def test_owner_close_unticked_is_abandoned(tmp_path: Path) -> None:
     _loop(store, tmp_path).process_deferred_batch()
     sess = store.get_session(sk)
     assert sess is not None
-    assert sess["state"] == "TEARDOWN"
+    assert sess["state"] == "CLOSED"
     assert sess["classification"] == "ABANDONED"
     store.close()
 
@@ -285,7 +285,7 @@ def test_classification_never_revised_after_close(tmp_path: Path) -> None:
     sess = store.get_session(sk)
     assert sess is not None
     assert sess["classification"] == "ABANDONED"
-    assert sess["state"] == "TEARDOWN"
+    assert sess["state"] == "CLOSED"
     store.close()
 
 
@@ -357,7 +357,7 @@ def test_owner_close_dispatches_developer_then_architect(tmp_path: Path) -> None
         assert event.get("kind") == "issues_closed"
     sess = store.get_session(sk)
     assert sess is not None
-    assert sess["state"] == "TEARDOWN"
+    assert sess["state"] == "CLOSED"
     assert sess["classification"] == "VERIFIED"
     runner = store.get_runner("huozhe/code-workflow")
     assert runner is not None
@@ -406,7 +406,7 @@ def test_teardown_turns_do_not_trip_silent_or_budget(tmp_path: Path) -> None:
         dl.RunnerClient = loop._orig_client  # type: ignore[attr-defined, misc]
     sess = store.get_session(sk)
     assert sess is not None
-    assert sess["state"] == "TEARDOWN"
+    assert sess["state"] == "CLOSED"
     assert sess["silent_turns"] == 2
     assert sess["consec_agent_turns"] == 6
     assert store.get_open_escalation(sk) is None
@@ -660,7 +660,7 @@ def test_no_runner_ensure_session_still_sends_teardown_state(tmp_path: Path) -> 
     assert states == ["TEARDOWN", "TEARDOWN"]
     sess = store.get_session(sk)
     assert sess is not None
-    assert sess["state"] == "TEARDOWN"
+    assert sess["state"] == "CLOSED"
     assert sess["classification"] == "VERIFIED"
     store.close()
 
@@ -760,9 +760,10 @@ def test_teardown_needs_human_does_not_pause(tmp_path: Path) -> None:
         dl.RunnerClient = loop._orig_client  # type: ignore[attr-defined, misc]
     sess = store.get_session(sk)
     assert sess is not None
-    assert sess["state"] == "TEARDOWN"
+    # Ledger ref is gone, so archive proceeds. needs_human must not pause.
+    assert sess["state"] == "CLOSED"
     assert store.get_open_escalation(sk) is None
-    assert posts == []
+    assert all("needs a decision" not in (p.get("body") or "") for p in posts)
     store.close()
 
 
