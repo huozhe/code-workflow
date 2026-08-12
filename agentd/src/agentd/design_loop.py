@@ -39,6 +39,7 @@ from agentd.verification import (
     checkbox_is_checked,
     default_steps_for_session,
     extract_verification_block,
+    neutralize_bare_verification_ticks,
     reinsert_verification_block,
     set_checkbox_in_body,
     upsert_verification_block,
@@ -1249,7 +1250,8 @@ class DesignLoop:
 
         is_agent = sender_l in agent_ids
         is_owner = sender_l == owner_l and bool(owner_l)
-        have_checked = checkbox_is_checked(body)
+        # Audit record only from in-sentinel line (same rule as M5-2 classification).
+        have_checked = checkbox_is_checked(body, strict=True)
         already_recorded = bool(sess.get("verified_at"))
 
         # Agent body edit while AWAITING_VERIFICATION → restore only if *this*
@@ -1346,10 +1348,15 @@ class DesignLoop:
             self.store.set_delivery_status(delivery_id, "done")
             return
 
-        was = checkbox_is_checked(prev)
-        now = checkbox_is_checked(body)
+        # In-block reads for restore authority (strict). Bare ticks are B5.
+        was = checkbox_is_checked(prev, strict=True)
+        now = checkbox_is_checked(body, strict=True)
         prev_block = extract_verification_block(prev)
         curr_block = extract_verification_block(body)
+        bare_tick = (
+            curr_block is None
+            and checkbox_is_checked(body, strict=False) is True
+        )
 
         restored: str | None = None
         reason = ""
@@ -1359,31 +1366,25 @@ class DesignLoop:
             restored = reinsert_verification_block(body, prev_block)
             reason = "verification block removed"
         elif now is True and was is not True:
-            # B3: agent supplied a tick the owner never had on the pre-image
-            # (no block / no line / explicit [ ]). Force unchecked.
-            if curr_block is None:
-                # Ticked block inserted as new content without surviving extract?
-                # Unreachable if now is True (checkbox lives inside sentinels).
-                log.warning(
-                    "issues.edited by agent session=%s — checked without "
-                    "sentinel block; cannot restore",
-                    session_key,
-                )
-                self.store.set_delivery_status(delivery_id, "done")
-                return
+            # B3: agent supplied an in-block tick the owner never had.
             restored = set_checkbox_in_body(body, checked=False)
             reason = (
                 "checkbox ticked without prior owner tick "
                 f"(was={was!r} → now=True)"
             )
+        elif bare_tick:
+            # B5: bare ``- [x] Human Verification Complete`` outside sentinels.
+            restored = neutralize_bare_verification_ticks(body)
+            reason = "bare checkbox outside sentinels (no protocol block)"
         elif was is True and now is False:
             # Owner tick was present before this edit; agent unticked — restore up.
             restored = set_checkbox_in_body(body, checked=True)
             reason = "checkbox True → False"
-        elif was is True and now is None:
-            # Line removed inside an otherwise-present block.
-            restored = set_checkbox_in_body(body, checked=True)
-            reason = "checkbox line removed"
+        elif was is not None and now is None:
+            # B4: line removed (ticked or unticked) — restore pre-edit state.
+            # Restoring False cannot violate B3 (not more checked than was).
+            restored = set_checkbox_in_body(body, checked=was)
+            reason = f"checkbox line removed (was={was})"
         else:
             log.info(
                 "issues.edited by agent session=%s — checkbox unchanged across "
@@ -1418,7 +1419,10 @@ class DesignLoop:
             return
 
         owner_tag = f"@{owner}" if owner else "the owner"
-        restore_state = checkbox_is_checked(restored)
+        # Prefer strict read for the claim; bare neutralize reports unchecked.
+        restore_state = checkbox_is_checked(restored, strict=True)
+        if restore_state is None and "bare" in reason:
+            restore_state = checkbox_is_checked(restored, strict=False)
         state_label = (
             "checked"
             if restore_state is True

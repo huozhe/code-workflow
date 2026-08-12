@@ -14,6 +14,7 @@ from agentd.verification import (
     CHECKBOX_UNCHECKED,
     checkbox_is_checked,
     extract_verification_block,
+    neutralize_bare_verification_ticks,
     reinsert_verification_block,
     render_verification_block,
     set_checkbox_in_body,
@@ -485,6 +486,104 @@ def test_agent_inserts_tick_into_block_without_line(tmp_path: Path) -> None:
     assert checkbox_is_checked(patches[0]) is False
     assert len(comments) == 1
     store.close()
+
+
+def test_agent_removes_unticked_line_restored(tmp_path: Path) -> None:
+    """B4: agent deletes the unticked checkbox line — restore [ ]."""
+    store = Store(tmp_path / "state.db")
+    cfg = _cfg(tmp_path)
+    _seed(store, verified_at=None)
+    prev = _body(checked=False, steps=["pull", "test"])
+    # Block still present but no Human Verification line.
+    body = (
+        "## Goal\n\nSession work.\n\n"
+        "<!-- agentd:verification v1 -->\n"
+        "## Verification Protocol\n\n"
+        "1. pull\n"
+        "2. test\n"
+        "3. smoke the CLI\n\n"
+        "**Merged PRs:** #59, #60\n"
+        "**Not covered:** _(none)_\n\n"
+        "*Tick this box before closing…*\n"
+        "<!-- /agentd:verification -->\n"
+    )
+    patches: list[str] = []
+    comments: list[str] = []
+
+    loop = DesignLoop(
+        store,
+        cfg,
+        supervisor=None,
+        dispatch_turns=False,
+        gateway_token="gw",
+        patch_issue_body_fn=lambda **kw: patches.append(kw["body"]),  # noqa: ARG005
+        post_comment=lambda **kw: comments.append(kw["body"]) or 1,  # noqa: ARG005
+    )
+    _insert(
+        store,
+        "d-b4",
+        _edited_payload(
+            issue=58, sender="huozheclaude", body=body, body_from=prev
+        ),
+        issue=58,
+        sender="huozheclaude",
+    )
+    loop.process_deferred_batch()
+    assert len(patches) == 1
+    assert checkbox_is_checked(patches[0], strict=True) is False
+    assert CHECKBOX_UNCHECKED in patches[0]
+    assert "smoke the CLI" in patches[0]
+    assert len(comments) == 1
+    store.close()
+
+
+def test_agent_bare_tick_outside_sentinels_neutralized(tmp_path: Path) -> None:
+    """B5: bare - [x] with no protocol block → uncheck and warn."""
+    store = Store(tmp_path / "state.db")
+    cfg = _cfg(tmp_path)
+    _seed(store, verified_at=None)
+    prev = "## Goal\n\nNo block yet.\n"
+    body = (
+        "## Goal\n\nNo block yet.\n\n"
+        "- [x] Human Verification Complete\n"
+    )
+    patches: list[str] = []
+    comments: list[str] = []
+
+    loop = DesignLoop(
+        store,
+        cfg,
+        supervisor=None,
+        dispatch_turns=False,
+        gateway_token="gw",
+        patch_issue_body_fn=lambda **kw: patches.append(kw["body"]),  # noqa: ARG005
+        post_comment=lambda **kw: comments.append(kw["body"]) or 1,  # noqa: ARG005
+    )
+    _insert(
+        store,
+        "d-b5",
+        _edited_payload(
+            issue=58, sender="huozheclaude", body=body, body_from=prev
+        ),
+        issue=58,
+        sender="huozheclaude",
+    )
+    loop.process_deferred_batch()
+    assert len(patches) == 1
+    assert checkbox_is_checked(patches[0], strict=True) is None
+    assert checkbox_is_checked(patches[0], strict=False) is False
+    assert CHECKBOX_UNCHECKED in patches[0]
+    assert CHECKBOX_CHECKED not in patches[0]
+    assert len(comments) == 1
+    assert "bare" in comments[0].lower() or "outside" in comments[0].lower()
+    store.close()
+
+
+def test_checkbox_strict_ignores_bare_tick() -> None:
+    body = "## Goal\n\n- [x] Human Verification Complete\n"
+    assert checkbox_is_checked(body, strict=True) is None
+    assert checkbox_is_checked(body, strict=False) is True
+    assert checkbox_is_checked(_body(checked=True), strict=True) is True
 
 
 def test_failed_patch_does_not_claim_restored(tmp_path: Path) -> None:
