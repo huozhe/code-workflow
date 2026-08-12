@@ -55,14 +55,20 @@ def write_manifest(session_dir: Path, manifest: dict[str, Any]) -> Path:
 
 
 def write_tarball(session_dir: Path, dest: Path) -> Path:
-    """Write dest.tmp, fsync, rename. Never leave a partial final name."""
+    """Write dest.tmp, fsync the write handle, rename, fsync the parent dir."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_name(dest.name + ".tmp")
-    with tarfile.open(tmp, "w:gz") as tf:
-        tf.add(session_dir, arcname=session_dir.name)
-    with open(tmp, "rb") as fh:
+    with open(tmp, "wb") as fh:
+        with tarfile.open(fileobj=fh, mode="w:gz") as tf:
+            tf.add(session_dir, arcname=session_dir.name)
+        fh.flush()
         os.fsync(fh.fileno())
     os.replace(tmp, dest)
+    dirfd = os.open(dest.parent, os.O_RDONLY)
+    try:
+        os.fsync(dirfd)
+    finally:
+        os.close(dirfd)
     return dest
 
 
@@ -118,6 +124,7 @@ def format_completion_summary(
     design_pr: int | None = None,
     feature_pr: int | None = None,
     turn_count: int = 0,
+    archive_rel: str | None = None,
 ) -> str:
     """§10.3: VERIFIED close gets a completion summary; ABANDONED does not."""
     parts = [f"Session `{session_key}` closed as **{classification}**."]
@@ -126,4 +133,6 @@ def format_completion_summary(
     if feature_pr:
         parts.append(f"Feature PR: #{int(feature_pr)}.")
     parts.append(f"Turns: {int(turn_count)}.")
+    if archive_rel:
+        parts.append(f"Archive: `{archive_rel}`.")
     return " ".join(parts)

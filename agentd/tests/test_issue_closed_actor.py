@@ -178,6 +178,9 @@ def test_owner_close_session_no_escalate_no_reopen(tmp_path: Path) -> None:
         created_at=1,
         updated_at=1,
     )
+    sess_dir = tmp_path / "projects" / "o__r" / "sessions" / "9"
+    sess_dir.mkdir(parents=True)
+    (sess_dir / "keep").write_text("x", encoding="utf-8")
     posts: list[dict] = []
     reopens: list[dict] = []
 

@@ -268,6 +268,7 @@ def test_verified_posts_completion_summary(tmp_path: Path) -> None:
     body = posts[0]["body"]
     assert sk in body
     assert "VERIFIED" in body
+    assert "archive/huozhe__code-workflow/58.tar.gz" in body
     store.close()
 
 
@@ -333,3 +334,89 @@ def test_open_ledger_does_not_archive(tmp_path: Path) -> None:
     dest = archive_tarball_path(tmp_path, "huozhe/code-workflow", 58)
     assert not dest.exists()
     store.close()
+
+
+def test_no_dir_no_tarball_does_not_close(tmp_path: Path) -> None:
+    """B1: never CLOSED with neither tarball nor live directory."""
+    store = Store(tmp_path / "state.db")
+    sk = _seed(store, state="TEARDOWN", classification="ABANDONED")
+    import agentd.design_loop as dl
+
+    dl._teardown_attempts.clear()
+    _insert_close(
+        store,
+        did="d-nodir",
+        payload=_closed_payload(body=_block(checked=False)),
+    )
+    _loop(store, tmp_path).process_deferred_batch()
+    sess = store.get_session(sk)
+    assert sess is not None
+    assert sess["state"] == "TEARDOWN"
+    dest = archive_tarball_path(tmp_path, "huozhe/code-workflow", 58)
+    assert not dest.exists()
+    row = store._conn.execute(
+        "SELECT status FROM deliveries WHERE delivery_id=?", ("d-nodir",)
+    ).fetchone()
+    assert row["status"] == "deferred"
+    store.close()
+
+
+def test_archive_failure_exhausts_and_escalates(tmp_path: Path, monkeypatch) -> None:
+    """B2: archive errors use the same 5-attempt cap as teardown turns."""
+    store = Store(tmp_path / "state.db")
+    sk = _seed(store, state="TEARDOWN", classification="ABANDONED")
+    _make_session_dir(tmp_path)
+    posts: list = []
+    import agentd.design_loop as dl
+
+    dl._teardown_attempts.clear()
+
+    def boom(**k):  # noqa: ANN003
+        raise OSError("disk full")
+
+    monkeypatch.setattr(dl, "archive_and_purge", boom)
+    _insert_close(
+        store,
+        did="d-archfail",
+        payload=_closed_payload(body=_block(checked=False)),
+    )
+    loop = _loop(store, tmp_path, posts=posts)
+    for _ in range(7):
+        loop.process_deferred_batch()
+    row = store._conn.execute(
+        "SELECT status FROM deliveries WHERE delivery_id=?", ("d-archfail",)
+    ).fetchone()
+    assert row["status"] == "done"
+    sess = store.get_session(sk)
+    assert sess is not None
+    assert sess["state"] == "PAUSED_HUMAN"
+    assert store.get_open_escalation(sk) is not None
+    assert posts and "archive" in posts[0]["body"].lower()
+    store.close()
+
+
+def test_write_tarball_fsyncs_file_then_directory(tmp_path: Path, monkeypatch) -> None:
+    session = tmp_path / "sessions" / "58"
+    session.mkdir(parents=True)
+    (session / "f").write_text("x", encoding="utf-8")
+    dest = tmp_path / "archive" / "huozhe__code-workflow" / "58.tar.gz"
+    events: list[str] = []
+    real_fsync = os.fsync
+    real_replace = os.replace
+
+    def spy_fsync(fd: int) -> None:
+        events.append("fsync")
+        real_fsync(fd)
+
+    def spy_replace(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+        events.append("replace")
+        real_replace(src, dst)
+
+    monkeypatch.setattr(os, "fsync", spy_fsync)
+    monkeypatch.setattr(os, "replace", spy_replace)
+    write_tarball(session, dest)
+    assert events[0] == "fsync"
+    assert "replace" in events
+    assert events.index("fsync") < events.index("replace")
+    assert events[-1] == "fsync"
+    assert events.count("fsync") >= 2

@@ -1653,18 +1653,26 @@ class DesignLoop:
             return
 
         try:
-            self._archive_and_close(
+            dest = self._archive_and_close(
                 session_key=session_key,
                 sess=sess,
                 repo=repo,
                 issue_num=int(issue_num),
                 classification=classification,
             )
-        except Exception:  # noqa: BLE001
-            log.exception(
-                "archive failed session=%s — leave deferred for retry",
-                session_key,
-            )
+            if dest is None:
+                raise RuntimeError(
+                    "no session directory and no tarball; cannot mark CLOSED"
+                )
+        except Exception as exc:  # noqa: BLE001
+            log.exception("archive failed session=%s", session_key)
+            if self._teardown_retry_or_give_up(
+                delivery_id=delivery_id,
+                session_key=session_key,
+                reason=f"archive failed: {exc}",
+            ):
+                return
+            self.store.set_delivery_status(delivery_id, "done")
             return
         self.store.set_delivery_status(delivery_id, "done")
 
@@ -1676,8 +1684,8 @@ class DesignLoop:
         repo: str,
         issue_num: int,
         classification: str,
-    ) -> None:
-        """§10.5 step 3: archive, purge, then CLOSED. Summary only for VERIFIED."""
+    ) -> Path | None:
+        """§10.5 step 3: archive, purge, then CLOSED. None = nothing to flip on."""
         fresh = self.store.get_session(session_key) or sess
         dest = archive_and_purge(
             root=self.config.root,
@@ -1690,6 +1698,8 @@ class DesignLoop:
             feature_pr=fresh.get("feature_pr"),
             turn_count=int(fresh.get("turn_count") or 0),
         )
+        if dest is None:
+            return None
         self.store.update_session_fields(session_key, state="CLOSED")
         log.info(
             "session CLOSED session=%s class=%s archive=%s",
@@ -1698,13 +1708,18 @@ class DesignLoop:
             dest,
         )
         if classification != "VERIFIED":
-            return
+            return dest
+        try:
+            archive_rel = dest.relative_to(self.config.root).as_posix()
+        except ValueError:
+            archive_rel = dest.as_posix()
         body = format_completion_summary(
             session_key=session_key,
             classification=classification,
             design_pr=fresh.get("design_pr"),
             feature_pr=fresh.get("feature_pr"),
             turn_count=int(fresh.get("turn_count") or 0),
+            archive_rel=archive_rel,
         )
         try:
             if self._post_comment is not None:
@@ -1727,6 +1742,7 @@ class DesignLoop:
                 session_key,
                 exc,
             )
+        return dest
 
     def _run_teardown_turns(
         self,
