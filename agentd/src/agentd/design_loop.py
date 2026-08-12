@@ -413,6 +413,15 @@ class DesignLoop:
             kind = "merge_authorized"
             dig["kind"] = kind
             dig["merge_auth"] = check.reason
+            # Log configured checks so ops can compare to ruleset (M4-3 #51 note:
+            # ruleset may lack required_status_checks while config lists names).
+            log.info(
+                "feature merge_authorized id=%s pr=%s required_checks=%s detail=%s",
+                delivery_id,
+                pr_num,
+                self.config.required_checks(repo),
+                check.reason,
+            )
 
         # Only the Design PR merge advances DESIGN_APPROVED → IMPLEMENTING (§8.3).
         if kind == "design_merged":

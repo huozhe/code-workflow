@@ -1,4 +1,4 @@
-"""Gateway-side privileged-transition verification (§8.4)."""
+"""Gateway-side privileged-transition verification (§8.4) + M4-A ruleset assert."""
 
 from __future__ import annotations
 
@@ -18,6 +18,126 @@ class ApprovalCheck:
     # True → timing/compute artefact: leave deferred and retry (PR #54 B1).
     # False → permanent fault: escalate now.
     transient: bool = False
+
+
+@dataclass(frozen=True)
+class BranchRulesCheck:
+    """Read-side half of M4-A / FR-1.3 (repository ruleset, not classic protection).
+
+    ``GET /repos/{owner}/{repo}/rules/branches/{branch}`` needs no admin.
+    Classic ``/branches/{branch}/protection`` still 404s without admin.
+    """
+
+    ok: bool
+    reason: str
+    required_approving_review_count: int | None = None
+    require_last_push_approval: bool | None = None
+    dismiss_stale_reviews_on_push: bool | None = None
+    required_review_thread_resolution: bool | None = None
+    has_required_status_checks: bool = False
+
+
+# Wire shape of PUT /pulls/{n}/merge when ruleset blocks (M4-3 live, PR #55):
+# HTTP 405, body.status "405", message starts with "Repository rule violations found".
+# Self-approve as PR author: POST /pulls/{n}/reviews → HTTP 422
+# "Review Can not approve your own pull request".
+MERGE_RULE_REFUSAL_HTTP = 405
+SELF_APPROVE_REFUSAL_HTTP = 422
+
+
+def verify_branch_pull_request_rules(
+    *,
+    repo: str,
+    branch: str,
+    token: str | None,
+    min_approving_reviews: int = 1,
+    http_get: Callable[..., Any] | None = None,
+) -> BranchRulesCheck:
+    """Assert FR-1.3 *settings* from the ruleset (M4-3 assert half).
+
+    Looks for a ``pull_request`` rule with
+    ``required_approving_review_count >= min_approving_reviews``.
+    Does **not** prove enforcement — pair with a live merge refusal (observe half).
+    """
+    if not token:
+        return BranchRulesCheck(False, "no token for GitHub rules API")
+    if not repo or not branch:
+        return BranchRulesCheck(False, "repo and branch required")
+
+    get = http_get or _gh_get
+    url = f"https://api.github.com/repos/{repo}/rules/branches/{branch}"
+    try:
+        rules = get(url, token=token)
+    except Exception as exc:  # noqa: BLE001
+        return BranchRulesCheck(False, f"GitHub rules API error: {exc}")
+
+    if not isinstance(rules, list):
+        return BranchRulesCheck(
+            False, f"rules response is not a list: {type(rules).__name__}"
+        )
+
+    pr_rule: dict[str, Any] | None = None
+    has_status_checks = False
+    for rule in rules:
+        if not isinstance(rule, dict):
+            continue
+        rtype = str(rule.get("type") or "")
+        if rtype == "pull_request":
+            pr_rule = rule
+        elif rtype == "required_status_checks":
+            has_status_checks = True
+
+    if pr_rule is None:
+        return BranchRulesCheck(
+            False,
+            f"no pull_request rule on {repo}@{branch}",
+            has_required_status_checks=has_status_checks,
+        )
+
+    params = pr_rule.get("parameters") or {}
+    if not isinstance(params, dict):
+        params = {}
+    try:
+        count = int(params.get("required_approving_review_count") or 0)
+    except (TypeError, ValueError):
+        count = 0
+    last_push = params.get("require_last_push_approval")
+    dismiss = params.get("dismiss_stale_reviews_on_push")
+    thread_res = params.get("required_review_thread_resolution")
+
+    if count < min_approving_reviews:
+        return BranchRulesCheck(
+            False,
+            f"required_approving_review_count={count} < {min_approving_reviews}",
+            required_approving_review_count=count,
+            require_last_push_approval=(
+                bool(last_push) if last_push is not None else None
+            ),
+            dismiss_stale_reviews_on_push=(
+                bool(dismiss) if dismiss is not None else None
+            ),
+            required_review_thread_resolution=(
+                bool(thread_res) if thread_res is not None else None
+            ),
+            has_required_status_checks=has_status_checks,
+        )
+
+    return BranchRulesCheck(
+        True,
+        (
+            f"pull_request rule ok: required_approving_review_count={count}"
+            f" (>= {min_approving_reviews}); "
+            f"require_last_push_approval={last_push!r}; "
+            f"required_status_checks={'yes' if has_status_checks else 'no'}"
+        ),
+        required_approving_review_count=count,
+        require_last_push_approval=bool(last_push) if last_push is not None else None,
+        dismiss_stale_reviews_on_push=bool(dismiss) if dismiss is not None else None,
+        required_review_thread_resolution=(
+            bool(thread_res) if thread_res is not None else None
+        ),
+        has_required_status_checks=has_status_checks,
+    )
 
 
 def verify_design_approval(
