@@ -339,6 +339,16 @@ def test_feature_merged_wrong_pr_dropped(tmp_path: Path) -> None:
     store.close()
 
 
+
+def test_pick_recipient_design_merged_wakes_developer() -> None:
+    """Architect merge is self-echo; Developer must get IMPLEMENTING turn (M4-4)."""
+    loop = DesignLoop.__new__(DesignLoop)
+    role, login = DesignLoop._pick_recipient(
+        loop, "design_merged", "DESIGN_APPROVED", "arch", "dev", "arch"
+    )
+    assert role == "developer" and login == "dev"
+
+
 def test_pick_recipient_code_half() -> None:
     loop = DesignLoop.__new__(DesignLoop)
     role, login = DesignLoop._pick_recipient(
