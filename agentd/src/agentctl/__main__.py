@@ -7,6 +7,7 @@ import json
 import logging
 import sys
 import time
+from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
 
 from agentd.config import load_config
@@ -50,7 +51,15 @@ def main(argv: list[str] | None = None) -> None:
 
     # ADR-13: version needs no host config — dispatch before load_config().
     if args.cmd == "version":
-        print(pkg_version("agentd"))
+        try:
+            print(pkg_version("agentd"))
+        except PackageNotFoundError:
+            print(
+                "agentd distribution metadata not found "
+                "(install the package, e.g. pip install -e .)",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         return
 
     config = load_config()

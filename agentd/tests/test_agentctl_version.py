@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.metadata
+from importlib.metadata import PackageNotFoundError
 
 import pytest
 
@@ -41,3 +42,20 @@ def test_version_uses_importlib_metadata_distribution_name(
     main(["version"])
     assert capsys.readouterr().out == "9.9.9-test\n"
     assert seen == ["agentd"]
+
+
+def test_version_missing_distribution_exits_cleanly(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def _missing(_name: str) -> str:
+        raise PackageNotFoundError("agentd")
+
+    monkeypatch.setattr("agentctl.__main__.pkg_version", _missing)
+    monkeypatch.setattr("agentctl.__main__.load_config", _forbid_load_config)
+
+    with pytest.raises(SystemExit) as ei:
+        main(["version"])
+    assert ei.value.code == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "agentd distribution metadata not found" in captured.err
