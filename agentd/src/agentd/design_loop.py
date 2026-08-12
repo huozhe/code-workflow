@@ -1662,10 +1662,9 @@ class DesignLoop:
             )
             return False
         project_key = str(sess.get("project_key") or project_key_from_repo(repo))
-        runner = self.store.get_runner(project_key) or self.store.get_runner_for_session(
-            session_key
-        )
-        if not runner and self.supervisor is not None:
+        # #67: a runners row is not reachability. Always ask ensure_session
+        # to probe/adopt/recreate. B3 drain-guard above still skips this.
+        if self.supervisor is not None:
             try:
                 self.supervisor.ensure_session(
                     session_key=session_key,
@@ -1684,7 +1683,6 @@ class DesignLoop:
             except Exception:  # noqa: BLE001
                 log.exception("teardown ensure_session failed %s", session_key)
                 return True
-            runner = self.store.get_runner(project_key)
             # ensure_session upserts state=INTAKE (create path). Re-assert
             # TEARDOWN so the runner prompt gets the teardown obligation.
             # Layout recreate (worktree add / ledger re-register) is expected
@@ -1695,14 +1693,18 @@ class DesignLoop:
                 session_key,
             )
 
+        runner = self.store.get_runner(project_key) or self.store.get_runner_for_session(
+            session_key
+        )
         if not runner:
             log.warning(
                 "teardown turns skipped (no runner) session=%s — retry on redelivery",
                 session_key,
             )
             self._log_teardown_leaks(session_key)
-            return False
+            return True
 
+        turn_failed = False
         for role in ("developer", "architect"):
             turn_id = "t-" + uuid.uuid4().hex[:12]
             dig = {
@@ -1721,13 +1723,16 @@ class DesignLoop:
             )
             if result and result.get("status") == "role_busy":
                 return True
+            status = str((result or {}).get("status") or "")
+            if result is None or status in ("failed", "gateway_timeout"):
+                turn_failed = True
             # Teardown turns produce no public_actions by design (#42).
             # Do not count silent/budget — a terminating session must not
             # escalate onto a closed issue (§8.5).
             self._confirm_teardown_artifacts(session_key, repo)
 
         self._log_teardown_leaks(session_key)
-        return False
+        return turn_failed
 
     def _confirm_teardown_artifacts(self, session_key: str, repo: str) -> None:
         """Mark removed_at only after the gateway observes the ref is gone."""

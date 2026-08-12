@@ -763,3 +763,75 @@ def test_teardown_needs_human_does_not_pause(tmp_path: Path) -> None:
     assert store.get_open_escalation(sk) is None
     assert posts == []
     store.close()
+
+
+# --- #67: stale runners row must still call ensure_session ---
+
+
+def test_stale_runner_row_still_calls_ensure_session(tmp_path: Path) -> None:
+    """#67: truthy runners row is not reachability. Always ensure_session."""
+    store = Store(tmp_path / "state.db")
+    sk = _seed(store, tmp_path, with_runner=True)
+    _register_open(store, sk)
+    sup = _IntakeClobberSupervisor(store)
+    _RecordingClient.calls = []
+    _insert_close(
+        store,
+        did="d-stale",
+        payload=_closed_payload(body=_block(checked=True)),
+    )
+    loop = _loop(
+        store,
+        tmp_path,
+        dispatch=True,
+        client_factory=_RecordingClient,
+        supervisor=sup,
+    )
+    try:
+        loop.process_deferred_batch()
+    finally:
+        import agentd.design_loop as dl
+
+        dl.RunnerClient = loop._orig_client  # type: ignore[attr-defined, misc]
+    assert sup.calls == 1
+    states = [p.get("session_state") for _, p in _RecordingClient.calls]
+    assert states == ["TEARDOWN", "TEARDOWN"]
+    store.close()
+
+
+class _FailedClient(_RecordingClient):
+    def call(self, method, params=None):  # noqa: ANN001
+        super().call(method, params)
+        return {
+            "status": "failed",
+            "summary": "[Errno 61] Connection refused",
+            "public_actions": [],
+        }
+
+
+def test_failed_teardown_turn_leaves_delivery_deferred(tmp_path: Path) -> None:
+    """#67: a failed teardown must stay retryable — do not mark done."""
+    store = Store(tmp_path / "state.db")
+    sk = _seed(store, tmp_path)
+    _register_open(store, sk)
+    _FailedClient.calls = []
+    _insert_close(
+        store,
+        did="d-refused",
+        payload=_closed_payload(body=_block(checked=True)),
+    )
+    loop = _loop(store, tmp_path, dispatch=True, client_factory=_FailedClient)
+    try:
+        loop.process_deferred_batch()
+    finally:
+        import agentd.design_loop as dl
+
+        dl.RunnerClient = loop._orig_client  # type: ignore[attr-defined, misc]
+    row = store._conn.execute(
+        "SELECT status FROM deliveries WHERE delivery_id=?", ("d-refused",)
+    ).fetchone()
+    assert row["status"] == "deferred"
+    sess = store.get_session(sk)
+    assert sess is not None
+    assert sess["state"] == "TEARDOWN"
+    store.close()
