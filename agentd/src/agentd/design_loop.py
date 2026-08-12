@@ -74,6 +74,11 @@ _REVIEW_PART_EVENTS = frozenset(
 _merge_auth_attempts: dict[str, int] = {}
 _MERGE_AUTH_MAX_ATTEMPTS = 5
 
+# #69 B1: teardown retries are unbounded without this — §9.2 budgets
+# do not apply on the close path. Restart resets the counter.
+_teardown_attempts: dict[str, int] = {}
+_TEARDOWN_MAX_ATTEMPTS = 5
+
 # Webhook kinds that are observed GitHub progress (P1) — reset silent_turns
 # even when the FSM string does not change (e.g. design_revised while already
 # DESIGN_REVIEW). Claims in public_actions never reset (PR #42 B1).
@@ -1656,16 +1661,19 @@ class DesignLoop:
     ) -> bool:
         """Developer then Architect. Returns True if delivery should stay deferred."""
         if not self.store.list_artifacts(session_key, open_only=True):
+            # Drain-guard also stops ensure_session from re-registering
+            # already-removed layout rows (register_artifact only matches
+            # open rows, so a retry would otherwise insert duplicates).
             log.info(
                 "teardown skip turns session=%s — ledger already drained",
                 session_key,
             )
+            _teardown_attempts.pop(delivery_id, None)
             return False
         project_key = str(sess.get("project_key") or project_key_from_repo(repo))
-        runner = self.store.get_runner(project_key) or self.store.get_runner_for_session(
-            session_key
-        )
-        if not runner and self.supervisor is not None:
+        # #67: a runners row is not reachability. Always ask ensure_session
+        # to probe/adopt/recreate. B3 drain-guard above still skips this.
+        if self.supervisor is not None:
             try:
                 self.supervisor.ensure_session(
                     session_key=session_key,
@@ -1675,16 +1683,18 @@ class DesignLoop:
                     developer_login=str(sess.get("developer") or ""),
                 )
             except CapacityRefusal as exc:
-                log.warning(
-                    "teardown ensure_session deferred (capacity) %s: %s",
-                    session_key,
-                    exc,
+                return self._teardown_retry_or_give_up(
+                    delivery_id=delivery_id,
+                    session_key=session_key,
+                    reason=f"ensure_session capacity: {exc}",
                 )
-                return True
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
                 log.exception("teardown ensure_session failed %s", session_key)
-                return True
-            runner = self.store.get_runner(project_key)
+                return self._teardown_retry_or_give_up(
+                    delivery_id=delivery_id,
+                    session_key=session_key,
+                    reason=f"ensure_session failed: {exc}",
+                )
             # ensure_session upserts state=INTAKE (create path). Re-assert
             # TEARDOWN so the runner prompt gets the teardown obligation.
             # Layout recreate (worktree add / ledger re-register) is expected
@@ -1695,14 +1705,19 @@ class DesignLoop:
                 session_key,
             )
 
+        runner = self.store.get_runner(project_key) or self.store.get_runner_for_session(
+            session_key
+        )
         if not runner:
-            log.warning(
-                "teardown turns skipped (no runner) session=%s — retry on redelivery",
-                session_key,
-            )
             self._log_teardown_leaks(session_key)
-            return False
+            return self._teardown_retry_or_give_up(
+                delivery_id=delivery_id,
+                session_key=session_key,
+                reason="no runner after ensure_session; next drain will retry",
+            )
 
+        turn_failed = False
+        fail_reason = "turn failed"
         for role in ("developer", "architect"):
             turn_id = "t-" + uuid.uuid4().hex[:12]
             dig = {
@@ -1721,12 +1736,62 @@ class DesignLoop:
             )
             if result and result.get("status") == "role_busy":
                 return True
+            status = str((result or {}).get("status") or "")
+            if result is None or status in ("failed", "gateway_timeout"):
+                turn_failed = True
+                fail_reason = str((result or {}).get("summary") or status or "no result")
             # Teardown turns produce no public_actions by design (#42).
             # Do not count silent/budget — a terminating session must not
-            # escalate onto a closed issue (§8.5).
+            # escalate onto a closed issue (§8.5). Exhaustion (B2) does.
             self._confirm_teardown_artifacts(session_key, repo)
 
         self._log_teardown_leaks(session_key)
+        if not turn_failed:
+            _teardown_attempts.pop(delivery_id, None)
+            return False
+        return self._teardown_retry_or_give_up(
+            delivery_id=delivery_id,
+            session_key=session_key,
+            reason=fail_reason,
+        )
+
+    def _teardown_retry_or_give_up(
+        self,
+        *,
+        delivery_id: str,
+        session_key: str,
+        reason: str,
+    ) -> bool:
+        """True = stay deferred. False = exhausted: escalate and stop."""
+        n = int(_teardown_attempts.get(delivery_id, 0)) + 1
+        _teardown_attempts[delivery_id] = n
+        if n < _TEARDOWN_MAX_ATTEMPTS:
+            log.warning(
+                "teardown deferred id=%s session=%s attempt=%s/%s: %s",
+                delivery_id,
+                session_key,
+                n,
+                _TEARDOWN_MAX_ATTEMPTS,
+                reason,
+            )
+            return True
+        _teardown_attempts.pop(delivery_id, None)
+        leftover = self.store.list_artifacts(session_key, open_only=True)
+        refs = [f"{r.get('kind')}:{r.get('ref')}" for r in leftover]
+        log.warning(
+            "teardown exhausted retries id=%s session=%s: %s open=%s",
+            delivery_id,
+            session_key,
+            reason,
+            refs,
+        )
+        self._log_teardown_leaks(session_key)
+        self._escalate(
+            session_key,
+            "system",
+            f"teardown still failing after {n} attempts: {reason}. "
+            f"open artifacts: {refs or ['none']}",
+        )
         return False
 
     def _confirm_teardown_artifacts(self, session_key: str, repo: str) -> None:
