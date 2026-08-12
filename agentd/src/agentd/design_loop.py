@@ -30,8 +30,15 @@ from agentd.github_fetch import (
 )
 from agentd.github_write import (
     format_escalation_comment,
+    get_issue_body,
+    patch_issue_body,
     post_issue_comment,
     reopen_issue,
+)
+from agentd.verification import (
+    default_steps_for_session,
+    extract_verification_block,
+    upsert_verification_block,
 )
 from agentd.intake import evaluate_intake
 from agentd.keychain import get_password
@@ -150,6 +157,8 @@ class DesignLoop:
         fetch_threads: Any | None = None,
         fetch_diff: Any | None = None,
         github_token: str | None = None,
+        get_issue_body_fn: Any | None = None,
+        patch_issue_body_fn: Any | None = None,
     ) -> None:
         self.store = store
         self.config = config
@@ -162,6 +171,8 @@ class DesignLoop:
         self._fetch_threads = fetch_threads
         self._fetch_diff = fetch_diff
         self._github_token = github_token
+        self._get_issue_body = get_issue_body_fn
+        self._patch_issue_body = patch_issue_body_fn
 
     def process_deferred_batch(self, limit: int = 20) -> int:
         n = 0
@@ -535,6 +546,17 @@ class DesignLoop:
             state = tr.new_state
             state_changed = True
             log.info("fsm %s → %s (%s)", session_key, tr.new_state, tr.note)
+            # M5-0 / #50: structural §10.1 block so issues.closed can classify.
+            # Gateway authors the scaffold (reliability); Architect may refine
+            # steps between sentinels on the AWAITING_VERIFICATION turn.
+            if kind == "feature_merged" and tr.new_state == "AWAITING_VERIFICATION":
+                sess_after = self.store.get_session(session_key) or sess
+                self._ensure_verification_block(
+                    repo=repo,
+                    issue_num=int(issue_num),
+                    design_pr=sess_after.get("design_pr"),
+                    feature_pr=sess_after.get("feature_pr") or dig.get("pr"),
+                )
 
         # Stall only when a turn would be routed — self-echo under §5.3 adapter
         # swap must not advance zero-thread (M3-D NB1).
@@ -1014,6 +1036,69 @@ class DesignLoop:
             # Explicit inject (tests may pass "" to force failure).
             return self._gateway_token or None
         return get_password("gateway")
+
+    def _ensure_verification_block(
+        self,
+        *,
+        repo: str,
+        issue_num: int,
+        design_pr: Any,
+        feature_pr: Any,
+    ) -> None:
+        """Upsert §10.1 verification block into the session issue body (#50).
+
+        Failure is logged only — merge already advanced; missing block is the
+        pre-M5-0 world and must not roll back AWAITING_VERIFICATION.
+        """
+        token = self._gateway_github_token()
+        if not token:
+            log.warning(
+                "verification block skipped issue=%s: no gateway token",
+                issue_num,
+            )
+            return
+        prs: list[int | str] = []
+        for n in (design_pr, feature_pr):
+            if n is None or n == "":
+                continue
+            prs.append(n)
+        steps = default_steps_for_session(design_pr=design_pr, feature_pr=feature_pr)
+        try:
+            get_fn = self._get_issue_body or get_issue_body
+            patch_fn = self._patch_issue_body or patch_issue_body
+            current = get_fn(repo=repo, issue_num=int(issue_num), token=token)
+            # Refresh Merged PRs / steps but keep an already-ticked box.
+            new_body = upsert_verification_block(
+                current,
+                steps=steps,
+                merged_prs=prs,
+                not_covered=None,
+                preserve_checkbox=True,
+            )
+            if new_body == current and extract_verification_block(current):
+                log.info(
+                    "verification block already present issue=%s",
+                    issue_num,
+                )
+                return
+            patch_fn(
+                repo=repo,
+                issue_num=int(issue_num),
+                body=new_body,
+                token=token,
+            )
+            log.info(
+                "verification block written issue=%s design_pr=%s feature_pr=%s",
+                issue_num,
+                design_pr,
+                feature_pr,
+            )
+        except Exception as exc:  # noqa: BLE001 — structural best-effort
+            log.error(
+                "verification block write failed issue=%s: %s",
+                issue_num,
+                exc,
+            )
 
     def _handle_structural_refusal(
         self,

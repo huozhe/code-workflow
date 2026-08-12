@@ -58,15 +58,70 @@ def reopen_issue(
     log.info("reopened issue repo=%s issue=%s", repo, issue_num)
 
 
+def get_issue_body(
+    *,
+    repo: str,
+    issue_num: int,
+    token: str | None,
+    http_get: Callable[..., Any] | None = None,
+) -> str:
+    """GET /repos/{repo}/issues/{n} → body string (may be empty)."""
+    if not token:
+        raise RuntimeError("no token for gateway GitHub read")
+    if not repo or not issue_num:
+        raise RuntimeError("repo and issue_num required to read issue")
+
+    url = f"https://api.github.com/repos/{repo}/issues/{int(issue_num)}"
+    get = http_get or _gh_get
+    data = get(url, token=token)
+    if not isinstance(data, dict):
+        raise RuntimeError(f"GitHub issue response not an object: {data!r}")
+    body = data.get("body")
+    return body if isinstance(body, str) else ""
+
+
+def patch_issue_body(
+    *,
+    repo: str,
+    issue_num: int,
+    body: str,
+    token: str | None,
+    http_patch: Callable[..., Any] | None = None,
+) -> None:
+    """PATCH issue body — gateway structural write (§10.1 verification block)."""
+    if not token:
+        raise RuntimeError("no token for gateway GitHub write")
+    if not repo or not issue_num:
+        raise RuntimeError("repo and issue_num required to patch issue body")
+    if body is None:
+        raise RuntimeError("issue body must be a string")
+
+    url = f"https://api.github.com/repos/{repo}/issues/{int(issue_num)}"
+    patch = http_patch or _gh_patch
+    patch(url, token=token, json_body={"body": body})
+    log.info("patched issue body repo=%s issue=%s bytes=%s", repo, issue_num, len(body))
+
+
+def _gh_headers(token: str) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "agentd",
+    }
+
+
+def _gh_get(url: str, *, token: str) -> Any:
+    with httpx.Client(timeout=20.0) as client:
+        r = client.get(url, headers=_gh_headers(token))
+        r.raise_for_status()
+        return r.json()
+
+
 def _gh_post(url: str, *, token: str, json_body: dict[str, Any]) -> Any:
     with httpx.Client(timeout=20.0) as client:
         r = client.post(
             url,
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Accept": "application/vnd.github+json",
-                "User-Agent": "agentd",
-            },
+            headers=_gh_headers(token),
             json=json_body,
         )
         r.raise_for_status()
@@ -77,11 +132,7 @@ def _gh_patch(url: str, *, token: str, json_body: dict[str, Any]) -> Any:
     with httpx.Client(timeout=20.0) as client:
         r = client.patch(
             url,
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Accept": "application/vnd.github+json",
-                "User-Agent": "agentd",
-            },
+            headers=_gh_headers(token),
             json=json_body,
         )
         r.raise_for_status()

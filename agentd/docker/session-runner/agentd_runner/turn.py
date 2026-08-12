@@ -116,7 +116,10 @@ _OBLIGATIONS: dict[tuple[str, str], str] = {
         "Developer merges the Feature PR (§8.4). Wait. Do not merge yourself."
     ),
     ("architect", "AWAITING_VERIFICATION"): (
-        "Feature PR is merged. Wait for the owner to verify and close. "
+        "Feature PR is merged. The gateway writes a §10.1 verification block "
+        "scaffold on the issue body. Refine steps / Not covered between the "
+        "<!-- agentd:verification v1 --> sentinels if needed; do not remove "
+        "the checkbox or ordering line. Wait for the owner to tick and close. "
         "Do not close the issue."
     ),
     ("developer", "PLANNING"): (

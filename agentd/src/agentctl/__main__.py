@@ -1,4 +1,4 @@
-"""agentctl version | status | sessions | logs | quarantine-deferred."""
+"""agentctl version | status | sessions | logs | quarantine-deferred | write-verification."""
 
 from __future__ import annotations
 
@@ -46,6 +46,19 @@ def main(argv: list[str] | None = None) -> None:
         "--dry-run",
         action="store_true",
         help="Print how many rows would be updated without changing the DB",
+    )
+    p_v = sub.add_parser(
+        "write-verification",
+        help="Upsert §10.1 verification block on a session issue body (M5-0 / #50)",
+    )
+    p_v.add_argument(
+        "session",
+        help="Session key (repo#issue) or bare issue number for the only open session repo",
+    )
+    p_v.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the new body without PATCHing GitHub",
     )
     args = parser.parse_args(argv)
 
@@ -155,7 +168,112 @@ def main(argv: list[str] | None = None) -> None:
         store.close()
         return
 
+    if args.cmd == "write-verification":
+        from agentd.github_write import get_issue_body, patch_issue_body
+        from agentd.keychain import get_password
+        from agentd.verification import (
+            default_steps_for_session,
+            extract_verification_block,
+            upsert_verification_block,
+        )
+
+        store = Store(config.state_db)
+        sess = _resolve_session(store, args.session)
+        if not sess:
+            print(f"no session for {args.session!r}", file=sys.stderr)
+            store.close()
+            sys.exit(1)
+        repo = str(sess["repo"])
+        issue_num = int(sess["issue_num"])
+        design_pr = sess.get("design_pr")
+        feature_pr = sess.get("feature_pr")
+        token = get_password("gateway")
+        if not token and not args.dry_run:
+            print("no gateway token in keychain", file=sys.stderr)
+            store.close()
+            sys.exit(1)
+        current = ""
+        if token:
+            current = get_issue_body(repo=repo, issue_num=issue_num, token=token)
+        prs = [n for n in (design_pr, feature_pr) if n is not None and n != ""]
+        new_body = upsert_verification_block(
+            current,
+            steps=default_steps_for_session(
+                design_pr=design_pr, feature_pr=feature_pr
+            ),
+            merged_prs=prs,
+            preserve_checkbox=True,
+        )
+        had = extract_verification_block(current) is not None
+        if args.dry_run:
+            print(
+                json.dumps(
+                    {
+                        "dry_run": True,
+                        "session_key": sess["session_key"],
+                        "repo": repo,
+                        "issue_num": issue_num,
+                        "had_block": had,
+                        "body_changed": new_body != current,
+                        "block": extract_verification_block(new_body),
+                    },
+                    indent=2,
+                )
+            )
+            store.close()
+            return
+        if new_body == current and had:
+            print(
+                json.dumps(
+                    {
+                        "session_key": sess["session_key"],
+                        "issue_num": issue_num,
+                        "status": "unchanged",
+                    },
+                    indent=2,
+                )
+            )
+            store.close()
+            return
+        patch_issue_body(
+            repo=repo, issue_num=issue_num, body=new_body, token=token
+        )
+        print(
+            json.dumps(
+                {
+                    "session_key": sess["session_key"],
+                    "issue_num": issue_num,
+                    "status": "written",
+                    "had_block": had,
+                    "design_pr": design_pr,
+                    "feature_pr": feature_pr,
+                },
+                indent=2,
+            )
+        )
+        store.close()
+        return
+
     parser.error(f"unknown {args.cmd}")
+
+
+def _resolve_session(store: Store, key: str) -> dict | None:
+    """Accept full session_key or bare issue number."""
+    key = (key or "").strip()
+    if not key:
+        return None
+    if "#" in key:
+        return store.get_session(key)
+    # Bare issue number → first matching open session.
+    try:
+        issue = int(key)
+    except ValueError:
+        return store.get_session(key)
+    for row in store.list_sessions():
+        full = store.get_session(str(row["session_key"])) or row
+        if int(full.get("issue_num") or 0) == issue:
+            return full
+    return None
 
 
 if __name__ == "__main__":
