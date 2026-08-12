@@ -1,11 +1,11 @@
-"""Design-half session FSM (§8.1). Gateway drives from GitHub events (P1)."""
+"""Session FSM (§8.1). Gateway drives from GitHub events (P1)."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
 
-# Design-half states only (M3); code loop is M4.
+# Design half (M3) + code half (M4-1). TEARDOWN/CLOSED are M5.
 DESIGN_STATES = frozenset(
     {
         "INTAKE",
@@ -18,6 +18,17 @@ DESIGN_STATES = frozenset(
         "FAILED",
     }
 )
+
+CODE_STATES = frozenset(
+    {
+        "CODE_REVIEW",
+        "CODE_REWORK",
+        "MERGING",
+        "AWAITING_VERIFICATION",
+    }
+)
+
+SESSION_STATES = DESIGN_STATES | CODE_STATES
 
 
 @dataclass(frozen=True)
@@ -48,6 +59,22 @@ def transition(state: str, event_kind: str) -> Transition | None:
         ("DESIGN_REWORK", "design_revised"): Transition("DESIGN_REVIEW"),
         ("DESIGN_REVIEW", "design_approved"): Transition("DESIGN_APPROVED"),
         ("DESIGN_APPROVED", "design_merged"): Transition("IMPLEMENTING"),
-        # M4 starts at IMPLEMENTING + feature_pr_opened
+        # M4-1 code half — Feature PR identified by developer branch (#31 rule).
+        ("IMPLEMENTING", "feature_pr_opened"): Transition(
+            "CODE_REVIEW", note="Feature PR open (developer branch)"
+        ),
+        ("CODE_REVIEW", "code_changes_requested"): Transition("CODE_REWORK"),
+        ("CODE_REWORK", "feature_revised"): Transition("CODE_REVIEW"),
+        # merge_authorized is emitted after §8.4 verify (M4-2 wires the checks).
+        ("CODE_REVIEW", "merge_authorized"): Transition(
+            "MERGING", note="gateway authorized Feature PR merge"
+        ),
+        ("MERGING", "feature_merged"): Transition(
+            "AWAITING_VERIFICATION", note="Feature PR merged + branch delete"
+        ),
+        # Re-enterable (§8.1): further Feature PR under one issue.
+        ("AWAITING_VERIFICATION", "feature_pr_opened"): Transition(
+            "IMPLEMENTING", note="re-enter for further Feature PR"
+        ),
     }
     return table.get((s, k))

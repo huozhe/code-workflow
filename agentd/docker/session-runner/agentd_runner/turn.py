@@ -84,10 +84,10 @@ def load_rehydration(role: str) -> dict[str, Any]:
 
 
 # Role × session-state obligations (§8.2). Keep short — prepended every turn (#45).
-# Covers every design-half (role, state) reachable at dispatch — active duty or
-# wait (owner/peer comment can wake the non-actor). INTAKE and PAUSED_HUMAN are
-# intentionally absent: FSM leaves INTAKE on the same delivery, and resume
-# restores resume_state before dispatch (PR #46 B1/B2).
+# Covers every design-half and code-half (role, state) reachable at dispatch —
+# active duty or wait (owner/peer can wake the non-actor). INTAKE and
+# PAUSED_HUMAN are intentionally absent: FSM leaves INTAKE on the same
+# delivery, and resume restores resume_state before dispatch (PR #46 B1/B2).
 _OBLIGATIONS: dict[tuple[str, str], str] = {
     ("architect", "PLANNING"): (
         "Write the RFC into the worktree and open the Design PR from the "
@@ -106,6 +106,19 @@ _OBLIGATIONS: dict[tuple[str, str], str] = {
         "The Developer is implementing. Wait for the Feature PR. "
         "Do not implement, and do not close the issue."
     ),
+    ("architect", "CODE_REVIEW"): (
+        "Review the Feature PR: request changes or approve. Do not merge."
+    ),
+    ("architect", "CODE_REWORK"): (
+        "Developer is fixing the Feature PR. Wait. Do not implement or merge."
+    ),
+    ("architect", "MERGING"): (
+        "Developer merges the Feature PR (§8.4). Wait. Do not merge yourself."
+    ),
+    ("architect", "AWAITING_VERIFICATION"): (
+        "Feature PR is merged. Wait for the owner to verify and close. "
+        "Do not close the issue."
+    ),
     ("developer", "PLANNING"): (
         "Architect is drafting the design. Wait. Do not implement."
     ),
@@ -120,6 +133,20 @@ _OBLIGATIONS: dict[tuple[str, str], str] = {
     ),
     ("developer", "IMPLEMENTING"): (
         "Implement against the approved design and open the Feature PR."
+    ),
+    ("developer", "CODE_REVIEW"): (
+        "Architect is reviewing the Feature PR. Wait. Do not merge."
+    ),
+    ("developer", "CODE_REWORK"): (
+        "Address Architect review feedback and push. Do not merge yet."
+    ),
+    ("developer", "MERGING"): (
+        "Merge the Feature PR only after merge_authorized (§8.4), "
+        "then delete the branch. Do not merge without authorization."
+    ),
+    ("developer", "AWAITING_VERIFICATION"): (
+        "Wait for owner verification and issue close. Do not open work "
+        "unless further work is requested."
     ),
 }
 

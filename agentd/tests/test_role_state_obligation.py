@@ -101,6 +101,26 @@ def test_design_half_role_state_matrix_complete() -> None:
             assert role_obligation(role, state), f"silent: ({role}, {state})"
 
 
+def test_code_half_role_state_matrix_complete() -> None:
+    """M4-1: code-half pairs must not regress the #46 completeness rule."""
+    states = (
+        "CODE_REVIEW",
+        "CODE_REWORK",
+        "MERGING",
+        "AWAITING_VERIFICATION",
+    )
+    for role in ("architect", "developer"):
+        for state in states:
+            text = role_obligation(role, state)
+            assert text, f"silent: ({role}, {state})"
+    # Spot-check active duties
+    assert "Feature PR" in role_obligation("architect", "CODE_REVIEW")
+    assert "push" in role_obligation("developer", "CODE_REWORK").lower()
+    assert "merge" in role_obligation("developer", "MERGING").lower()
+    assert "Wait" in role_obligation("developer", "CODE_REVIEW")
+    assert "Wait" in role_obligation("architect", "CODE_REWORK")
+
+
 def test_build_prompt_invariant_without_state() -> None:
     """Missing session_state still states the no-code invariant."""
     text = build_prompt(
