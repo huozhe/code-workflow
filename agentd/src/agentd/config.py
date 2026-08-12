@@ -101,6 +101,17 @@ class Config:
         entry = agents.get(agent_id) or {}
         return entry.get("login")
 
+    def required_checks(self, repo: str) -> list[str]:
+        """Repo-level required check names for §8.4 Feature merge (M4-2)."""
+        repos = self.raw.get("repos") or {}
+        entry = repos.get(repo) if isinstance(repos, dict) else None
+        if not isinstance(entry, dict):
+            return []
+        checks = entry.get("required_checks") or []
+        if not isinstance(checks, list):
+            return []
+        return [str(c) for c in checks if str(c).strip()]
+
     def all_bot_logins(self) -> set[str]:
         """Agent logins + gateway login (must not be classified as human §9.1)."""
         agents = self.raw.get("agents") or {}

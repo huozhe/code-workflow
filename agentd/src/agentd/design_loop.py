@@ -342,6 +342,41 @@ class DesignLoop:
                 self.store.set_delivery_status(delivery_id, "done")
                 return
             kind = "design_approved"
+            dig["kind"] = kind
+
+        # §8.4 Feature merge auth (M4-2): Architect APPROVED is not enough —
+        # required_checks + mergeable_state must pass before merge_authorized.
+        # Gateway verifies only; Developer merges (opposite of §8.3).
+        if kind == "feature_approved_unverified":
+            pr_num = dig.get("pr") or sess.get("feature_pr")
+            head = dig.get("head_sha")
+            from agentd.keychain import get_password
+            from agentd.verify import verify_feature_merge
+
+            check = verify_feature_merge(
+                repo=repo,
+                pr_number=int(pr_num or 0),
+                expected_approver_login=architect,
+                head_sha=str(head) if head else None,
+                token=get_password("claude-bot") or get_password("grok-bot"),
+                required_checks=self.config.required_checks(repo),
+            )
+            if not check.ok:
+                log.warning(
+                    "feature merge_authorized blocked id=%s: %s",
+                    delivery_id,
+                    check.reason,
+                )
+                self._escalate(
+                    session_key,
+                    "system",
+                    f"unverified feature merge authorization: {check.reason}",
+                )
+                self.store.set_delivery_status(delivery_id, "done")
+                return
+            kind = "merge_authorized"
+            dig["kind"] = kind
+            dig["merge_auth"] = check.reason
 
         # Only the Design PR merge advances DESIGN_APPROVED → IMPLEMENTING (§8.3).
         if kind == "design_merged":
@@ -357,7 +392,8 @@ class DesignLoop:
                 self.store.set_delivery_status(delivery_id, "dropped")
                 return
 
-        # Only the tracked Feature PR merge advances MERGING → AWAITING (§8.1).
+        # Feature PR merge: tracked PR only; branch ledger cleanup; §8.4 bypass
+        # outside MERGING escalates (PR #53 Architect review / M4-2).
         if kind == "feature_merged":
             tracked = sess.get("feature_pr")
             event_pr = dig.get("pr")
@@ -369,6 +405,30 @@ class DesignLoop:
                     tracked,
                 )
                 self.store.set_delivery_status(delivery_id, "dropped")
+                return
+            # Branch is gone on GitHub (agent deleted after merge) — ledger truth.
+            branch_ref = role_branch_name(repo, int(issue_num), "developer")
+            n_rm = self.store.mark_artifact_removed(
+                session_key=session_key, ref=branch_ref, kind="branch"
+            )
+            log.info(
+                "feature_merged branch artifact removed session=%s ref=%s n=%s",
+                session_key,
+                branch_ref,
+                n_rm,
+            )
+            if state == "AWAITING_VERIFICATION":
+                # Redelivery after successful advance — terminal, no re-turn.
+                self.store.set_delivery_status(delivery_id, "done")
+                return
+            if state != "MERGING":
+                self._escalate(
+                    session_key,
+                    "system",
+                    f"unauthorized Feature PR merge: state={state} expected MERGING "
+                    f"(merged without merge_authorized / §8.4 bypass)",
+                )
+                self.store.set_delivery_status(delivery_id, "done")
                 return
 
         recipient_role, recipient_login = self._pick_recipient(
