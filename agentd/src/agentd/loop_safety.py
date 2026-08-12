@@ -15,8 +15,8 @@ class BudgetState:
     # 12 was set before any loop had run end to end. M4-4 (#58) showed a full
     # design+code loop — issue open → Design PR → review → merge → Feature PR →
     # one CODE_REWORK round → merge — is ~13 turns with review coalescing (#49),
-    # and every one of them is an agent turn: nothing resets consec until a human
-    # speaks. So 12 tripped on the *successful* path and the run only completed
+    # and every one of them is an agent turn: nothing resets consec until owner
+    # activity (§9.2 — any owner event, not only a comment). So 12 tripped on the *successful* path and the run only completed
     # because the budget was raised by hand. 30 gives roughly 2x headroom over an
     # observed clean loop, which still stops a genuine runaway long before it is
     # expensive. Raised on evidence, not preference: if a real loop exceeds 30,

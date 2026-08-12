@@ -340,7 +340,8 @@ repos:
 
 budgets:
   max_turns_per_issue: 40
-  max_consecutive_agent_turns: 12
+  max_consecutive_agent_turns: 30   # raised from 12 on M4-4 (#58) evidence: a full
+                                    # design+code loop is ~13 uninterrupted agent turns
   max_review_rounds: 6
   min_dispatch_interval: 10s
   fingerprint_repeat_limit: 3
