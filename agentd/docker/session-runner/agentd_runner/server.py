@@ -122,26 +122,39 @@ def _run_as_role(uid: int, fn_name: str, paths: list[str]) -> int:
     return 1
 
 
-def session_base() -> Path:
+def project_root() -> Path:
+    """Project tree mount point (#20) — durable homes live here."""
+    return Path(
+        os.environ.get("AGENTD_PROJECT_ROOT")
+        or os.environ.get("AGENTD_HOST_ROOT")
+        or "/srv/agentd"
+    )
+
+
+def session_base(issue_num: int | None = None) -> Path:
     """Session directory inside the container.
 
-    Prefer AGENTD_SESSION_DIR (…/sessions/<key> under the host-root mount).
-    Falls back to legacy /srv/session only for older containers.
+    When *issue_num* is set, derive ``<project>/sessions/<issue>`` so one
+    project container cannot pin writes to whichever issue created it (#76).
+    AGENTD_SESSION_DIR is only the fallback for callers that have no issue
+    (session.init / resume). Legacy /srv/session is last.
     """
+    if issue_num is not None:
+        return project_root() / "sessions" / str(int(issue_num))
     override = os.environ.get("AGENTD_SESSION_DIR")
     if override:
         return Path(override)
     return Path("/srv/session")
 
 
-def ensure_role_layout(role: str) -> dict[str, str]:
+def ensure_role_layout(role: str, issue_num: int | None = None) -> dict[str, str]:
     """HOME / TMPDIR / XDG under <session>/<role>/ at 0700.
 
     Directories are created *as the role UID* so ownership is real on the
     container filesystem view. Host must leave base role dir traversable (0755).
     §7.3: fail if the role cannot write its TMPDIR.
     """
-    base = session_base() / role
+    base = session_base(issue_num) / role
     home = base / "home"
     tmp = base / "tmp"
     xdg = base / "xdg"
@@ -298,9 +311,9 @@ def handle_request(req: dict[str, Any], authed: bool) -> dict[str, Any]:
         STATE.session_key = session_key
         STATE.roles = {str(k): str(v) for k, v in roles.items()}
 
-        # Layout + GitHub PATs + model credentials on tmpfs only (§5.2 / #21 R1)
-        for role in ROLE_UIDS:
-            ensure_role_layout(role)
+        # Issue-scoped layout is lazy on first turn (#76). session.init has
+        # no issue: creating dirs here would recreate AGENTD_SESSION_DIR
+        # (often a CLOSED session). GitHub PATs + model creds stay on tmpfs.
         for role, pat in tokens.items():
             if role in ROLE_UIDS and pat:
                 write_role_token(str(role), str(pat))

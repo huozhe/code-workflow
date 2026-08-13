@@ -164,6 +164,90 @@ def test_role_paths_home_tmp_xdg_under_tree(tmp_path: Path, monkeypatch: pytest.
     assert str(paths["xdg"]).endswith(str(Path("architect") / "xdg"))
 
 
+def test_role_paths_keyed_by_issue_num_not_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#76: one container serves many issues; env pin must not win over issue_num."""
+    pinned = tmp_path / "sessions" / "47"
+    monkeypatch.setenv("AGENTD_SESSION_DIR", str(pinned))
+    monkeypatch.setenv("AGENTD_PROJECT_ROOT", str(tmp_path))
+    (tmp_path / "home").mkdir()
+
+    p58 = turn_mod.role_paths("architect", 58)
+    p32 = turn_mod.role_paths("developer", 32)
+
+    assert p58["context"] == tmp_path / "sessions" / "58" / "architect" / "context"
+    assert p32["context"] == tmp_path / "sessions" / "32" / "developer" / "context"
+    assert p58["transcript"] == tmp_path / "sessions" / "58" / "architect" / "transcript.jsonl"
+    assert p32["transcript"] == tmp_path / "sessions" / "32" / "developer" / "transcript.jsonl"
+    assert p58["context"] != p32["context"]
+    assert p58["home"] == tmp_path / "home" / "architect"
+    assert str(pinned) not in str(p58["context"])
+    assert str(pinned) not in str(p32["transcript"])
+
+
+def test_turn_dispatch_writes_under_issue_not_env(runner_env: tuple[int, Path]) -> None:
+    """#76: turn.dispatch audit trail follows context.issue_num, not AGENTD_SESSION_DIR."""
+    port, pinned = runner_env
+    project = Path(os.environ["AGENTD_PROJECT_ROOT"])
+    resp = _rpc(
+        port,
+        [
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "session.attach",
+                "params": {"bearer": "test-bearer-token-32bytes-minimum!!"},
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "session.init",
+                "params": {
+                    "session_key": "o/r#58",
+                    "roles": {"architect": "a", "developer": "d"},
+                    "tokens": {"architect": "tok-a", "developer": "tok-d"},
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "turn.dispatch",
+                "params": {
+                    "turn_id": "t-issue58",
+                    "role": "architect",
+                    "event": {"kind": "issue_opened"},
+                    "context": {"issue_num": 58},
+                    "deadline_s": 30,
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "turn.dispatch",
+                "params": {
+                    "turn_id": "t-issue32",
+                    "role": "developer",
+                    "event": {"kind": "issue_opened"},
+                    "context": {"issue_num": 32},
+                    "deadline_s": 30,
+                },
+            },
+        ],
+    )
+    assert "result" in resp[2]
+    assert "result" in resp[3]
+
+    p58 = project / "sessions" / "58" / "architect"
+    p32 = project / "sessions" / "32" / "developer"
+    assert (p58 / "context" / "prompt-t-issue58.txt").is_file()
+    assert (p32 / "context" / "prompt-t-issue32.txt").is_file()
+    assert (p58 / "transcript.jsonl").is_file()
+    assert (p32 / "transcript.jsonl").is_file()
+    assert not (pinned / "architect" / "context" / "prompt-t-issue58.txt").exists()
+    assert not (pinned / "developer" / "context" / "prompt-t-issue32.txt").exists()
+
+
 def test_live_spawn_drops_privs_once_via_popen_user(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -16,25 +16,30 @@ from typing import Any, Callable
 
 from agentd_runner.adapters import resolve_adapter, run_adapter
 from agentd_runner import cli_session
-from agentd_runner.server import ROLE_UIDS, session_base
+from agentd_runner.server import ROLE_UIDS, project_root, session_base
 
 log = logging.getLogger("agentd_runner.turn")
 
 ProgressCb = Callable[[dict[str, Any]], None]
 
 
-def project_root() -> Path:
-    """Project tree mount point (#20) — durable homes live here."""
-    return Path(
-        os.environ.get("AGENTD_PROJECT_ROOT")
-        or os.environ.get("AGENTD_HOST_ROOT")
-        or "/srv/agentd"
-    )
+def issue_num_from_params(params: dict[str, Any]) -> int | None:
+    """Per-issue truth from turn.dispatch context (#76). None → env fallback."""
+    ctx = params.get("context")
+    if not isinstance(ctx, dict):
+        return None
+    raw = ctx.get("issue_num")
+    if raw is None or raw == "":
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
 
 
-def role_paths(role: str) -> dict[str, Path]:
+def role_paths(role: str, issue_num: int | None = None) -> dict[str, Path]:
     """Issue-scoped work dirs + durable project HOME for auth (Option D)."""
-    base = session_base() / role
+    base = session_base(issue_num) / role
     # Prefer durable project home for CLI credentials (Grok auth.json etc.).
     durable = project_root() / "home" / role
     if durable.is_dir() or (project_root() / "home").exists():
@@ -54,16 +59,18 @@ def role_paths(role: str) -> dict[str, Path]:
     }
 
 
-def append_transcript(role: str, record: dict[str, Any]) -> None:
-    paths = role_paths(role)
+def append_transcript(
+    role: str, record: dict[str, Any], issue_num: int | None = None
+) -> None:
+    paths = role_paths(role, issue_num)
     paths["transcript"].parent.mkdir(parents=True, exist_ok=True)
     with paths["transcript"].open("a", encoding="utf-8") as f:
         f.write(json.dumps(record, separators=(",", ":")) + "\n")
 
 
-def load_rehydration(role: str) -> dict[str, Any]:
+def load_rehydration(role: str, issue_num: int | None = None) -> dict[str, Any]:
     """COLD→HOT continuity: summary + recent transcript tail (§6.3)."""
-    paths = role_paths(role)
+    paths = role_paths(role, issue_num)
     summary = ""
     lines: list[str] = []
     if paths["summary"].is_file():
@@ -414,11 +421,12 @@ def exec_turn_as_role(
             "artifacts": [],
         }
 
-    paths = role_paths(role)
+    issue_num = issue_num_from_params(params)
+    paths = role_paths(role, issue_num)
     for p in (paths["home"], paths["tmp"], paths["xdg"], paths["context"], paths["scratch"]):
         p.mkdir(parents=True, exist_ok=True)
 
-    rehydrate = load_rehydration(role)
+    rehydrate = load_rehydration(role, issue_num)
     # Live path: vendor process holds conversational state — inject transcript
     # only on cold recovery (handled by -c / ACP store). Still attach summary
     # when present so our compact layer is never orphaned (§14.4 growth note).
@@ -455,7 +463,7 @@ def exec_turn_as_role(
         "live_session": bool(result.get("live_session")),
     }
     try:
-        append_transcript(role, record)
+        append_transcript(role, record, issue_num)
     except OSError as exc:
         log.warning("transcript append failed: %s", exc)
 
