@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | **Status** | Proposed for formal approval (Phase 3 exit) |
-| **Version** | 1.7.0 — see [Revision history](#revision-history) |
+| **Version** | 1.8.0 — see [Revision history](#revision-history) |
 | **Implements** | [`docs/requirements/SRS_async_multiagent_ai_coding_system.md`](../requirements/SRS_async_multiagent_ai_coding_system.md) **v1.3** |
 | **Supersedes** | [`proposals/claude_design_spec.md`](proposals/claude_design_spec.md) (#4) · [`proposals/grok_design_spec.md`](proposals/grok_design_spec.md) (#2) · [`proposals/gemini_design_spec.md`](proposals/gemini_design_spec.md) (#3) |
 | **Ref** | Issue #1 |
@@ -18,6 +18,7 @@ Amendments are also marked inline at the point they apply, which is where an imp
 
 | Version | Date | Change |
 |---|---|---|
+| **1.8.0** | 2026-08-13 | **Restore-up gated on `verified_at`** (#89, ADR-16). #65's `was is True and now is False` branch treated `changes.body.from` as proof an *owner* tick was present and composed `checked=True`. Provenance was never established: an agent tick moments earlier produces the same `was=True`. Live on session #84 (gateway `d576107`, ADR-15 already deployed): `@huozhegrok` ticked then unticked; ADR-15 correctly aborted the first delivery (`payload now=True current=False`); the second delivery restored the tick up. `verified_at` stayed NULL; `classify_at_close` would still have recorded `VERIFIED`. New rule: compose `checked=True` only when this gateway has itself observed an owner tick (`sessions.verified_at` set, written only on `is_owner and not is_agent`). Absent that, leave the body alone and log the divergence. Cost of the reversal: a genuine owner tick whose `issues.edited` delivery was dropped now costs one owner re-tick, instead of a silent false `VERIFIED`. B2/B3/B4/B5 and ADR-15's guards are unchanged. Close-time reconcile (ticked body + NULL `verified_at` must not classify `VERIFIED`) is defence in depth and a follow-up (#90) — it collides with §10.3's "no reopen of an owner close" and the teardown tests that currently treat a ticked payload as sufficient. |
 | **1.7.0** | 2026-08-13 | **Verification-block restore composes against a fresh read** (#84, ADR-15). `_restore_agent_verification_edit` (#65) decided *and* composed from the same webhook payload; nothing checked whether the issue had moved on by drain time. Live on session #49: a corrupting `-f`-vs-`-F` `gh api` edit was hand-corrected within seconds, but the gateway drained the corrupting delivery afterward and PATCHed a reconstructed block onto the 25-character wreck, destroying the issue body (recovered by hand from the delivery's stored payload). Fix, layered onto #65's unchanged branch-selection logic: fetch the current body only once a branch other than the no-op is selected (zero extra cost on plain step-refinements); abort if the checkbox has moved since this delivery's own webhook (one equality check covers both an owner tick and an owner untick landing in the window, since the discriminator is "did anything change," not "which direction"); compose the selected branch against the fresh body so an already-self-corrected issue reduces to a no-op; escalate instead of restoring when the current body has collapsed below half its predecessor's length, since a stale-read fix alone does not stop a restore from writing onto damage that is still the latest reality. |
 | **1.6.0** | 2026-08-13 | **`agentctl review-stats` decided** (#49, ADR-14). #49's coalescing mechanism (PR #52) is code-complete; the outstanding checklist item is re-measuring turns-per-review rather than hand-writing a `SELECT`. Groups inline comments to their parent review via `comment.pull_request_review_id` (no linkage exists for thread-resolve events, so those are reported at session level instead of guessed into a review's count); session membership is `deliveries.repo` + `issue_num IN (sessions.issue_num, design_pr, feature_pr)`, since review traffic lands on the PR and `deliveries.issue_num` is the webhook's own issue-or-PR number, not the session issue (revised in review: the initial draft's `issue_num = sessions.issue_num` would have dropped all review traffic). Two separate grains: per-review `turns_woken`/`turns_empty` via the `turns.delivery_id` join is the coalescing check; session-wide `totals: {turns, empty}` via `turns.session_key` (no review join) is the #47-baseline comparison. `unmatched_inline_comments` reports comments whose review never emitted `review.submitted`. No new schema — decompresses `deliveries.payload` at query time. JSON output, `--session` optional, a `sessions` array always, following `write-verification`'s session resolution and `status`/`sessions`'s output convention. |
 | **1.5.0** | 2026-08-13 | **Archive excludes role `home/`, `xdg/`, `tmp/` by filter** (#74). ADR-12 claimed those paths were outside the session tree so no filter was needed. Live #47/#67 tarballs contained `sessions/<issue>/<role>/{xdg,home,tmp}` because the runner puts XDG vars and a HOME fallback there. Filter those three at `<issue>/<role>/…`; transcript, context, scratch, and `manifest.json` stay. Durable project `home/`, `repo/`, `state.db`, and `config.yaml` remain excluded by construction. `tmp/` CLI logs are debug output, not audit trail. Existing #47/#67 archives are not rewritten (no credential was present). |
@@ -738,6 +739,8 @@ The second condition is not redundant with the first — it survives a configura
 
 If an agent edits the issue body while `AWAITING_VERIFICATION`, the restore is *decided* from that edit's own before/after image (`changes.body.from` vs. the payload's `issue.body`, PR #65) but *composed* against a fresh read of the issue taken immediately before the write (ADR-15) — never against the payload's after-image, which can be stale by the time the delivery drains. A warning comment is posted for every restore that PATCHes.
 
+**Restore-*up* is the exception that needs a second signal.** The `was is True and now is False` branch increases checkedness relative to the after-image. `changes.body.from` does not say *who* made the prior tick, so that branch may compose `checked=True` only when `sessions.verified_at` is set — the only record this gateway writes on a genuine owner tick (ADR-16). Absent it, the agent already unticked; leave the body alone. B2/B3/B4/B5 stay payload-driven: they never need `verified_at` to decide, and B1 (already-checked before and after a step-refine, including a missed owner-tick delivery) is unchanged.
+
 ### 10.3 Closure and Teardown (FR-3.2, FR-4.2)
 
 **The human closes the issue. `issues.closed` is the sole teardown trigger.** No LLM agent and no orchestrator component ever calls the close API.
@@ -904,7 +907,7 @@ Session state is mirrored to **GitHub labels** (`agentd:state:code_review`, `age
 | Developer cannot approve its own PR | Architect token readable only by `uid_architect` on container-internal tmpfs (§5.2) + GitHub branch protection + gateway merge verification (§8.4) |
 | Agent cannot escape to the host | No Docker socket, `cap-drop ALL`, `no-new-privileges`, non-root UIDs, no setuid binaries in the image |
 | Agent cannot exhaust the host | `--memory`, `--cpus`, `--pids-limit`, plus admission control |
-| Agent cannot forge the verification record | Checkbox flips counted only from the owner login (§10.2) |
+| Agent cannot forge the verification record | Checkbox *flips* counted only from the owner login (§10.2); restore-*up* composed only when `sessions.verified_at` is set (ADR-16). Flips were always owner-only; restores were not, and that was the hole. |
 | Agent cannot close an issue | No component calls the close API (§10.3) |
 | Attacker cannot forge events | HMAC-SHA256 on every delivery; RPC endpoint loopback/UDS-local with a per-session bearer token |
 
@@ -1382,6 +1385,42 @@ Review rows are exactly the deliveries with `event = pull_request_review AND act
 **Existing B1–B5 tests need one mechanical addition where a restore already fires, not a rewrite.** None of `test_checkbox_semantics.py`'s fixtures model a second edit landing in the window, so the correct `current` for each of those tests is the same `body` string the test already constructs — meaning injecting `get_issue_body_fn=lambda **_: body` reproduces today's output byte-for-byte and every existing assertion holds unchanged. Tests that hit the no-op branch (e.g. `test_agent_refines_steps_no_patch_when_checkbox_ok`) need no change at all, since point 1's fast path never calls the fetch hook. If any assertion needs to change beyond adding that one fixture line, the decision logic moved and the Feature PR must say so rather than editing the test to match.
 
 *Out of scope:* the `gh api -f body=@file` foot-gun that triggered the observed incident is a CLI usage error (`-f` does not expand `@path`; `-F` does), not a defect in this repository — already self-corrected in practice, nothing to fix in code. `agentctl` tooling to inspect/replay a delivery's stored payload for manual recovery (used by hand for #49) is a real gap but a separate, generally useful command, not required to close this race — left for a future issue.
+
+---
+
+### ADR-16: Restore-Up Requires an Observed Owner Tick
+
+*Resolves #89.* #65's restore-*up* branch (`was is True and now is False`) assumed `changes.body.from` being ticked meant *an owner tick was present before this edit*, and composed `checked=True`. The before-image has no actor. An agent who ticks, then unticks, produces the same pair. Observed live on session #84 (2026-08-13, gateway `d576107`, ADR-15 already deployed):
+
+```
+10:10:37  agent edit: - [ ] → - [x]                          (queued)
+10:12:50  agent edit: - [x] → - [ ]  + marker                (queued)
+10:14:02  checkbox moved since webhook (now=True current=False); skip stale restore   ← ADR-15, correct
+10:14:03  patched issue body … restored=checked
+```
+
+Final body `- [x] Human Verification Complete`, `sessions.verified_at = NULL`, both senders `huozhegrok`. §10.3 classifies from the body, so a close in that state records `VERIFIED` on a tick no human made. §13.1's "Agent cannot forge the verification record" did not hold. An agent cannot undo it: every later agent untick re-enters the same branch. Only an owner untick clears the box, because the owner path records rather than restores.
+
+**#65's B3 invariant does not cover this.** B3 guarantees the box never leaves an agent edit *more checked than it entered*, measured against that edit's own before-image. Restore-up deliberately increases checkedness relative to the *after*-image, and justifies it with a before-image whose provenance is never established.
+
+**What #65 got right, and why the conclusion was still wrong.** The docstring on `_handle_session_issue_edited` said local `verified_at` must not drive restore, because a missed delivery while the daemon is down must not let a later agent step-refine untick a real owner mark. That reasoning is sound for B1 (already-checked before *and* after — leave it) and for "do not use `verified_at` as a reason to *untick*." It weighed only one direction:
+
+| | cost |
+|---|---|
+| `verified_at` missing but the owner really ticked (dropped delivery) | the box is unticked; **the owner re-ticks once** |
+| `was=True` trusted but the tick was an agent's | **a session records `VERIFIED` with no human verification** |
+
+#65 already named the principle for the other way — *a missed restore costs one re-tick; a wrong restore can ABANDON a verified session* — and the mirror is worse: a wrong restore-up can **VERIFY an abandoned session**. The human gate failing open is worse than failing closed.
+
+**New rule.** The `was is True and now is False` branch may compose `checked=True` only when `sessions.verified_at` is set. That column is written only on the owner path (`is_owner and not is_agent`), so it is the only provenance signal in the system. Absent it, do not PATCH: the agent already put the desired end state on GitHub, and writing nothing is the smaller action. Log the refusal at WARNING with `was`, `now`, `verified_at`, and the sender.
+
+**Unchanged.** B2, B3, B5, the `was is not None and now is None` (B4) branch, and ADR-15's two guards — fresh read, `now_current != now` abort, sanity floor, skip-if-unchanged. Those were proven correct in the same live run (two deliveries aborted with `checkbox moved since webhook`). B4 can still restore a ticked line when the agent *deletes* the checkbox rather than unticking it; named as a residual, not enlarged here, because Architect scoped this PR to the restore-up branch only.
+
+**Rejected: keep #65's rule and try to attribute `changes.body.from`.** GitHub's `issues.edited` payload does not name who wrote the before-image. Reconstructing it from prior deliveries is a reconciler, and the reconciler is #81.
+
+**Follow-up, not this ADR.** Close-time reconcile — a ticked body with `verified_at IS NULL` must escalate rather than classify `VERIFIED` — is the defence in depth for anything that slips past the branch. It is a different function (`_owner_close_teardown`) and it collides with §10.3 ("no attempt to reopen an issue the owner closed") plus the teardown suite that currently treats a ticked payload as sufficient authority. Filed as #90 so this reversal stays one branch.
+
+*Out of scope:* the §10.2 warning comment waking agent turns (gateway login is routed `human-or-other` → ROUTE). Same family as #85; scoped there.
 
 ---
 
