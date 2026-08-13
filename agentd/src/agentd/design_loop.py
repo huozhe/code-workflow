@@ -1687,6 +1687,7 @@ class DesignLoop:
     ) -> Path | None:
         """§10.5 step 3: archive, purge, then CLOSED. None = nothing to flip on."""
         fresh = self.store.get_session(session_key) or sess
+        turn_count = self.store.count_turns(session_key)
         dest = archive_and_purge(
             root=self.config.root,
             repo=repo,
@@ -1696,7 +1697,7 @@ class DesignLoop:
             terminal_state=classification,
             design_pr=fresh.get("design_pr"),
             feature_pr=fresh.get("feature_pr"),
-            turn_count=int(fresh.get("turn_count") or 0),
+            turn_count=turn_count,
         )
         if dest is None:
             return None
@@ -1718,7 +1719,7 @@ class DesignLoop:
             classification=classification,
             design_pr=fresh.get("design_pr"),
             feature_pr=fresh.get("feature_pr"),
-            turn_count=int(fresh.get("turn_count") or 0),
+            turn_count=turn_count,
             archive_rel=archive_rel,
         )
         try:

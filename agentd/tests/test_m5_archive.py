@@ -219,7 +219,7 @@ def test_drained_teardown_archives_then_closes(tmp_path: Path, monkeypatch) -> N
         "terminal_state": "VERIFIED",
         "design_pr": 59,
         "feature_pr": 60,
-        "turn_count": 13,
+        "turn_count": 0,
         "closed_at": 1_700_000_000,
     }
     # Archive is not an artifacts-ledger row (ADR-12).
@@ -333,6 +333,39 @@ def test_open_ledger_does_not_archive(tmp_path: Path) -> None:
     assert session.exists()
     dest = archive_tarball_path(tmp_path, "huozhe/code-workflow", 58)
     assert not dest.exists()
+    store.close()
+
+
+def test_manifest_turn_count_reads_turns_table(tmp_path: Path) -> None:
+    """#72: ADR-12 turn_count is observed rows, not the cached column."""
+    store = Store(tmp_path / "state.db")
+    sk = _seed(store, classification="ABANDONED", turn_count=0)
+    store.update_session_fields(sk, turn_count=0)
+    for i in range(3):
+        store.insert_turn(
+            turn_id=f"t-{i}",
+            session_key=sk,
+            role="developer",
+            delivery_id=None,
+            started_at=i,
+            ended_at=i,
+            status="done",
+            summary="ok",
+        )
+    _make_session_dir(tmp_path)
+    _insert_close(
+        store,
+        did="d-turns",
+        payload=_closed_payload(body=_block(checked=False)),
+    )
+    _loop(store, tmp_path).process_deferred_batch()
+    dest = archive_tarball_path(tmp_path, "huozhe/code-workflow", 58)
+    with tarfile.open(dest, "r:gz") as tf:
+        manifest = json.loads(
+            tf.extractfile("58/manifest.json").read().decode("utf-8")  # type: ignore[union-attr]
+        )
+    assert store.get_session(sk)["turn_count"] == 0
+    assert manifest["turn_count"] == 3
     store.close()
 
 
