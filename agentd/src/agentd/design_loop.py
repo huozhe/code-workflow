@@ -75,10 +75,12 @@ _REVIEW_PART_EVENTS = frozenset(
 _merge_auth_attempts: dict[str, int] = {}
 _MERGE_AUTH_MAX_ATTEMPTS = 5
 
-# #69 B1: teardown retries are unbounded without this — §9.2 budgets
-# do not apply on the close path. Restart resets the counter.
-_teardown_attempts: dict[str, int] = {}
-_TEARDOWN_MAX_ATTEMPTS = 5
+# #69 / #78: ensure_session and teardown retries are unbounded without this.
+# §9.2 budgets do not apply on these paths. Restart resets the counter.
+_delivery_attempts: dict[str, int] = {}
+_DELIVERY_MAX_ATTEMPTS = 5
+_teardown_attempts = _delivery_attempts
+_TEARDOWN_MAX_ATTEMPTS = _DELIVERY_MAX_ATTEMPTS
 
 # Webhook kinds that are observed GitHub progress (P1) — reset silent_turns
 # even when the FSM string does not change (e.g. design_revised while already
@@ -636,16 +638,46 @@ class DesignLoop:
             return
 
         # Dispatch turn to the session runner
-        if self.dispatch_turns and self.supervisor and sess.get("endpoint"):
+        if self.dispatch_turns and self.supervisor:
             turn_id = "t-" + uuid.uuid4().hex[:12]
-            turn_result = self._dispatch_turn(
-                session_key=session_key,
-                role=recipient_role,
-                turn_id=turn_id,
-                delivery_id=delivery_id,
-                dig=dig,
-                issue_num=int(issue_num),
-            )
+            try:
+                turn_result = self._dispatch_turn(
+                    session_key=session_key,
+                    role=recipient_role,
+                    turn_id=turn_id,
+                    delivery_id=delivery_id,
+                    dig=dig,
+                    issue_num=int(issue_num),
+                )
+            except CapacityRefusal as exc:
+                if self._dispatch_retry_or_give_up(
+                    delivery_id=delivery_id,
+                    session_key=session_key,
+                    reason=f"ensure_session capacity: {exc}",
+                ):
+                    return
+                self.store.set_delivery_status(delivery_id, "done")
+                return
+            except StructuralRefusal as exc:
+                self._handle_structural_refusal(
+                    session_key=session_key,
+                    repo=repo,
+                    issue_num=int(issue_num),
+                    delivery_id=delivery_id,
+                    reason=str(exc),
+                    architect=architect,
+                    developer=developer,
+                )
+                return
+            if turn_result is None:
+                if self._dispatch_retry_or_give_up(
+                    delivery_id=delivery_id,
+                    session_key=session_key,
+                    reason="no turn after ensure_session",
+                ):
+                    return
+                self.store.set_delivery_status(delivery_id, "done")
+                return
             status = (turn_result or {}).get("status")
             # Role still held after prior gateway timeout — leave deferred so
             # the single drain thread is not blocked (PR #37 B1 / #34).
@@ -704,6 +736,26 @@ class DesignLoop:
         sess = self.store.get_session(session_key) or {}
         repo = str(sess.get("repo") or "")
         project_key = str(sess.get("project_key") or project_key_from_repo(repo))
+        # #78: a runners row is not reachability. Probe/adopt/recreate first.
+        # CapacityRefusal / StructuralRefusal stay typed for the caller.
+        if self.supervisor is not None and hasattr(self.supervisor, "ensure_session"):
+            try:
+                self.supervisor.ensure_session(
+                    session_key=session_key,
+                    repo=repo,
+                    issue_num=int(issue_num),
+                    architect_login=str(sess.get("architect") or "") or None,
+                    developer_login=str(sess.get("developer") or "") or None,
+                )
+            except CapacityRefusal:
+                raise
+            except StructuralRefusal:
+                raise
+            except Exception:
+                log.exception("ensure_session before turn failed %s", session_key)
+                return None
+            sess = self.store.get_session(session_key) or sess
+            project_key = str(sess.get("project_key") or project_key)
         runner = self.store.get_runner(project_key) or self.store.get_runner_for_session(
             session_key
         )
@@ -1851,6 +1903,58 @@ class DesignLoop:
             reason=fail_reason,
         )
 
+    def _retry_or_give_up(
+        self,
+        *,
+        delivery_id: str,
+        session_key: str,
+        reason: str,
+        label: str,
+        exhaust_suffix: str = "",
+    ) -> bool:
+        """True = stay deferred. False = exhausted: escalate and stop."""
+        n = int(_delivery_attempts.get(delivery_id, 0)) + 1
+        _delivery_attempts[delivery_id] = n
+        if n < _DELIVERY_MAX_ATTEMPTS:
+            log.warning(
+                "%s deferred id=%s session=%s attempt=%s/%s: %s",
+                label,
+                delivery_id,
+                session_key,
+                n,
+                _DELIVERY_MAX_ATTEMPTS,
+                reason,
+            )
+            return True
+        _delivery_attempts.pop(delivery_id, None)
+        log.warning(
+            "%s exhausted retries id=%s session=%s: %s",
+            label,
+            delivery_id,
+            session_key,
+            reason,
+        )
+        self._escalate(
+            session_key,
+            "system",
+            f"{label} still failing after {n} attempts: {reason}{exhaust_suffix}",
+        )
+        return False
+
+    def _dispatch_retry_or_give_up(
+        self,
+        *,
+        delivery_id: str,
+        session_key: str,
+        reason: str,
+    ) -> bool:
+        return self._retry_or_give_up(
+            delivery_id=delivery_id,
+            session_key=session_key,
+            reason=reason,
+            label="dispatch",
+        )
+
     def _teardown_retry_or_give_up(
         self,
         *,
@@ -1859,36 +1963,18 @@ class DesignLoop:
         reason: str,
     ) -> bool:
         """True = stay deferred. False = exhausted: escalate and stop."""
-        n = int(_teardown_attempts.get(delivery_id, 0)) + 1
-        _teardown_attempts[delivery_id] = n
-        if n < _TEARDOWN_MAX_ATTEMPTS:
-            log.warning(
-                "teardown deferred id=%s session=%s attempt=%s/%s: %s",
-                delivery_id,
-                session_key,
-                n,
-                _TEARDOWN_MAX_ATTEMPTS,
-                reason,
-            )
-            return True
-        _teardown_attempts.pop(delivery_id, None)
         leftover = self.store.list_artifacts(session_key, open_only=True)
         refs = [f"{r.get('kind')}:{r.get('ref')}" for r in leftover]
-        log.warning(
-            "teardown exhausted retries id=%s session=%s: %s open=%s",
-            delivery_id,
-            session_key,
-            reason,
-            refs,
+        stay = self._retry_or_give_up(
+            delivery_id=delivery_id,
+            session_key=session_key,
+            reason=reason,
+            label="teardown",
+            exhaust_suffix=f". open artifacts: {refs or ['none']}",
         )
-        self._log_teardown_leaks(session_key)
-        self._escalate(
-            session_key,
-            "system",
-            f"teardown still failing after {n} attempts: {reason}. "
-            f"open artifacts: {refs or ['none']}",
-        )
-        return False
+        if not stay:
+            self._log_teardown_leaks(session_key)
+        return stay
 
     def _confirm_teardown_artifacts(self, session_key: str, repo: str) -> None:
         """Mark removed_at only after the gateway observes the ref is gone."""
@@ -2078,16 +2164,51 @@ class DesignLoop:
                 self.store.set_delivery_status(delivery_id, "deferred")
                 return
 
-        if self.dispatch_turns and self.supervisor and sess.get("endpoint"):
+        if self.dispatch_turns and self.supervisor:
             turn_id = "t-" + uuid.uuid4().hex[:12]
-            turn_result = self._dispatch_turn(
-                session_key=session_key,
-                role=esc_role,
-                turn_id=turn_id,
-                delivery_id=delivery_id,
-                dig=dig,
-                issue_num=issue_num,
-            )
+            try:
+                turn_result = self._dispatch_turn(
+                    session_key=session_key,
+                    role=esc_role,
+                    turn_id=turn_id,
+                    delivery_id=delivery_id,
+                    dig=dig,
+                    issue_num=issue_num,
+                )
+            except CapacityRefusal as e:
+                log.warning(
+                    "ensure_session deferred on resume (capacity) %s: %s",
+                    session_key,
+                    e,
+                )
+                if self._dispatch_retry_or_give_up(
+                    delivery_id=delivery_id,
+                    session_key=session_key,
+                    reason=f"ensure_session capacity: {e}",
+                ):
+                    return
+                self.store.set_delivery_status(delivery_id, "done")
+                return
+            except StructuralRefusal as e:
+                self._handle_structural_refusal(
+                    session_key=session_key,
+                    repo=str(sess.get("repo") or ""),
+                    issue_num=int(issue_num),
+                    delivery_id=delivery_id,
+                    reason=str(e),
+                    architect=str(sess.get("architect") or "huozheclaude"),
+                    developer=str(sess.get("developer") or "huozhegrok"),
+                )
+                return
+            if turn_result is None:
+                if self._dispatch_retry_or_give_up(
+                    delivery_id=delivery_id,
+                    session_key=session_key,
+                    reason="no turn after ensure_session",
+                ):
+                    return
+                self.store.set_delivery_status(delivery_id, "done")
+                return
             status = (turn_result or {}).get("status")
             if status == "role_busy":
                 return

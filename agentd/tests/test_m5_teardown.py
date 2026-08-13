@@ -659,7 +659,7 @@ def test_no_runner_ensure_session_still_sends_teardown_state(tmp_path: Path) -> 
         import agentd.design_loop as dl
 
         dl.RunnerClient = loop._orig_client  # type: ignore[attr-defined, misc]
-    assert sup.calls == 1
+    assert sup.calls >= 1
     assert len(_RecordingClient.calls) == 2
     states = [p.get("session_state") for _, p in _RecordingClient.calls]
     assert states == ["TEARDOWN", "TEARDOWN"]
@@ -800,7 +800,7 @@ def test_stale_runner_row_still_calls_ensure_session(tmp_path: Path) -> None:
         import agentd.design_loop as dl
 
         dl.RunnerClient = loop._orig_client  # type: ignore[attr-defined, misc]
-    assert sup.calls == 1
+    assert sup.calls >= 1
     states = [p.get("session_state") for _, p in _RecordingClient.calls]
     assert states == ["TEARDOWN", "TEARDOWN"]
     store.close()
