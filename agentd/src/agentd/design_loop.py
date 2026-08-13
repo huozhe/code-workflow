@@ -1314,13 +1314,13 @@ class DesignLoop:
 
         Classification at issues.closed (M5-2/3) must read the checkbox from the
         **closed payload's issue.body** — GitHub is source of truth (P1).
-        ``verified_at`` is only an audit record of when this gateway observed a
-        valid owner tick; it is never the authority for restore or classification.
-
-        Agent restore compares checkbox state **across this edit** via
-        ``changes.body.from`` (PR #65 B1). Local ``verified_at`` is not used for
-        restore: a missed delivery while the daemon is down must not let a later
-        agent step-refine untick a real owner mark.
+        ``verified_at`` is the audit record of when this gateway observed a
+        valid owner tick. It is not the authority for classification, and it
+        is not used for B2/B3/B4/B5. It *is* the gate on restore-*up*
+        (ADR-16 / #89): compose ``checked=True`` only when this gateway has
+        itself observed the owner tick. A missed owner-tick delivery then
+        costs one re-tick; trusting an unproven ``was=True`` can VERIFY a
+        session no human verified.
 
         Gateway body edits are ignored (#64 Architect note): the gateway is a
         bot but not an agent, and it authors the verification scaffold.
@@ -1430,7 +1430,7 @@ class DesignLoop:
         body: str,
         changes: dict[str, Any],
     ) -> None:
-        """Restore checkbox/block using changes.body.from (PR #65 / ADR-15).
+        """Restore checkbox/block using changes.body.from (PR #65 / ADR-15 / ADR-16).
 
         Invariant (B3): the box must never leave an agent edit *more checked*
         than it entered. ``now is True and was is not True`` covers no prior
@@ -1440,6 +1440,10 @@ class DesignLoop:
         ADR-15: *which* branch fires is still decided from the payload pair
         ``(prev, body)``. The text the write is built from is a fresh GET,
         taken only after a non-no-op branch is selected.
+
+        ADR-16: the ``was is True and now is False`` branch composes
+        ``checked=True`` only when ``sessions.verified_at`` is set. Absent
+        that record, leave the body alone.
         """
         body_change = changes.get("body")
         prev: str | None = None
@@ -1496,7 +1500,22 @@ class DesignLoop:
 
             reason = "bare checkbox outside sentinels (no protocol block)"
         elif was is True and now is False:
-            # Owner tick was present before this edit; agent unticked — restore up.
+            # Restore-up only if this gateway observed the owner tick (ADR-16).
+            # ``was=True`` from changes.body.from has no provenance; an agent
+            # tick moments earlier is indistinguishable from an owner tick.
+            sess_now = self.store.get_session(session_key) or {}
+            observed = sess_now.get("verified_at")
+            if not observed:
+                log.warning(
+                    "issues.edited by agent session=%s — restore-up refused "
+                    "(was=True now=False verified_at=%s sender=%s); leave body",
+                    session_key,
+                    observed,
+                    sender,
+                )
+                self.store.set_delivery_status(delivery_id, "done")
+                return
+
             def compose(current: str) -> str:
                 return set_checkbox_in_body(current, checked=True)
 

@@ -241,7 +241,7 @@ def test_agent_tick_restores_and_warns(tmp_path: Path) -> None:
 
 
 def test_agent_untick_restores_checked_from_prev(tmp_path: Path) -> None:
-    """Agent flips checked → unchecked; restore was=True even if verified_at set."""
+    """#65 / #89 regression: owner tick recorded; agent untick restores up."""
     store = Store(tmp_path / "state.db")
     cfg = _cfg(tmp_path)
     sk = _seed(store, verified_at=int(time.time()))
@@ -938,6 +938,103 @@ def test_adr15_collapsed_current_escalates_no_patch(tmp_path: Path) -> None:
     assert sess["resume_state"] == "AWAITING_VERIFICATION"
     assert comments and "Gateway wrote nothing" in comments[0]
     assert "collapsed" in comments[0]
+    store.close()
+
+
+def test_agent_untick_without_verified_at_does_not_restore_up(
+    tmp_path: Path, caplog
+) -> None:
+    """#89: agent-made was=True has no authority. Leave the body; log loudly."""
+    store = Store(tmp_path / "state.db")
+    cfg = _cfg(tmp_path)
+    sk = _seed(store, verified_at=None)
+    prev = _body(checked=True)
+    body = _body(checked=False)
+    patches: list = []
+    comments: list = []
+
+    loop = DesignLoop(
+        store,
+        cfg,
+        supervisor=None,
+        dispatch_turns=False,
+        gateway_token="gw",
+        get_issue_body_fn=lambda **_: body,
+        patch_issue_body_fn=lambda **kw: patches.append(kw),  # noqa: ARG005
+        post_comment=lambda **kw: comments.append(kw) or 1,  # noqa: ARG005
+    )
+    _insert(
+        store,
+        "d-forge-untick",
+        _edited_payload(
+            issue=58, sender="huozhegrok", body=body, body_from=prev
+        ),
+        issue=58,
+        sender="huozhegrok",
+    )
+    with caplog.at_level("WARNING"):
+        loop.process_deferred_batch()
+    assert store.get_session(sk)["verified_at"] is None
+    assert patches == []
+    assert comments == []
+    text = " ".join(r.getMessage() for r in caplog.records)
+    assert "restore-up refused" in text
+    assert "was=True" in text
+    assert "now=False" in text
+    assert "verified_at=None" in text
+    assert "huozhegrok" in text
+    store.close()
+
+
+def test_agent_tick_then_untick_queued_does_not_restore_up(tmp_path: Path) -> None:
+    """#89 live shape: both edits queued; box ends unchecked, no restore-up PATCH."""
+    store = Store(tmp_path / "state.db")
+    cfg = _cfg(tmp_path)
+    sk = _seed(store, verified_at=None)
+    unchecked = _body(checked=False)
+    ticked = _body(checked=True)
+    live = {"body": unchecked}
+    patches: list[str] = []
+
+    def fake_get(**_):  # noqa: ANN003
+        return live["body"]
+
+    def fake_patch(*, repo, issue_num, body, token):  # noqa: ANN001
+        patches.append(body)
+        live["body"] = body
+
+    loop = DesignLoop(
+        store,
+        cfg,
+        supervisor=None,
+        dispatch_turns=False,
+        gateway_token="gw",
+        get_issue_body_fn=fake_get,
+        patch_issue_body_fn=fake_patch,
+        post_comment=lambda **kw: 1,  # noqa: ARG005
+    )
+    _insert(
+        store,
+        "d-tick",
+        _edited_payload(
+            issue=58, sender="huozhegrok", body=ticked, body_from=unchecked
+        ),
+        issue=58,
+        sender="huozhegrok",
+    )
+    _insert(
+        store,
+        "d-untick",
+        _edited_payload(
+            issue=58, sender="huozhegrok", body=unchecked, body_from=ticked
+        ),
+        issue=58,
+        sender="huozhegrok",
+    )
+    loop.process_deferred_batch()
+    assert store.get_session(sk)["verified_at"] is None
+    assert checkbox_is_checked(live["body"], strict=True) is False
+    assert all(checkbox_is_checked(p, strict=True) is not True for p in patches)
     store.close()
 
 
