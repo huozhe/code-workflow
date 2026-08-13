@@ -74,6 +74,7 @@ def _seed(
     with_runner: bool = True,
     classification: str | None = None,
     with_session_dir: bool = False,
+    verified_at: int | None = 1,
 ) -> str:
     sk = f"huozhe/code-workflow#{issue}"
     store.upsert_session(
@@ -89,6 +90,9 @@ def _seed(
     )
     if classification is not None:
         store.update_session_fields(sk, classification=classification)
+    # ADR-17: VERIFIED requires verified_at. Default stamp; opt out with 0.
+    if verified_at:
+        store.update_session_fields(sk, verified_at=int(verified_at))
     if with_runner:
         store.upsert_runner(
             "huozhe/code-workflow",
@@ -250,6 +254,33 @@ def test_owner_close_unticked_is_abandoned(tmp_path: Path) -> None:
     assert sess is not None
     assert sess["state"] == "CLOSED"
     assert sess["classification"] == "ABANDONED"
+    store.close()
+
+
+def test_owner_close_unticked_null_verified_at_is_abandoned(tmp_path: Path) -> None:
+    """Ordinary abandon: no observed tick. Must not enter the ADR-17 gate."""
+    store = Store(tmp_path / "state.db")
+    sk = _seed(
+        store,
+        tmp_path,
+        state="IMPLEMENTING",
+        with_session_dir=True,
+        verified_at=0,
+    )
+    posts: list = []
+    _insert_close(
+        store,
+        did="d-abandon-null",
+        payload=_closed_payload(body=_block(checked=False)),
+    )
+    _loop(store, tmp_path, posts=posts).process_deferred_batch()
+    sess = store.get_session(sk)
+    assert sess is not None
+    assert sess["state"] == "CLOSED"
+    assert sess["classification"] == "ABANDONED"
+    assert not sess.get("verified_at")
+    assert store.get_open_escalation(sk) is None
+    assert posts == []
     store.close()
 
 
