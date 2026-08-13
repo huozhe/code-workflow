@@ -157,6 +157,11 @@ def _run_claude(prompt: str, cwd: Path, env: dict[str, str], deadline_s: int) ->
                 result_summary = r
     public_actions = dedupe_actions(actions)
     if proc.returncode != 0:
+        from agentd_runner.quota import classify_quota
+
+        quota = classify_quota(text=str(result_summary or proc.stderr or proc.stdout or ""))
+        if quota is not None:
+            return {**quota, "public_actions": public_actions, "artifacts": []}
         return {
             "status": "failed",
             "summary": f"claude exit {proc.returncode}: {(proc.stderr or proc.stdout)[:800]}",
@@ -217,6 +222,11 @@ def _run_grok(prompt: str, cwd: Path, env: dict[str, str], deadline_s: int) -> d
             actions.append(act)
     public_actions = dedupe_actions(actions)
     if proc.returncode != 0:
+        from agentd_runner.quota import classify_quota
+
+        quota = classify_quota(text=proc.stderr or out)
+        if quota is not None:
+            return {**quota, "public_actions": public_actions, "artifacts": []}
         return {
             "status": "failed",
             "summary": f"grok exit {proc.returncode}: {(proc.stderr or out)[:800]}",

@@ -28,6 +28,7 @@ from agentd_runner.public_actions import (
     from_claude_stream_obj,
     from_grok_session_update,
 )
+from agentd_runner.quota import classify_quota, redact_envelope
 
 log = logging.getLogger("agentd_runner.cli_session")
 
@@ -582,6 +583,27 @@ class LiveCliSession:
         else:
             summary = str(summary)[:4000]
         is_err = bool((result_obj or {}).get("is_error"))
+        if is_err:
+            # Envelope is vendor-owned; log it so the next quota hit pins
+            # the shape instead of us guessing (#86). Prompt-sized keys go.
+            log.warning(
+                "claude failed envelope role=%s %s",
+                self.role,
+                redact_envelope(result_obj),
+            )
+            # Vendor refusal produces no assistant text and no tool use.
+            # A turn that *talked about* a limit still has both (#94 B1).
+            quota = (
+                classify_quota(text=str(summary))
+                if not texts and not public_actions
+                else None
+            )
+            if quota is not None:
+                return {
+                    **quota,
+                    "public_actions": dedupe_actions(public_actions),
+                    "artifacts": [],
+                }
         return {
             "status": "failed" if is_err else "done",
             "summary": summary,
@@ -650,9 +672,22 @@ class LiveCliSession:
 
         actions = dedupe_actions(public_actions)
         if result and result.get("error"):
+            log.warning(
+                "grok failed envelope role=%s %s",
+                self.role,
+                redact_envelope(result),
+            )
+            err = result["error"]
+            quota = classify_quota(error=err)
+            if quota is not None:
+                return {
+                    **quota,
+                    "public_actions": actions,
+                    "artifacts": [],
+                }
             return {
                 "status": "failed",
-                "summary": str(result["error"])[:800],
+                "summary": str(err)[:800],
                 "public_actions": actions,
                 "artifacts": [],
             }
@@ -663,6 +698,16 @@ class LiveCliSession:
             text = str((result.get("result") or {}).get("text") or "")[:4000]
         text = (text or "").strip()
         if stop and stop != "end_turn":
+            # stopReason is a vendor channel. Do not classify from
+            # accumulated agent_message_chunk text (#94 B1).
+            quota = classify_quota(stop_reason=stop)
+            if quota is not None:
+                return {
+                    **quota,
+                    "public_actions": actions,
+                    "artifacts": [],
+                    "stop_reason": stop,
+                }
             status = "needs_human" if stop in ("refusal", "rejected") else "failed"
             summary = text or f"grok stopReason={stop}"
             log.info("grok stopReason=%s → %s role=%s", stop, status, self.role)
