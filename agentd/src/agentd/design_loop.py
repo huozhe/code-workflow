@@ -119,6 +119,21 @@ _role_locks_guard = threading.Lock()
 # does not interleave (#34). Cleared when the wait elapses.
 _role_busy_until: dict[str, float] = {}
 
+# ADR-9 / #86: statuses the gateway understands. Anything else degrades
+# to failed so a newer runner against an older gateway does not crash.
+_KNOWN_TURN_STATUSES = frozenset(
+    {
+        "done",
+        "failed",
+        "role_busy",
+        "gateway_timeout",
+        "needs_human",
+        "quota_exhausted",
+    }
+)
+# When the adapter omits retry_after. In-memory; forgotten on restart.
+QUOTA_BACKOFF_S = 1800.0
+
 # Short-lived compare cache: same head ⇒ same tree; review *threads* can
 # resolve without a new commit, so they are never cached (PR #29 NB2).
 _STALL_DIFF_CACHE: dict[str, str] = {}
@@ -149,6 +164,37 @@ def _lock_for_project_role(project_key: str, role: str) -> threading.Lock:
 
 def _role_key(project_key: str, role: str) -> str:
     return f"{project_key}::{role}"
+
+
+def _normalize_turn_status(status: str) -> str:
+    if status in _KNOWN_TURN_STATUSES:
+        return status
+    log.warning("unknown turn status=%s — treating as failed", status)
+    return "failed"
+
+
+def _hold_role_for_quota(
+    rkey: str,
+    retry_after: object,
+    *,
+    session_key: str,
+    role: str,
+) -> None:
+    now = time.time()
+    try:
+        until = float(retry_after) if retry_after is not None else 0.0
+    except (TypeError, ValueError):
+        until = 0.0
+    if until <= now:
+        until = now + QUOTA_BACKOFF_S
+    _role_busy_until[rkey] = until
+    log.warning(
+        "quota exhausted session=%s role=%s retry_after=%s "
+        "(in-memory gate; forgotten on daemon restart; does not schedule)",
+        session_key,
+        role,
+        int(until),
+    )
 
 
 def _is_rpc_timeout(exc: BaseException) -> bool:
@@ -698,7 +744,8 @@ class DesignLoop:
             status = (turn_result or {}).get("status")
             # Role still held after prior gateway timeout — leave deferred so
             # the single drain thread is not blocked (PR #37 B1 / #34).
-            if status == "role_busy":
+            # quota_exhausted is the same shape: no turn happened (#86).
+            if status in ("role_busy", "quota_exhausted"):
                 return
             # Gateway timeout: runner may still finish; do not budget a phantom
             # failed turn (#34). Successful / other failed paths count once.
@@ -969,7 +1016,17 @@ class DesignLoop:
             return {"status": status, "summary": summary, "public_actions": []}
 
         ended = int(time.time())
-        status = str((result or {}).get("status") or "done")
+        status = _normalize_turn_status(str((result or {}).get("status") or "done"))
+        if isinstance(result, dict):
+            result = dict(result)
+            result["status"] = status
+        if status == "quota_exhausted":
+            _hold_role_for_quota(
+                rkey,
+                (result or {}).get("retry_after"),
+                session_key=session_key,
+                role=role,
+            )
         summary = str((result or {}).get("summary") or "")[:2000]
         raw_actions = (result or {}).get("public_actions") or []
         if not isinstance(raw_actions, list):
@@ -2049,7 +2106,7 @@ class DesignLoop:
                 dig=dig,
                 issue_num=int(issue_num),
             )
-            if result and result.get("status") == "role_busy":
+            if result and result.get("status") in ("role_busy", "quota_exhausted"):
                 return True
             status = str((result or {}).get("status") or "")
             if result is None or status in ("failed", "gateway_timeout"):
@@ -2398,7 +2455,7 @@ class DesignLoop:
                 return
             _delivery_attempts.pop(delivery_id, None)
             status = (turn_result or {}).get("status")
-            if status == "role_busy":
+            if status in ("role_busy", "quota_exhausted"):
                 return
             if status != "gateway_timeout":
                 budget = BudgetState(

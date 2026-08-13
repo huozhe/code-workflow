@@ -714,3 +714,165 @@ def test_grok_empty_end_turn_is_failed(tmp_path: Path) -> None:
 
     assert result["status"] == "failed"
     assert "empty" in result["summary"].lower()
+
+
+def test_claude_session_limit_is_quota_exhausted(tmp_path: Path) -> None:
+    """#86: recorded Claude session-limit envelope is not a failed turn."""
+    from datetime import datetime, timezone
+
+    lines = [
+        json.dumps(
+            {
+                "type": "result",
+                "session_id": "s-lim",
+                "is_error": True,
+                "result": "You've hit your session limit · resets 9:30am (UTC)",
+            }
+        ),
+    ]
+    sess = cli_session.LiveCliSession(
+        role="architect",
+        adapter="claude-code",
+        uid=1001,
+        home=tmp_path / "h",
+        tmp=tmp_path / "t",
+        xdg=tmp_path / "x",
+        spawn_cwd=tmp_path,
+    )
+    _wire_stdout_queue(sess, lines)
+    now = datetime(2026, 8, 13, 1, 43, tzinfo=timezone.utc).timestamp()
+    with (
+        patch.object(cli_session.LiveCliSession, "_sample_rss"),
+        patch("agentd_runner.quota.time.time", return_value=now),
+    ):
+        result = sess.turn("continue", deadline_s=5)
+    assert result["status"] == "quota_exhausted"
+    assert result["status"] != "failed"
+    want = int(datetime(2026, 8, 13, 9, 30, tzinfo=timezone.utc).timestamp())
+    assert result["retry_after"] == want
+    assert "session limit" in result["summary"].lower()
+
+
+def test_claude_generic_is_error_still_failed(tmp_path: Path) -> None:
+    """Regression: a real is_error is not swallowed as quota."""
+    lines = [
+        json.dumps(
+            {
+                "type": "result",
+                "session_id": "s-err",
+                "is_error": True,
+                "result": "API Error: 500 Internal Server Error",
+            }
+        ),
+    ]
+    sess = cli_session.LiveCliSession(
+        role="architect",
+        adapter="claude-code",
+        uid=1001,
+        home=tmp_path / "h",
+        tmp=tmp_path / "t",
+        xdg=tmp_path / "x",
+        spawn_cwd=tmp_path,
+    )
+    _wire_stdout_queue(sess, lines)
+    with patch.object(cli_session.LiveCliSession, "_sample_rss"):
+        result = sess.turn("go", deadline_s=5)
+    assert result["status"] == "failed"
+    assert result.get("retry_after") is None
+
+
+def test_grok_rate_limit_stop_reason_is_quota_exhausted(tmp_path: Path) -> None:
+    import queue as qmod
+
+    q: qmod.Queue[str | None] = qmod.Queue()
+    q.put(
+        json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 1001,
+                "result": {
+                    "stopReason": "rate_limited",
+                    "text": "rate limited, try again later",
+                },
+            }
+        )
+    )
+    sess = cli_session.LiveCliSession(
+        role="developer",
+        adapter="grok-cli",
+        uid=1002,
+        home=tmp_path / "h",
+        tmp=tmp_path / "t",
+        xdg=tmp_path / "x",
+        spawn_cwd=tmp_path,
+    )
+    sess.acp_session_id = "s"
+    sess._rpc_id = 1000
+    sess._stdout_q = q
+    sess.proc = MagicMock()
+    sess.proc.poll.return_value = None
+    sess.proc.stdin = MagicMock()
+    with patch.object(cli_session.LiveCliSession, "_sample_rss"):
+        result = sess.turn("go", deadline_s=5)
+    assert result["status"] == "quota_exhausted"
+    assert result.get("retry_after") is None
+
+
+def test_grok_error_session_limit_is_quota_exhausted(tmp_path: Path) -> None:
+    import queue as qmod
+    from datetime import datetime, timezone
+
+    q: qmod.Queue[str | None] = qmod.Queue()
+    q.put(
+        json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 1001,
+                "error": {
+                    "code": -32000,
+                    "message": "You've hit your session limit · resets 9:30am (UTC)",
+                },
+            }
+        )
+    )
+    sess = cli_session.LiveCliSession(
+        role="developer",
+        adapter="grok-cli",
+        uid=1002,
+        home=tmp_path / "h",
+        tmp=tmp_path / "t",
+        xdg=tmp_path / "x",
+        spawn_cwd=tmp_path,
+    )
+    sess.acp_session_id = "s"
+    sess._rpc_id = 1000
+    sess._stdout_q = q
+    sess.proc = MagicMock()
+    sess.proc.poll.return_value = None
+    sess.proc.stdin = MagicMock()
+    now = datetime(2026, 8, 13, 1, 43, tzinfo=timezone.utc).timestamp()
+    with (
+        patch.object(cli_session.LiveCliSession, "_sample_rss"),
+        patch("agentd_runner.quota.time.time", return_value=now),
+    ):
+        result = sess.turn("go", deadline_s=5)
+    assert result["status"] == "quota_exhausted"
+    want = int(datetime(2026, 8, 13, 9, 30, tzinfo=timezone.utc).timestamp())
+    assert result["retry_after"] == want
+
+
+def test_parse_reset_epoch_past_clock_rolls_to_next_day() -> None:
+    from datetime import datetime, timezone
+
+    from agentd_runner.quota import parse_reset_epoch
+
+    now = datetime(2026, 8, 13, 10, 0, tzinfo=timezone.utc).timestamp()
+    got = parse_reset_epoch("resets 9:30am (UTC)", now=now)
+    want = int(datetime(2026, 8, 14, 9, 30, tzinfo=timezone.utc).timestamp())
+    assert got == want
+
+
+def test_parse_reset_epoch_resets_in_hours() -> None:
+    from agentd_runner.quota import parse_reset_epoch
+
+    assert parse_reset_epoch("resets in 4h", now=1_000_000.0) == 1_000_000 + 4 * 3600
