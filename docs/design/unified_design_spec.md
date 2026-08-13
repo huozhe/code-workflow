@@ -18,7 +18,7 @@ Amendments are also marked inline at the point they apply, which is where an imp
 
 | Version | Date | Change |
 |---|---|---|
-| **1.6.0** | 2026-08-13 | **`agentctl review-stats` decided** (#49, ADR-14). #49's coalescing mechanism (PR #52) is code-complete; the outstanding checklist item is re-measuring turns-per-review rather than hand-writing a `SELECT`. Groups inline comments to their parent review via `comment.pull_request_review_id` (no linkage exists for thread-resolve events, so those are reported at PR level instead of guessed into a review's count); reads emptiness from `turns.public_actions` (schema v6, #39) via the `turns.delivery_id` join already recorded at dispatch; no new schema — decompresses `deliveries.payload` at query time, scoped per session. JSON output, `--session` optional, following `write-verification`'s session resolution and `status`/`sessions`'s output convention. |
+| **1.6.0** | 2026-08-13 | **`agentctl review-stats` decided** (#49, ADR-14). #49's coalescing mechanism (PR #52) is code-complete; the outstanding checklist item is re-measuring turns-per-review rather than hand-writing a `SELECT`. Groups inline comments to their parent review via `comment.pull_request_review_id` (no linkage exists for thread-resolve events, so those are reported at session level instead of guessed into a review's count); session membership is `deliveries.repo` + `issue_num IN (sessions.issue_num, design_pr, feature_pr)`, since review traffic lands on the PR and `deliveries.issue_num` is the webhook's own issue-or-PR number, not the session issue (revised in review: the initial draft's `issue_num = sessions.issue_num` would have dropped all review traffic). Two separate grains: per-review `turns_woken`/`turns_empty` via the `turns.delivery_id` join is the coalescing check; session-wide `totals: {turns, empty}` via `turns.session_key` (no review join) is the #47-baseline comparison. `unmatched_inline_comments` reports comments whose review never emitted `review.submitted`. No new schema — decompresses `deliveries.payload` at query time. JSON output, `--session` optional, a `sessions` array always, following `write-verification`'s session resolution and `status`/`sessions`'s output convention. |
 | **1.5.0** | 2026-08-13 | **Archive excludes role `home/`, `xdg/`, `tmp/` by filter** (#74). ADR-12 claimed those paths were outside the session tree so no filter was needed. Live #47/#67 tarballs contained `sessions/<issue>/<role>/{xdg,home,tmp}` because the runner puts XDG vars and a HOME fallback there. Filter those three at `<issue>/<role>/…`; transcript, context, scratch, and `manifest.json` stay. Durable project `home/`, `repo/`, `state.db`, and `config.yaml` remain excluded by construction. `tmp/` CLI logs are debug output, not audit trail. Existing #47/#67 archives are not rewritten (no credential was present). |
 | **1.4.0** | 2026-08-12 | **Each role tears down its own worktree, branch, and scratch** (#68). §10.5 step 1 previously assigned *all* worktrees/branches to the Developer; step 2 gave the Architect only scratch. Live #47 left the Architect worktree and branch open because neither obligation named them as owned. Owner decision: each role removes its own worktree, branch, and scratch directory; both run `git worktree prune`. Order stays Developer then Architect for determinism, not dependency. Sequence in §8.2 updated to match. |
 | **1.3.0** | 2026-08-12 | **`agentctl version` decided** (#58, ADR-13). M4-4's live end-to-end demonstration of the code loop (§21 M4 exit) needs a deliberately tiny Feature PR so the exercised behaviour is the loop's mechanics, not a design debate. Prints the installed `agentd` distribution version via stdlib `importlib.metadata.version("agentd")` (no dependency, no `pyproject.toml` path guess between editable and installed layouts); dispatches before `load_config()` so the command needs no configured host; bare string to stdout, not JSON, since it is a single value meant for direct interpolation rather than a script-parsed status report. |
@@ -1296,15 +1296,67 @@ Two of the three Phase 1 drafts specified 503-on-breaker, one of them justified 
 
 *Resolves #49's outstanding checklist item.* The review-coalescing mechanism (`_REVIEW_PART_EVENTS`, `ba61eb1` / PR #52) is code-complete and tested: `pull_request_review_comment` and `pull_request_review_thread` deliveries are marked `done` without a turn, and only `pull_request_review.submitted` dispatches one. What is not done is the re-measurement the issue's exit condition asks for, and re-measuring by hand-writing a `SELECT` against columns that did not exist yet when it was sketched is the same kind of one-off instrument the delivery-requeue problem already showed is worth not repeating. `agentctl review-stats` turns that ad hoc query into a command.
 
-**Grouping key: `comment.pull_request_review_id`, not delivery timestamp proximity.** GitHub's `pull_request_review_comment` webhook payload carries `comment.pull_request_review_id`, linking each inline comment to its parent review — confirmed in the coalescing tests (`test_review_coalesce.py:109`) and matching GitHub's documented schema. That is the join key between a review (`pull_request_review.submitted`, decompressed for `review.id`) and its inline comments (`pull_request_review_comment`, decompressed for `comment.pull_request_review_id`), scoped to `deliveries.issue_num` = the PR number.
+**Grouping key: `comment.pull_request_review_id`, not delivery timestamp proximity.** GitHub's `pull_request_review_comment` webhook payload carries `comment.pull_request_review_id`, linking each inline comment to its parent review — confirmed in the coalescing tests (`test_review_coalesce.py:109`) and matching GitHub's documented schema. That is the join key between a review (`pull_request_review.submitted`, decompressed for `review.id`) and its inline comments (`pull_request_review_comment`, decompressed for `comment.pull_request_review_id`).
 
-**`pull_request_review_thread` events are not attributable to one review_id — reported at PR level, not folded into a review's count.** The `pull_request_review_thread` webhook payload (`resolved`/`unresolved`) carries only `thread.id` and `thread.is_resolved`, no review linkage (`test_review_coalesce.py:129`). A thread can accumulate comments across more than one review round, so attributing a resolve event to "the" review it belongs to would be a guess dressed as data. `review-stats` reports these as a per-session `thread_events` total alongside the per-review table, not distributed across reviews.
+**Session membership: `deliveries.repo` + `issue_num IN (sessions.issue_num, sessions.design_pr, sessions.feature_pr)`, not `issue_num = sessions.issue_num`.** `deliveries.issue_num` is the webhook's own issue-or-PR number — ingress writes `issue.number` when present, else `pull_request.number` (`server.py:218–221`) — and `deliveries` carries no `session_key`. Review traffic lands on the *PR*, not the session issue, so the naive filter drops every `pull_request_review`, `pull_request_review_comment`, and `pull_request_review_thread` row this command exists to measure. A delivery belongs to a session iff:
+
+```
+deliveries.repo = sessions.repo
+AND deliveries.issue_num IN (
+      sessions.issue_num,
+      sessions.design_pr,     -- NULL does not match an IN list member
+      sessions.feature_pr
+    )
+```
+
+This is the same predicate for review deliveries, `thread_events`, and `issue_comment_created` — the amplifier comments also live on the PR. `turns` already carries `session_key` directly and needs no such join.
+
+**`pull_request_review_thread` events are not attributable to one review_id — reported at PR/session level, not folded into a review's count.** The `pull_request_review_thread` webhook payload (`resolved`/`unresolved`) carries only `thread.id` and `thread.is_resolved`, no review linkage (`test_review_coalesce.py:129`). A thread can accumulate comments across more than one review round, so attributing a resolve event to "the" review it belongs to would be a guess dressed as data. `review-stats` reports these as a session-level `thread_events` total (via the membership predicate above), not distributed across reviews.
 
 **No new column — decompress at query time, scoped by session.** `deliveries.payload` already holds everything needed (zlib-compressed JSON, `db.decompress_payload`); adding a `review_id` column would mean a schema bump (v7 → v8) and a backfill decision for rows written before the column existed, for a command that runs on demand against a bounded, session-scoped row set — not a hot path. `turns.public_actions` (schema v6, #39) already answers "was this turn empty" directly; no new state there either. This is a query and a report, not new persistence, matching the issue's own framing of the ask.
 
-**`turns_woken` and `turns_empty` join through `turns.delivery_id`, not through re-deriving the coalescing decision.** The routed `pull_request_review` delivery's `delivery_id` is the FK `turns.delivery_id` already carries (`insert_turn`, `design_loop.py:407`). `review-stats` counts turns per review by that join and reads `turns_empty` from `public_actions IN ('[]','', NULL)` — the exact predicate the issue's own re-measurement query sketched, now backed by a real column instead of an assumed one.
+**Two grains, not one: per-review turn count vs. session-wide `totals`.** These answer different questions and must not be collapsed into a single join.
 
-**Output is JSON, scoped by `--session`, defaulting to all sessions.** `agentctl review-stats [--session <key>]` follows `write-verification`'s `_resolve_session` (accepts `repo#issue` or a bare issue number) and `status`/`sessions`'s JSON convention — the issue's exit condition is "post the numbers... in the issue body," and JSON is what gets pasted next to the #47 baseline table without hand-transcription. Per review: `review_id`, `pr`, `state`, `inline_comments`, `turn_id`, `turns_woken`, `turns_empty`. Per session: `thread_events` (PR-level, per above), `issue_comment_created` (the residual-amplifier count the issue asks to *observe*, not fix), and `totals` for direct comparison against the #47 baseline of 10-in-19.
+- *Per-review* `turns_woken` / `turns_empty` is the coalescing check ("did N inline comments still produce more than one turn?"). It joins `turns.delivery_id` to the routed `pull_request_review` delivery's `delivery_id` — the FK `insert_turn` already records at dispatch (`design_loop.py`, `_dispatch_turn`). After #52 this is normally 0 or 1 turn per review; more than 1 means a redelivery or a pre-#52 regression.
+- *Session-wide* `totals` is the #47-baseline comparison (19 turns, 10 empty) and must come from `turns WHERE session_key = …` directly, with **no** review join — the baseline counts every turn the session produced, including `issue_comment` amplifier turns and non-review turns (`pull_request.opened`, `.synchronize`, …), which a per-review rollup would silently drop:
+
+```
+totals: { turns: <int>, empty: <int> }
+empty := public_actions IN ('[]', '', NULL)
+```
+
+`totals` is the number pasted into the verification block; per-review counts are the diagnostic for *why* it moved.
+
+**Inline comments with no matching review are counted, not dropped.** The left side of the per-review join is `pull_request_review.submitted`; a `pull_request_review_comment` whose `pull_request_review_id` has no such parent delivery (the residual risk the issue itself named: a threaded reply or standalone comment path that does not emit `review.submitted`) would otherwise vanish from the report with no signal. Session-level `unmatched_inline_comments` counts these explicitly, so the instrument can see that failure mode rather than silently under-reporting.
+
+**Output is JSON, scoped by `--session`, defaulting to all sessions.** `agentctl review-stats [--session <key>]` follows `write-verification`'s `_resolve_session` (accepts `repo#issue` or a bare issue number) and `status`/`sessions`'s JSON convention. Shape — a `sessions` array regardless of whether `--session` narrows it to one entry, so callers never special-case the single-session case:
+
+```json
+{
+  "sessions": [
+    {
+      "session_key": "huozhe/code-workflow#49",
+      "reviews": [
+        {
+          "review_id": 9001,
+          "pr": 82,
+          "state": "changes_requested",
+          "inline_comments": 7,
+          "turn_id": "t-…",
+          "turns_woken": 1,
+          "turns_empty": 0
+        }
+      ],
+      "thread_events": 7,
+      "issue_comment_created": 7,
+      "unmatched_inline_comments": 0,
+      "totals": { "turns": 19, "empty": 10 }
+    }
+  ]
+}
+```
+
+Review rows are exactly the deliveries with `event = pull_request_review AND action = submitted` for the session (per the membership predicate above); `state` is GitHub's `review.state` (`approved` / `changes_requested` / `commented`), not delivery status. `turn_id` is the single routed turn's id, or `null` if the review delivery never dispatched (e.g. still `queued`/`deferred`); `turns_woken` is a count, not a boolean, so a redelivery is visible rather than masked.
 
 *Out of scope, by the issue:* no change to the coalescing mechanism itself (#49's code half, done in #52) or to §9.4's digest format; no fix for the `issue_comment.created` "reply once per review" amplifier — `review-stats` exposes the count, and whether it is real and worth a role-card change is a decision for after the live M4-4 measurement, not for this command; no change to the silent-turn thresholds (#42).
 
