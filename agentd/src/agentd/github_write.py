@@ -146,9 +146,20 @@ def format_escalation_comment(
     state: str,
     role: str,
     reason: str,
+    reply_does: str | None = None,
 ) -> str:
     """§8.5 step 2: tag owner, question, state, what each answer causes."""
     owner_tag = owner if owner.startswith("@") else f"@{owner}"
+    if reply_does is None:
+        reply_block = (
+            f"- **Any reply from you** — unpauses the session (returns to `{state}`), "
+            f"closes this escalation, and injects your comment text into the next "
+            f"agent turn for role `{role}` (or architect if system-raised).\n"
+            f"- **No reply** — session stays `PAUSED_HUMAN`; non-owner bot activity is "
+            f"deferred until you answer (P5: this comment is the non-silent signal)."
+        )
+    else:
+        reply_block = reply_does.strip()
     return (
         f"{owner_tag} — **agentd needs a decision** (session paused)\n\n"
         f"| | |\n|---|---|\n"
@@ -157,10 +168,6 @@ def format_escalation_comment(
         f"| **Raised by** | `{role}` |\n\n"
         f"**Question / reason**\n\n{reason.strip()}\n\n"
         f"**What a reply does**\n\n"
-        f"- **Any reply from you** — unpauses the session (returns to `{state}`), "
-        f"closes this escalation, and injects your comment text into the next "
-        f"agent turn for role `{role}` (or architect if system-raised).\n"
-        f"- **No reply** — session stays `PAUSED_HUMAN`; non-owner bot activity is "
-        f"deferred until you answer (P5: this comment is the non-silent signal).\n\n"
+        f"{reply_block}\n\n"
         f"<!-- agentd:escalation session={session_key} -->\n"
     )

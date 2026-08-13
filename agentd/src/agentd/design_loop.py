@@ -80,6 +80,20 @@ _MERGE_AUTH_MAX_ATTEMPTS = 5
 _delivery_attempts: dict[str, int] = {}
 _DELIVERY_MAX_ATTEMPTS = 5
 
+# ADR-17 / #90: ticked body + NULL verified_at. Grace is durable received_at,
+# not the in-memory attempt counter (that resets on restart).
+CLOSE_RECONCILE_GRACE_S = 15 * 60
+CLOSE_RECONCILE_PREFIX = "close-reconcile:"
+_close_grace_warned: set[str] = set()
+
+
+def _close_reconcile_held(state: str, sess: dict[str, Any]) -> bool:
+    """ADR-17 hold: PAUSED_HUMAN + close-reconcile: prefix. Not a §8.5 resume."""
+    return (
+        state == "PAUSED_HUMAN"
+        and str(sess.get("paused_reason") or "").startswith(CLOSE_RECONCILE_PREFIX)
+    )
+
 # Webhook kinds that are observed GitHub progress (P1) — reset silent_turns
 # even when the FSM string does not change (e.g. design_revised while already
 # DESIGN_REVIEW). Claims in public_actions never reset (PR #42 B1).
@@ -391,6 +405,7 @@ class DesignLoop:
                 sender=sender,
                 bot_logins=bot_logins,
                 data=data,
+                received_at=int(row["received_at"] or 0),
             )
             return
 
@@ -619,7 +634,16 @@ class DesignLoop:
             )
 
         # M3-A / §8.5: owner reply while paused → unpause, inject reply, resume turn.
+        # ADR-17 hold is not a question — skip resume.
         if paused and kind == "owner_reply":
+            if _close_reconcile_held(state, sess):
+                self.store.set_delivery_status(delivery_id, "done")
+                log.info(
+                    "close-reconcile hold: no resume id=%s session=%s",
+                    delivery_id,
+                    session_key,
+                )
+                return
             self._resume_from_escalation(
                 session_key=session_key,
                 sess=sess,
@@ -669,6 +693,17 @@ class DesignLoop:
                 delivery_id,
                 session_key,
                 state,
+                kind,
+            )
+            return
+
+        # ADR-17: hold blocks every ordinary turn (reopen included).
+        if _close_reconcile_held(state, sess):
+            self.store.set_delivery_status(delivery_id, "done")
+            log.info(
+                "close-reconcile hold: no turn id=%s session=%s kind=%s",
+                delivery_id,
+                session_key,
                 kind,
             )
             return
@@ -1797,6 +1832,7 @@ class DesignLoop:
         sender: str,
         bot_logins: set[str],
         data: dict[str, Any],
+        received_at: int = 0,
     ) -> None:
         """§10.3: session issue closed — owner only; agent close → reopen + escalate.
 
@@ -1818,6 +1854,7 @@ class DesignLoop:
                 issue_num=int(issue_num),
                 delivery_id=delivery_id,
                 data=data,
+                received_at=received_at,
             )
             return
 
@@ -1877,6 +1914,7 @@ class DesignLoop:
         issue_num: int,
         delivery_id: str,
         data: dict[str, Any],
+        received_at: int = 0,
     ) -> None:
         """M5-2 + M5-3: classify, teardown turns, archive, purge, CLOSED.
 
@@ -1888,6 +1926,7 @@ class DesignLoop:
                 "issues.closed by owner session=%s already CLOSED — no-op",
                 session_key,
             )
+            self.store.close_escalation(session_key)
             self.store.set_delivery_status(delivery_id, "done")
             return
 
@@ -1897,10 +1936,26 @@ class DesignLoop:
         else:
             issue = data.get("issue") if isinstance(data.get("issue"), dict) else {}
             body = issue.get("body") if isinstance(issue.get("body"), str) else ""
+            # ADR-17: ticked body is not VERIFIED without an observed owner tick.
+            if (
+                checkbox_is_checked(body, strict=True) is True
+                and not sess.get("verified_at")
+            ):
+                if not self._close_grace_elapsed(delivery_id, received_at):
+                    return
+                self._reconcile_unverifiable_close(
+                    session_key=session_key,
+                    repo=repo,
+                    issue_num=int(issue_num),
+                    delivery_id=delivery_id,
+                )
+                return
             classification = classify_at_close(body)
             self.store.update_session_fields(
                 session_key, classification=classification
             )
+
+        self.store.close_escalation(session_key)
 
         if state != "TEARDOWN":
             tr = transition(state, "issues_closed")
@@ -1961,6 +2016,117 @@ class DesignLoop:
             self.store.set_delivery_status(delivery_id, "done")
             return
         self.store.set_delivery_status(delivery_id, "done")
+
+    def _close_grace_elapsed(self, delivery_id: str, received_at: int) -> bool:
+        """True when durable received_at is older than the 15-minute grace."""
+        now = int(time.time())
+        received = int(received_at or 0)
+        deadline = received + CLOSE_RECONCILE_GRACE_S
+        if now - received <= CLOSE_RECONCILE_GRACE_S:
+            if delivery_id not in _close_grace_warned:
+                _close_grace_warned.add(delivery_id)
+                log.warning(
+                    "close-reconcile grace id=%s deadline=%s (first defer)",
+                    delivery_id,
+                    deadline,
+                )
+            else:
+                log.debug(
+                    "close-reconcile grace id=%s deadline=%s (still waiting)",
+                    delivery_id,
+                    deadline,
+                )
+            return False
+        _close_grace_warned.discard(delivery_id)
+        return True
+
+    def _reconcile_unverifiable_close(
+        self,
+        *,
+        session_key: str,
+        repo: str,
+        issue_num: int,
+        delivery_id: str,
+    ) -> None:
+        """ADR-17 post-grace: lower the box, escalate, hold. No classify/teardown."""
+        box_note = self._lower_close_checkbox(
+            session_key=session_key,
+            repo=repo,
+            issue_num=issue_num,
+        )
+        reason = (
+            f"body was ticked with no owner tick this gateway observed "
+            f"(`verified_at` is NULL). Nothing was classified and no teardown "
+            f"ran. The issue is still closed; the gateway did not reopen it. "
+            f"{box_note} Remedy: reopen, tick Human Verification Complete, "
+            f"then close. The pre-close body is recoverable from delivery "
+            f"`{delivery_id}` stored payload."
+        )
+        reply_does = (
+            "A reply changes nothing. This pause is a hold, not a question.\n\n"
+            "- **Reopen** the issue, **tick** the box, then **close**.\n"
+            "- A reply does not resume the session and does not classify."
+        )
+        self._escalate(
+            session_key,
+            "system",
+            reason,
+            reply_does=reply_does,
+            hold=True,
+        )
+        self.store.set_delivery_status(delivery_id, "done")
+
+    def _lower_close_checkbox(
+        self,
+        *,
+        session_key: str,
+        repo: str,
+        issue_num: int,
+    ) -> str:
+        """PATCH the box down against a fresh read. Skip if already down or GET fails."""
+        try:
+            get_fn = self._get_issue_body or get_issue_body
+            fetched = get_fn(
+                repo=repo,
+                issue_num=int(issue_num),
+                token=self._gateway_github_token(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "close-reconcile GET failed session=%s — skip PATCH: %s",
+                session_key,
+                exc,
+            )
+            return (
+                "The checkbox was not lowered (issue body read failed); "
+                "untick it by hand before the next close."
+            )
+        current = fetched if isinstance(fetched, str) else ""
+        if checkbox_is_checked(current, strict=True) is not True:
+            return "The checkbox is already down."
+        new_body = set_checkbox_in_body(current, checked=False)
+        footer = gateway_footer(session_key=session_key)
+        if footer not in new_body:
+            new_body = new_body.rstrip() + "\n\n" + footer + "\n"
+        try:
+            patch_fn = self._patch_issue_body or patch_issue_body
+            patch_fn(
+                repo=repo,
+                issue_num=int(issue_num),
+                body=new_body,
+                token=self._gateway_github_token(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.error(
+                "close-reconcile PATCH failed session=%s: %s",
+                session_key,
+                exc,
+            )
+            return (
+                "The checkbox was not lowered (PATCH failed); "
+                "untick it by hand before the next close."
+            )
+        return "The checkbox was lowered to `- [ ]`."
 
     def _archive_and_close(
         self,
@@ -2244,7 +2410,15 @@ class DesignLoop:
         refs = [f"{r.get('kind')}:{r.get('ref')}" for r in leftover]
         log.warning("teardown leak session=%s still open: %s", session_key, refs)
 
-    def _escalate(self, session_key: str, role: str, reason: str) -> None:
+    def _escalate(
+        self,
+        session_key: str,
+        role: str,
+        reason: str,
+        *,
+        reply_does: str | None = None,
+        hold: bool = False,
+    ) -> None:
         """§8.5: pause, post @owner comment, record escalation with comment_id."""
         sess = self.store.get_session(session_key) or {}
         prev_state = str(sess.get("state") or "PLANNING")
@@ -2268,6 +2442,7 @@ class DesignLoop:
             state=prev_state,
             role=role,
             reason=reason,
+            reply_does=reply_does,
         )
         try:
             if self._post_comment is not None:
@@ -2301,10 +2476,13 @@ class DesignLoop:
             reason=reason,
             comment_id=comment_id,
         )
+        stored_reason = (
+            f"{CLOSE_RECONCILE_PREFIX}{reason}" if hold else reason
+        )[:500]
         self.store.update_session_fields(
             session_key,
             state="PAUSED_HUMAN",
-            paused_reason=reason,
+            paused_reason=stored_reason,
             resume_state=prev_state,
         )
         log.warning(

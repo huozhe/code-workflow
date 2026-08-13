@@ -74,6 +74,7 @@ def _seed(
     with_runner: bool = True,
     classification: str | None = None,
     with_session_dir: bool = False,
+    verified_at: int | None = 1,
 ) -> str:
     sk = f"huozhe/code-workflow#{issue}"
     store.upsert_session(
@@ -89,6 +90,9 @@ def _seed(
     )
     if classification is not None:
         store.update_session_fields(sk, classification=classification)
+    # ADR-17: VERIFIED requires verified_at. Default stamp; opt out with 0.
+    if verified_at:
+        store.update_session_fields(sk, verified_at=int(verified_at))
     if with_runner:
         store.upsert_runner(
             "huozhe/code-workflow",
