@@ -12,7 +12,7 @@ from agentd.db import Store
 from agentd.design_loop import DesignLoop
 from agentd.refusals import CapacityRefusal
 from agentd.fsm import SESSION_STATES, TERMINAL_STATES, transition
-from agentd.gitops import role_branch_name, shared_clone_path
+from agentd.gitops import ensure_shared_clone, role_branch_name, shared_clone_path
 from agentd.verification import (
     classify_at_close,
     render_verification_block,
@@ -352,11 +352,12 @@ def test_owner_close_dispatches_developer_then_architect(tmp_path: Path) -> None
 
         dl.RunnerClient = loop._orig_client  # type: ignore[attr-defined, misc]
 
-    methods = [m for m, _ in _RecordingClient.calls]
-    roles = [p.get("role") for _, p in _RecordingClient.calls]
+    dispatches = [(m, p) for m, p in _RecordingClient.calls if m == "turn.dispatch"]
+    methods = [m for m, _ in dispatches]
+    roles = [p.get("role") for _, p in dispatches]
     assert methods == ["turn.dispatch", "turn.dispatch"]
     assert roles == ["developer", "architect"]
-    for _, params in _RecordingClient.calls:
+    for _, params in dispatches:
         assert params.get("session_state") == "TEARDOWN"
         event = params.get("event") or {}
         assert event.get("kind") == "issues_closed"
@@ -660,8 +661,9 @@ def test_no_runner_ensure_session_still_sends_teardown_state(tmp_path: Path) -> 
 
         dl.RunnerClient = loop._orig_client  # type: ignore[attr-defined, misc]
     assert sup.calls == 1
-    assert len(_RecordingClient.calls) == 2
-    states = [p.get("session_state") for _, p in _RecordingClient.calls]
+    dispatches = [(m, p) for m, p in _RecordingClient.calls if m == "turn.dispatch"]
+    assert len(dispatches) == 2
+    states = [p.get("session_state") for _, p in dispatches]
     assert states == ["TEARDOWN", "TEARDOWN"]
     sess = store.get_session(sk)
     assert sess is not None
@@ -726,7 +728,7 @@ def test_redelivery_retries_only_when_ledger_still_open(tmp_path: Path) -> None:
         import agentd.design_loop as dl
 
         dl.RunnerClient = loop._orig_client  # type: ignore[attr-defined, misc]
-    assert len(_RecordingClient.calls) == 2
+    assert len([m for m, _ in _RecordingClient.calls if m == "turn.dispatch"]) == 2
     store.close()
 
 
@@ -801,7 +803,11 @@ def test_stale_runner_row_still_calls_ensure_session(tmp_path: Path) -> None:
 
         dl.RunnerClient = loop._orig_client  # type: ignore[attr-defined, misc]
     assert sup.calls == 1
-    states = [p.get("session_state") for _, p in _RecordingClient.calls]
+    states = [
+        p.get("session_state")
+        for m, p in _RecordingClient.calls
+        if m == "turn.dispatch"
+    ]
     assert states == ["TEARDOWN", "TEARDOWN"]
     store.close()
 
@@ -824,7 +830,7 @@ def test_failed_teardown_turn_leaves_delivery_deferred(tmp_path: Path) -> None:
     _FailedClient.calls = []
     import agentd.design_loop as dl
 
-    dl._teardown_attempts.clear()
+    dl._delivery_attempts.clear()
     _insert_close(
         store,
         did="d-refused",
@@ -857,7 +863,7 @@ def test_failed_teardown_exhausts_and_escalates(tmp_path: Path) -> None:
     _FailedClient.calls = []
     import agentd.design_loop as dl
 
-    dl._teardown_attempts.clear()
+    dl._delivery_attempts.clear()
     _insert_close(
         store,
         did="d-exhaust",
@@ -880,7 +886,7 @@ def test_failed_teardown_exhausts_and_escalates(tmp_path: Path) -> None:
     ).fetchone()
     assert row["status"] == "done"
     # 2 roles × 5 attempts, not more (idle_wait would otherwise spin forever)
-    assert len(_FailedClient.calls) == 10
+    assert len([m for m, _ in _FailedClient.calls if m == "turn.dispatch"]) == 10
     sess = store.get_session(sk)
     assert sess is not None
     assert sess["state"] == "PAUSED_HUMAN"
@@ -908,7 +914,7 @@ def test_teardown_capacity_refusal_uses_same_retry_bound(tmp_path: Path) -> None
     posts: list = []
     import agentd.design_loop as dl
 
-    dl._teardown_attempts.clear()
+    dl._delivery_attempts.clear()
     _insert_close(
         store,
         did="d-cap",
@@ -929,4 +935,106 @@ def test_teardown_capacity_refusal_uses_same_retry_bound(tmp_path: Path) -> None
     assert row["status"] == "done"
     assert store.get_session(sk)["state"] == "PAUSED_HUMAN"
     assert posts and "capacity" in posts[0]["body"].lower()
+    store.close()
+
+
+# --- #78 B2: dispatch-time ensure must not resurrect a just-removed branch ---
+
+
+def test_teardown_second_role_does_not_resurrect_branch(tmp_path: Path) -> None:
+    """After developer deletes its branch, architect dispatch must not recreate it."""
+    store = Store(tmp_path / "state.db")
+    sk = _seed(store, tmp_path, with_runner=True, with_session_dir=True)
+    src = tmp_path / "src"
+    src.mkdir()
+    subprocess.run(["git", "init"], cwd=src, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "t@t"], cwd=src, check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "t"], cwd=src, check=True, capture_output=True
+    )
+    (src / "f").write_text("x\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=src, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "i"], cwd=src, check=True, capture_output=True)
+    clone = ensure_shared_clone(
+        tmp_path, "huozhe/code-workflow", clone_url=str(src)
+    )
+    branch = role_branch_name("huozhe/code-workflow", 58, "developer")
+    subprocess.run(["git", "branch", branch], cwd=clone, check=True, capture_output=True)
+    store.register_artifact(
+        session_key=sk, role="developer", kind="branch", ref=branch
+    )
+
+    class _RealisticSupervisor:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def ensure_session(self, **k):  # noqa: ANN003
+            self.calls += 1
+            listed = subprocess.run(
+                ["git", "branch", "--list", branch],
+                cwd=clone,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            if not listed.stdout.strip():
+                subprocess.run(
+                    ["git", "branch", branch], cwd=clone, check=True, capture_output=True
+                )
+            store.register_artifact(
+                session_key=k["session_key"], role="developer", kind="branch", ref=branch
+            )
+            store.upsert_runner(
+                "huozhe/code-workflow",
+                container_id="c-shared",
+                endpoint="127.0.0.1:9",
+                token="tok",
+                tier="hot",
+            )
+
+    class _DeleteOwnBranch(_RecordingClient):
+        def call(self, method, params=None):  # noqa: ANN001
+            if (params or {}).get("role") == "developer":
+                subprocess.run(
+                    ["git", "branch", "-D", branch],
+                    cwd=clone,
+                    check=False,
+                    capture_output=True,
+                )
+            return super().call(method, params)
+
+    sup = _RealisticSupervisor()
+    _DeleteOwnBranch.calls = []
+    _insert_close(
+        store,
+        did="d-resurrect",
+        payload=_closed_payload(body=_block(checked=True)),
+    )
+    loop = _loop(
+        store,
+        tmp_path,
+        dispatch=True,
+        client_factory=_DeleteOwnBranch,
+        supervisor=sup,
+    )
+    try:
+        loop.process_deferred_batch()
+    finally:
+        import agentd.design_loop as dl
+
+        dl.RunnerClient = loop._orig_client  # type: ignore[attr-defined, misc]
+
+    listed = subprocess.run(
+        ["git", "branch", "--list", branch],
+        cwd=clone,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert listed.stdout.strip() == ""
+    assert store.list_artifacts(sk, open_only=True) == []
+    assert (store.get_session(sk) or {})["state"] == "CLOSED"
+    assert sup.calls == 1
     store.close()

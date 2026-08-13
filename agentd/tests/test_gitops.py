@@ -57,3 +57,16 @@ def test_worktree_add_under_two_seconds_warm(tmp_path: Path) -> None:
     assert elapsed2 < 2.0, f"warm worktree add took {elapsed2:.3f}s (limit 2s)"
     assert (wt2 / "README").exists()
     assert elapsed1 < 5.0
+
+
+def test_worktree_add_keeps_uncommitted_when_already_on_branch(tmp_path: Path) -> None:
+    """#78 B1: layout refresh must not wipe a live worktree."""
+    src = _init_bare_source(tmp_path)
+    root = tmp_path / "agentd-root"
+    clone = ensure_shared_clone(root, "local/testrepo", clone_url=str(src))
+    wt = root / "sessions" / "a" / "worktrees" / "w1"
+    worktree_add(clone, wt, "branch-w1")
+    dirty = wt / "uncommitted.py"
+    dirty.write_text("keep\n", encoding="utf-8")
+    worktree_add(clone, wt, "branch-w1")
+    assert dirty.read_text(encoding="utf-8") == "keep\n"

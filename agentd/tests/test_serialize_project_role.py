@@ -78,6 +78,8 @@ def test_two_issues_same_role_serialize(tmp_path: Path) -> None:
             return False
 
         def call(self, method, params=None):  # noqa: ANN001
+            if method != "turn.dispatch":
+                return {"ok": True}
             sk = (params or {}).get("context", {}).get("session_key", "?")
             with lock:
                 order.append(f"start:{sk}")
