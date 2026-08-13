@@ -1314,13 +1314,14 @@ class DesignLoop:
 
         Classification at issues.closed (M5-2/3) must read the checkbox from the
         **closed payload's issue.body** — GitHub is source of truth (P1).
-        ``verified_at`` is only an audit record of when this gateway observed a
-        valid owner tick; it is never the authority for restore or classification.
-
-        Agent restore compares checkbox state **across this edit** via
-        ``changes.body.from`` (PR #65 B1). Local ``verified_at`` is not used for
-        restore: a missed delivery while the daemon is down must not let a later
-        agent step-refine untick a real owner mark.
+        ``verified_at`` is the audit record of when this gateway observed a
+        valid owner tick. It is not the authority for classification. It *is*
+        the gate on any restore that would raise the checkbox (ADR-16 / #89):
+        restore-up, B4 with ``was=True``, B2 with a ticked ``prev_block``.
+        B2 without an observed tick reinserts the block unchecked — the
+        raise is refused, the gate stays. A missed owner-tick delivery
+        then costs one re-tick; trusting an unproven ``was=True`` can
+        VERIFY a session no human verified.
 
         Gateway body edits are ignored (#64 Architect note): the gateway is a
         bot but not an agent, and it authors the verification scaffold.
@@ -1418,6 +1419,32 @@ class DesignLoop:
 
         self.store.set_delivery_status(delivery_id, "done")
 
+    def _can_raise_checkbox(
+        self,
+        session_key: str,
+        *,
+        branch: str,
+        was: bool | None,
+        now: bool | None,
+        sender: str,
+    ) -> bool:
+        """ADR-16: True iff verified_at is set. Logs on refuse. Does not dispose."""
+        sess_now = self.store.get_session(session_key) or {}
+        observed = sess_now.get("verified_at")
+        if observed:
+            return True
+        log.warning(
+            "issues.edited by agent session=%s — raise refused branch=%s "
+            "(was=%s now=%s verified_at=%s sender=%s)",
+            session_key,
+            branch,
+            was,
+            now,
+            observed,
+            sender,
+        )
+        return False
+
     def _restore_agent_verification_edit(
         self,
         *,
@@ -1430,7 +1457,7 @@ class DesignLoop:
         body: str,
         changes: dict[str, Any],
     ) -> None:
-        """Restore checkbox/block using changes.body.from (PR #65 / ADR-15).
+        """Restore checkbox/block using changes.body.from (PR #65 / ADR-15 / ADR-16).
 
         Invariant (B3): the box must never leave an agent edit *more checked*
         than it entered. ``now is True and was is not True`` covers no prior
@@ -1440,6 +1467,11 @@ class DesignLoop:
         ADR-15: *which* branch fires is still decided from the payload pair
         ``(prev, body)``. The text the write is built from is a fresh GET,
         taken only after a non-no-op branch is selected.
+
+        ADR-16: a composition that raises the checkbox needs
+        ``verified_at``; a composition that lowers or preserves it never
+        does. B2 with a ticked ``prev_block`` and no observed tick
+        reinserts the block unchecked — refuse the raise, keep the gate.
         """
         body_change = changes.get("body")
         prev: str | None = None
@@ -1474,7 +1506,17 @@ class DesignLoop:
 
         if prev_block is not None and curr_block is None:
             # B2: whole block deleted — re-splice prior block; keep agent prose.
+            # A ticked prev_block is a raise; without verified_at, drop only
+            # the raise and reinsert unchecked (steps / sentinels stay).
             block = prev_block
+            if was is True and not self._can_raise_checkbox(
+                session_key,
+                branch="B2",
+                was=was,
+                now=now,
+                sender=sender,
+            ):
+                block = set_checkbox_in_body(prev_block, checked=False)
 
             def compose(current: str, _block: str = block) -> str:
                 return reinsert_verification_block(current, _block)
@@ -1496,14 +1538,32 @@ class DesignLoop:
 
             reason = "bare checkbox outside sentinels (no protocol block)"
         elif was is True and now is False:
-            # Owner tick was present before this edit; agent unticked — restore up.
+            if not self._can_raise_checkbox(
+                session_key,
+                branch="restore-up",
+                was=was,
+                now=now,
+                sender=sender,
+            ):
+                self.store.set_delivery_status(delivery_id, "done")
+                return
+
             def compose(current: str) -> str:
                 return set_checkbox_in_body(current, checked=True)
 
             reason = "checkbox True → False"
         elif was is not None and now is None:
             # B4: line removed (ticked or unticked) — restore pre-edit state.
-            # Restoring False cannot violate B3 (not more checked than was).
+            # Restoring False cannot forge; restoring True is a raise.
+            if was is True and not self._can_raise_checkbox(
+                session_key,
+                branch="B4",
+                was=was,
+                now=now,
+                sender=sender,
+            ):
+                self.store.set_delivery_status(delivery_id, "done")
+                return
             want = was
 
             def compose(current: str, _want: bool = want) -> str:
