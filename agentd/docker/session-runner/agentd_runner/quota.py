@@ -17,14 +17,10 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 log = logging.getLogger("agentd_runner.quota")
 
 # Vendor copy — #84 live sample: "You've hit your session limit · resets 9:30am (UTC)"
-_QUOTA_HINTS = (
-    "session limit",
-    "rate limit",
-    "rate_limited",
-    "quota",
-    "usage limit",
-    "resource_exhausted",
-)
+# Limit + reset together. Bare "quota" / "rate limit" fire on model text
+# and on GitHub's own 5000/hr limit (#94 B1).
+_LIMIT_PHRASES = ("session limit", "usage limit")
+_RESET_PHRASE = "resets"
 _GROK_STOP_QUOTA = frozenset(
     {"rate_limited", "quota", "quota_exceeded", "resource_exhausted"}
 )
@@ -91,9 +87,10 @@ def parse_reset_epoch(text: str, *, now: float | None = None) -> int | None:
     return int(candidate.timestamp())
 
 
-def _looks_like_quota(text: str) -> bool:
+def _vendor_prose(text: str) -> bool:
+    """True only for vendor refusal copy: a limit phrase and a reset phrase."""
     low = (text or "").lower()
-    return any(h in low for h in _QUOTA_HINTS)
+    return any(p in low for p in _LIMIT_PHRASES) and _RESET_PHRASE in low
 
 
 def classify_quota(
@@ -107,19 +104,35 @@ def classify_quota(
 
     Matching vendor prose is intentional and local to the adapter. The
     gateway must only see the typed status.
+
+    ``stop_reason`` and ``error`` are vendor channels. ``text`` is treated
+    as vendor copy only when it carries both a limit phrase and a reset
+    phrase — a substring ``quota`` or ``rate limit`` is not enough.
     """
     err_text = ""
     if isinstance(error, dict):
         err_text = str(error.get("message") or error)
     elif error is not None:
         err_text = str(error)
-    blob = " ".join(p for p in (text, stop_reason, err_text) if p)
+    blob = " ".join(p for p in (text, err_text) if p)
     stop = (stop_reason or "").lower()
-    if stop not in _GROK_STOP_QUOTA and not _looks_like_quota(blob):
-        return None
-    summary = (text or err_text or stop_reason or "quota exhausted")[:4000]
-    return {
-        "status": "quota_exhausted",
-        "retry_after": parse_reset_epoch(blob, now=now),
-        "summary": summary,
-    }
+    if stop in _GROK_STOP_QUOTA:
+        summary = (text or err_text or stop_reason or "quota exhausted")[:4000]
+        return {
+            "status": "quota_exhausted",
+            "retry_after": parse_reset_epoch(blob, now=now),
+            "summary": summary,
+        }
+    if error is not None and _vendor_prose(err_text):
+        return {
+            "status": "quota_exhausted",
+            "retry_after": parse_reset_epoch(err_text, now=now),
+            "summary": (err_text or "quota exhausted")[:4000],
+        }
+    if error is None and not stop and _vendor_prose(text):
+        return {
+            "status": "quota_exhausted",
+            "retry_after": parse_reset_epoch(text, now=now),
+            "summary": (text or "quota exhausted")[:4000],
+        }
+    return None

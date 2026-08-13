@@ -185,8 +185,18 @@ def _hold_role_for_quota(
         until = float(retry_after) if retry_after is not None else 0.0
     except (TypeError, ValueError):
         until = 0.0
+    parsed = until
     if until <= now:
         until = now + QUOTA_BACKOFF_S
+        if parsed > 0:
+            log.warning(
+                "quota retry_after already passed session=%s role=%s "
+                "parsed=%s — using backoff %ss (parse stale or window over)",
+                session_key,
+                role,
+                int(parsed),
+                int(QUOTA_BACKOFF_S),
+            )
     _role_busy_until[rkey] = until
     log.warning(
         "quota exhausted session=%s role=%s retry_after=%s "

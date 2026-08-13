@@ -591,7 +591,13 @@ class LiveCliSession:
                 self.role,
                 redact_envelope(result_obj),
             )
-            quota = classify_quota(text=str(summary))
+            # Vendor refusal produces no assistant text and no tool use.
+            # A turn that *talked about* a limit still has both (#94 B1).
+            quota = (
+                classify_quota(text=str(summary))
+                if not texts and not public_actions
+                else None
+            )
             if quota is not None:
                 return {
                     **quota,
@@ -692,7 +698,9 @@ class LiveCliSession:
             text = str((result.get("result") or {}).get("text") or "")[:4000]
         text = (text or "").strip()
         if stop and stop != "end_turn":
-            quota = classify_quota(text=text, stop_reason=stop)
+            # stopReason is a vendor channel. Do not classify from
+            # accumulated agent_message_chunk text (#94 B1).
+            quota = classify_quota(stop_reason=stop)
             if quota is not None:
                 return {
                     **quota,

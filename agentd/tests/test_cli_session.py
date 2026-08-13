@@ -876,3 +876,78 @@ def test_parse_reset_epoch_resets_in_hours() -> None:
     from agentd_runner.quota import parse_reset_epoch
 
     assert parse_reset_epoch("resets in 4h", now=1_000_000.0) == 1_000_000 + 4 * 3600
+
+
+def test_claude_mentions_of_limits_are_not_quota(tmp_path: Path) -> None:
+    """#94 B1: model text about a limit is a failed turn, not vendor quota."""
+    cases = (
+        "I hit the GitHub API rate limit while fetching review threads, so I stopped.",
+        "Implemented #86 (vendor quota refusal). Tests fail: 2 errors in test_quota_exhausted.py",
+        "Traceback: RuntimeError: gh api rate limit exceeded (5000/hr)",
+    )
+    for i, summary in enumerate(cases):
+        lines = [
+            json.dumps(
+                {
+                    "type": "result",
+                    "session_id": f"s-fp-{i}",
+                    "is_error": True,
+                    "result": summary,
+                }
+            ),
+        ]
+        sess = cli_session.LiveCliSession(
+            role="architect",
+            adapter="claude-code",
+            uid=1001,
+            home=tmp_path / f"h{i}",
+            tmp=tmp_path / f"t{i}",
+            xdg=tmp_path / f"x{i}",
+            spawn_cwd=tmp_path,
+        )
+        _wire_stdout_queue(sess, lines)
+        with patch.object(cli_session.LiveCliSession, "_sample_rss"):
+            result = sess.turn("go", deadline_s=5)
+        assert result["status"] == "failed", summary
+        assert result.get("retry_after") is None
+
+
+def test_claude_quota_with_assistant_text_is_failed(tmp_path: Path) -> None:
+    """Vendor refusal has no agent output. Talking about quota is not a refusal."""
+    lines = [
+        json.dumps(
+            {
+                "type": "assistant",
+                "session_id": "s-talk",
+                "message": {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "I will wait for the session limit.",
+                        }
+                    ]
+                },
+            }
+        ),
+        json.dumps(
+            {
+                "type": "result",
+                "session_id": "s-talk",
+                "is_error": True,
+                "result": "You've hit your session limit · resets 9:30am (UTC)",
+            }
+        ),
+    ]
+    sess = cli_session.LiveCliSession(
+        role="architect",
+        adapter="claude-code",
+        uid=1001,
+        home=tmp_path / "h",
+        tmp=tmp_path / "t",
+        xdg=tmp_path / "x",
+        spawn_cwd=tmp_path,
+    )
+    _wire_stdout_queue(sess, lines)
+    with patch.object(cli_session.LiveCliSession, "_sample_rss"):
+        result = sess.turn("go", deadline_s=5)
+    assert result["status"] == "failed"
