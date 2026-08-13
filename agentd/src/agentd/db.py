@@ -595,9 +595,10 @@ class Store:
         progress_repeat: int | None = None,
         zero_thread_rounds: int | None = None,
     ) -> None:
-        """Insert a session row. On conflict, do not write state, roles_locked,
-        or loop-safety counters (#72). INSERT still binds 0 for those so
-        NOT NULL DEFAULT columns work; UPDATE must not see those 0s."""
+        """Insert a session row. On conflict, do not write state, roles,
+        roles_locked, or loop-safety counters (#72). INSERT still binds 0
+        for those so NOT NULL DEFAULT columns work; UPDATE must not see
+        those 0s."""
         pk = project_key or repo
         with self._lock:
             self._conn.execute(
@@ -612,8 +613,6 @@ class Store:
                 ON CONFLICT(session_key) DO UPDATE SET
                   project_key = excluded.project_key,
                   paused_reason = COALESCE(excluded.paused_reason, sessions.paused_reason),
-                  architect = excluded.architect,
-                  developer = excluded.developer,
                   design_pr = COALESCE(excluded.design_pr, sessions.design_pr),
                   progress_fp = COALESCE(excluded.progress_fp, sessions.progress_fp),
                   updated_at = excluded.updated_at
@@ -764,7 +763,11 @@ class Store:
             return int(row["n"]) if row else 0
 
     def count_turns(self, session_key: str) -> int:
-        """Observed turn rows for this session (ADR-12 manifest / #72)."""
+        """All turn rows for this session, including teardown.
+
+        Distinct from ``sessions.turn_count``, which §9.2 increments only
+        for budgeted (non-teardown) turns. The archive manifest uses this.
+        """
         with self._lock:
             row = self._conn.execute(
                 "SELECT COUNT(*) AS n FROM turns WHERE session_key=?",

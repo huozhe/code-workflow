@@ -90,3 +90,26 @@ def test_upsert_does_not_clobber_state(tmp_path: Path) -> None:
     assert sess is not None
     assert sess["state"] == "IMPLEMENTING"
     store.close()
+
+
+def test_upsert_does_not_rewrite_roles(tmp_path: Path) -> None:
+    """B1: UPDATE must not write architect/developer (#72 review)."""
+    store = Store(tmp_path / "state.db")
+    sk = _insert(store, roles_locked=1)
+    store.upsert_session(
+        session_key=sk,
+        project_key="huozhe/code-workflow",
+        repo="huozhe/code-workflow",
+        issue_num=32,
+        state="INTAKE",
+        architect="swapped-arch",
+        developer="swapped-dev",
+        created_at=9,
+        updated_at=9,
+    )
+    sess = store.get_session(sk)
+    assert sess is not None
+    assert sess["architect"] == "huozheclaude"
+    assert sess["developer"] == "huozhegrok"
+    assert sess["roles_locked"] == 1
+    store.close()
