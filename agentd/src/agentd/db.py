@@ -595,6 +595,10 @@ class Store:
         progress_repeat: int | None = None,
         zero_thread_rounds: int | None = None,
     ) -> None:
+        """Insert a session row. On conflict, do not write state, roles,
+        roles_locked, or loop-safety counters (#72). INSERT still binds 0
+        for those so NOT NULL DEFAULT columns work; UPDATE must not see
+        those 0s."""
         pk = project_key or repo
         with self._lock:
             self._conn.execute(
@@ -608,16 +612,9 @@ class Store:
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_key) DO UPDATE SET
                   project_key = excluded.project_key,
-                  state = excluded.state,
                   paused_reason = COALESCE(excluded.paused_reason, sessions.paused_reason),
-                  roles_locked = COALESCE(excluded.roles_locked, sessions.roles_locked),
                   design_pr = COALESCE(excluded.design_pr, sessions.design_pr),
-                  turn_count = COALESCE(excluded.turn_count, sessions.turn_count),
-                  consec_agent_turns = COALESCE(excluded.consec_agent_turns, sessions.consec_agent_turns),
-                  review_rounds = COALESCE(excluded.review_rounds, sessions.review_rounds),
                   progress_fp = COALESCE(excluded.progress_fp, sessions.progress_fp),
-                  progress_repeat = COALESCE(excluded.progress_repeat, sessions.progress_repeat),
-                  zero_thread_rounds = COALESCE(excluded.zero_thread_rounds, sessions.zero_thread_rounds),
                   updated_at = excluded.updated_at
                 """,
                 (
@@ -764,6 +761,19 @@ class Store:
                 (project_key,),
             ).fetchone()
             return int(row["n"]) if row else 0
+
+    def count_turns(self, session_key: str) -> int:
+        """All turn rows for this session, including teardown.
+
+        Distinct from ``sessions.turn_count``, which §9.2 increments only
+        for budgeted (non-teardown) turns. The archive manifest uses this.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM turns WHERE session_key=?",
+                (session_key,),
+            ).fetchone()
+        return int(row["n"] if row else 0)
 
     def insert_turn(
         self,
