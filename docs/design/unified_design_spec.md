@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | **Status** | Proposed for formal approval (Phase 3 exit) |
-| **Version** | 1.10.0 — see [Revision history](#revision-history) |
+| **Version** | 1.11.0 — see [Revision history](#revision-history) |
 | **Implements** | [`docs/requirements/SRS_async_multiagent_ai_coding_system.md`](../requirements/SRS_async_multiagent_ai_coding_system.md) **v1.3** |
 | **Supersedes** | [`proposals/claude_design_spec.md`](proposals/claude_design_spec.md) (#4) · [`proposals/grok_design_spec.md`](proposals/grok_design_spec.md) (#2) · [`proposals/gemini_design_spec.md`](proposals/gemini_design_spec.md) (#3) |
 | **Ref** | Issue #1 |
@@ -18,6 +18,7 @@ Amendments are also marked inline at the point they apply, which is where an imp
 
 | Version | Date | Change |
 |---|---|---|
+| **1.11.0** | 2026-08-13 | **A ticked body with no observed owner tick does not classify** (#90, ADR-17). ADR-16 gates the restore path; `_owner_close_teardown` still classifies from the closed payload's body alone, so any tick that reaches the body by an unguarded route is still accepted as authority at close. New third row in §10.3: ticked body with `sessions.verified_at IS NULL` classifies nothing, tears down nothing, and escalates. Two mechanisms make that decision survivable. **Grace:** deliveries drain in `received_at` order, so a late `issues.edited` (6m17s observed 2026-08-12) would make the naive check escalate honest tick-then-close sessions — the close stays `deferred` until `now - deliveries.received_at` exceeds 15 minutes, read from the durable column rather than the in-memory attempt counter, which is attempt-based and resets on restart. **Lower the box:** the refusal alone leaves a false tick on a closed issue, needs two owner edits to clear, and re-escalates on every re-close; a lowering PATCH cannot forge (ADR-16), so the gateway composes one against a fresh read and the remedy becomes reopen → tick → close. Rejected: `ABANDONED` + teardown (permanent, and the same race would abandon honest sessions); reopen (contradicts §10.3, and the lowered box already gives a one-action remedy); classify `VERIFIED` and warn (the hole, with a log line). Owner item, not decided here: the mirror — `verified_at` set with an unticked body records `ABANDONED` on a verified session, and reversing it touches the 2026-08-07 ordering ruling. |
 | **1.10.0** | 2026-08-13 | **Vendor quota refusal is not a failed turn** (#86, ADR-9). Live on #84: Claude `is_error` + `"You've hit your session limit · resets 9:30am (UTC)"` became `status=failed`, the delivery was `routed`, and `turn_count`/`consec_agent_turns` were charged for a turn the model never saw. Adapter (only) recognises vendor copy and returns `quota_exhausted` with best-effort `retry_after`. Gateway defers the delivery, holds the role via `_role_busy_until` (same in-memory gate as #34 timeout), and does not count budget. Unknown runner statuses degrade to `failed`. Not an escalation — one WARNING with the reset time. Gate is forgotten on daemon restart; `retry_after` does not schedule (host sleep on #84 meant the turn ran hours after reset). |
 | **1.9.0** | 2026-08-13 | **No ordinary turn on a terminal session; gateway comments do not wake agents** (#85). `_process_one` dispatched any routed event, including `issue_comment` on `CLOSED`/`TEARDOWN`. Live on #49 six minutes after a clean teardown: one Developer turn, `sessions/49/` recreated, ledger still 0. Gate is immediately after the FSM block and before stall observation (P1: late events are still recorded; a late `changes_requested` on an `ABANDONED` close must not escalate a `CLOSED` row back to `PAUSED_HUMAN`). Not inside `_dispatch_turn` (teardown turns run while the session is `TEARDOWN`). `_escalate` itself refuses a `CLOSED` session (TEARDOWN may still escalate when retries exhaust). Delivery is `done`, not `dropped`. `issues.reopened` still processes. Same family: `_restore_agent_verification_edit`'s warning (and the close completion summary) now carry `<!-- agentd:gateway session=… -->`; `route_for_recipient` drops that marker the way it drops `agentd:escalation`. Broad marker, not per-kind: the gateway is not an agent, and no comment it authors should drive a turn. Escalation keeps its own marker so §8.5 owner-unpause is unchanged. |
 | **1.8.0** | 2026-08-13 | **No restore may raise the checkbox without `verified_at`** (#89, ADR-16). #65's `was is True and now is False` branch treated `changes.body.from` as proof an *owner* tick was present and composed `checked=True`. Provenance was never established: an agent tick moments earlier produces the same `was=True`. Live on session #84 (gateway `d576107`, ADR-15 already deployed): `@huozhegrok` ticked then unticked; ADR-15 correctly aborted the first delivery (`payload now=True current=False`); the second delivery restored the tick up. `verified_at` stayed NULL; `classify_at_close` would still have recorded `VERIFIED`. The neighbouring spellings are the same forge: B4 (`was=True, now=None`) *inserts* a ticked line when the agent deletes rather than unticks; B2 re-splices a ticked `prev_block` when the agent deletes the whole block. New rule: a composition that raises the checkbox needs an owner tick this gateway observed (`sessions.verified_at` set, written only on `is_owner and not is_agent`); a composition that lowers or preserves it never does. Restore-up and B4 refuse and leave the body. B2 refuses the raise and reinserts the block unchecked — leaving no block would classify `ABANDONED` and drop the Architect's steps. Log the refusal with the branch name. Cost of the reversal: a genuine owner tick whose `issues.edited` delivery was dropped now costs one owner re-tick, instead of a silent false `VERIFIED`. B3/B5, B4-with-`was=False`, B2-with-an-unticked-block, and ADR-15's guards are unchanged. Close-time reconcile (ticked body + NULL `verified_at` must not classify `VERIFIED`) is defence in depth and a follow-up (#90). |
@@ -755,8 +756,11 @@ The checkbox's only remaining job is to classify the terminal state:
 
 | At close | Terminal state | Teardown |
 |---|---|---|
-| Checkbox verified | `VERIFIED` | Full, plus completion summary comment |
-| Checkbox absent or unverified | `ABANDONED` | Full, reason recorded, no summary |
+| Checkbox ticked **and** `sessions.verified_at` set | `VERIFIED` | Full, plus completion summary comment |
+| Checkbox absent or unticked | `ABANDONED` | Full, reason recorded, no summary |
+| Checkbox ticked, `verified_at IS NULL` after the grace window | **none — not classified** | **None.** Escalate, lower the box, leave the issue closed (ADR-16, ADR-17) |
+
+**The third row is the close-time half of ADR-16.** The body is not authority for `VERIFIED`; an owner tick this gateway observed is. A ticked body with no such record means a tick arrived by a route the restore gate does not cover, or the owner's `issues.edited` delivery was lost — indistinguishable here, so nothing is classified, nothing is torn down, and §8.5 tells the owner. The remedy is the owner's, in order: **reopen, tick, close**. Full rule, grace window, and the rejected alternatives: ADR-17.
 
 Both tear down **issue artifacts** completely (worktrees, branches, scratch, issue session dirs). Under project-scoped runners (#20) the **project container is not an artifact of the issue** — issue close must not `docker stop`/`rm` a container still serving other issues. Container teardown is project-level (last session gone, or explicit project archive).
 
@@ -911,7 +915,7 @@ Session state is mirrored to **GitHub labels** (`agentd:state:code_review`, `age
 | Developer cannot approve its own PR | Architect token readable only by `uid_architect` on container-internal tmpfs (§5.2) + GitHub branch protection + gateway merge verification (§8.4) |
 | Agent cannot escape to the host | No Docker socket, `cap-drop ALL`, `no-new-privileges`, non-root UIDs, no setuid binaries in the image |
 | Agent cannot exhaust the host | `--memory`, `--cpus`, `--pids-limit`, plus admission control |
-| Agent cannot forge the verification record | Checkbox *flips* counted only from the owner login (§10.2); no restore path can raise the box without `sessions.verified_at` (ADR-16). Flips were always owner-only; restores that raise were not, and that was the hole. |
+| Agent cannot forge the verification record | Checkbox *flips* counted only from the owner login (§10.2); no restore path can raise the box without `sessions.verified_at` (ADR-16); and a close whose body is ticked without that record classifies nothing (ADR-17). Flips were always owner-only; restores that raise were not, and that was the hole. The close-time gate is defence in depth for a raise route neither has enumerated. |
 | Agent cannot close an issue | No component calls the close API (§10.3) |
 | Attacker cannot forge events | HMAC-SHA256 on every delivery; RPC endpoint loopback/UDS-local with a per-session bearer token |
 
@@ -1445,6 +1449,44 @@ Log the refusal at WARNING with the *branch name*, `was`, `now`, `verified_at`, 
 **Follow-up, not this ADR.** Close-time reconcile — a ticked body with `verified_at IS NULL` must escalate rather than classify `VERIFIED` — is the defence in depth for anything that slips past the branch. It is a different function (`_owner_close_teardown`) and it collides with §10.3 ("no attempt to reopen an issue the owner closed") plus the teardown suite that currently treats a ticked payload as sufficient authority. Filed as #90 so this reversal stays one branch.
 
 *Out of scope:* the §10.2 warning comment waking agent turns — closed by #85 (`agentd:gateway` marker).
+
+---
+
+### ADR-17: A Ticked Body With No Observed Owner Tick Does Not Classify
+
+*Resolves #90.* ADR-16 closes the live forge at the restore path. This is the close-time check that holds §13.1 even when a tick reaches the body by a route no branch guards — a spelling not yet enumerated, a hand edit made while the daemon was down, a future regression. `_owner_close_teardown` classifies from the closed payload's body alone; `sessions.verified_at` is the only provenance signal in the system and it is not consulted. So the same body that ADR-16 refuses to *write* is still accepted as authority when the owner closes.
+
+**The rule.** On an owner close, before the FSM transition and before any teardown turn:
+
+| body checkbox (strict) | `verified_at` | outcome |
+|---|---|---|
+| unticked or absent | any | `ABANDONED` — unchanged |
+| ticked | set | `VERIFIED` — unchanged, and the dominant path |
+| ticked | NULL | **do not classify** — grace, then escalate (below) |
+
+An already-recorded `classification` short-circuits the gate, as it does today: classification is never revised (§10.3).
+
+**The grace window is not optional, and the naive check is wrong without it.** Deliveries drain in `received_at` order, so the prescribed order (tick, then close) normally sets `verified_at` before the close is routed. It does not when GitHub is late: `pull_request.opened` took 6m17s on 2026-08-12, and an owner who ticks and closes seconds apart is doing exactly what §10.1's block instructs. A gate that fires on `verified_at IS NULL` *at the instant the close drains* therefore escalates honest sessions routinely. Before deciding, while the box is ticked and `verified_at` is NULL, leave the delivery `deferred` until `now - deliveries.received_at` exceeds **15 minutes** — an order of magnitude over the worst observed lateness, and a bound the honest path never pays, because `verified_at` is already set there. Read the window from the durable `received_at` column, **not** the in-memory `_delivery_attempts` counter: that counter is attempt-based (5 attempts at dispatcher cadence is seconds, not minutes) and it resets on restart, which would grant a fresh window to a delivery that has already waited. `received_at` also gets the down-daemon case right for free — a close received three hours ago whose tick delivery was lost has already exhausted its window and escalates on the first drain instead of waiting again. Log the first defer at WARNING with the deadline; subsequent ones at DEBUG.
+
+**FSM / GitHub: escalate, do not classify, do not teardown, do not reopen.** §8.5's existing path — state `PAUSED_HUMAN`, `resume_state` the pre-close state (`AWAITING_VERIFICATION` in the shape this is written for), delivery `done`. The issue stays closed. This is the only one of the three candidates that keeps every rule already ruled on: §10.3's "no attempt to reopen an issue the owner closed" holds because no component reopens, and "classification is never revised" holds because none is written — the *next* close writes it.
+
+**Lower the box, or the escalation does not terminate.** The refusal alone leaves a ticked box on a closed issue: the false record persists, the owner's remedy needs two edits (untick, then tick, since only a `- [ ]` → `- [x]` flip records), and a re-close re-enters the same divergence forever. So the gateway PATCHes the box to `- [ ]` — a lowering composition, which ADR-16 permits without `verified_at` precisely because it cannot forge. Compose against a fresh read and skip the PATCH if the box is already down (ADR-15's discipline; the owner may have fixed it first). A failed read skips the PATCH and still escalates, naming the manual untick. With the box down, the remedy is one tick, and an owner who re-closes without ticking gets a clean `ABANDONED` instead of a second escalation.
+
+**What the escalation must say**, because the owner reads it against a closed issue with no other state: that the body was ticked with no owner tick this gateway observed; that nothing was classified and no teardown ran; that the issue is still closed and the gateway did not reopen it; that the box was lowered (or was not, and why); the remedy in order — **reopen, tick, close**; and that the pre-close body is recoverable from this delivery's stored `payload`. The PATCH carries `<!-- agentd:gateway session=… -->` (#85) so it wakes no turn.
+
+**Honest cost, same direction as ADR-16.** An owner whose tick delivery is lost outright — not merely late — pays a reopen, a tick, and a close. That is three human actions against a silent false `VERIFIED`, and the gate exists because the human verification record is the one thing in this system no agent may write.
+
+**Rejected: classify `ABANDONED` and tear down.** Fail-closed and cheap, but permanent — `classification` is never revised, so a lost tick delivery leaves a verified session recorded as abandoned with the artifacts already archived and no path back. The same late-delivery race that motivates the grace window would produce it on honest sessions.
+
+**Rejected: reopen the issue.** It contradicts §10.3 as written, and §10.3's reason still applies: an owner close is a meaningful human act. Lowering the box already gives the owner a one-action remedy, so the reopen buys nothing that would justify amending the ruling.
+
+**Rejected: classify `VERIFIED` and warn.** That is the hole, with a log line.
+
+**Implementer note on the teardown suite.** Its fixtures assert `VERIFIED` from a ticked payload and never stamp `verified_at`; the mechanical fix is one field on the session row per fixture. A test that needs more than that has moved the decision logic, and the Feature PR must say so rather than editing the assertion to match. `classify_at_close` stays pure and unchanged — the gate belongs to its caller, which is the only place `verified_at` is in scope.
+
+**Unchanged.** Non-owner closes (reopen + escalate, §10.3 / #36). The already-`CLOSED` and already-classified short-circuits. §10.3's ordering ruling and its "no timer, no hold" property — the grace window bounds one delivery's routing, not the classification, which is still evaluated once at close and never revised.
+
+**Owner item, not this ADR: the mirror.** `verified_at` set with an *unticked* body at close records `ABANDONED` on a session the owner did verify — an agent untick whose ADR-16 restore-up has not drained yet produces it. It fails in the safe direction, so it is not urgent, but it punishes an honest owner and the fix (treat an observed owner tick as authority when the body disagrees) reverses §10.3's "evaluated against the checkbox state at close," which is an owner ruling from 2026-08-07. Filed separately for `@huozhe` rather than decided here.
 
 ---
 
