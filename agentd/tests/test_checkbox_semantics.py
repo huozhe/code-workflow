@@ -237,6 +237,7 @@ def test_agent_tick_restores_and_warns(tmp_path: Path) -> None:
     assert len(comments) == 1
     assert "restored" in comments[0]["body"].lower()
     assert "changes.body.from" in comments[0]["body"]
+    assert "<!-- agentd:gateway session=" in comments[0]["body"]
     store.close()
 
 

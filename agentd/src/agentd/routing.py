@@ -15,6 +15,11 @@ ESCALATION_RE = re.compile(
     r"<!--\s*agentd:escalation\s+session=(?P<session>[^\s]+)\s*-->"
 )
 
+# Any other gateway-authored comment (#85). Escalation keeps its own marker.
+GATEWAY_RE = re.compile(
+    r"<!--\s*agentd:gateway\s+session=(?P<session>[^\s]+)\s*-->"
+)
+
 
 class RouteAction(str, Enum):
     DROP = "drop"
@@ -31,6 +36,10 @@ class RouteDecision:
 
 def provenance_footer(*, session_key: str, role: str, turn_id: str) -> str:
     return f"<!-- agentd:turn session={session_key} role={role} turn={turn_id} -->"
+
+
+def gateway_footer(*, session_key: str) -> str:
+    return f"<!-- agentd:gateway session={session_key} -->"
 
 
 def parse_provenance(body: str | None) -> dict[str, str] | None:
@@ -52,6 +61,16 @@ def parse_escalation_marker(body: str | None) -> dict[str, str] | None:
     return m.groupdict()
 
 
+def parse_gateway_marker(body: str | None) -> dict[str, str] | None:
+    """Return session key if body is a non-escalation gateway comment (#85)."""
+    if not body:
+        return None
+    m = GATEWAY_RE.search(body)
+    if not m:
+        return None
+    return m.groupdict()
+
+
 def route_for_recipient(
     *,
     sender: str | None,
@@ -67,7 +86,7 @@ def route_for_recipient(
 ) -> RouteDecision:
     """Evaluate §9.1 table for one recipient identity.
 
-    Order: self-echo → owner → gateway escalation drop → paused non-owner →
+    Order: self-echo → owner → gateway voice drop → paused non-owner →
     peer-bot → own-artifact provenance → other human.
     Owner wins over footers so quote-replies unpause PAUSED_HUMAN.
     """
@@ -90,11 +109,14 @@ def route_for_recipient(
     if sender_s == owner_s:
         return RouteDecision(RouteAction.ROUTE, "owner", reset_consec=True)
 
-    # 3. Gateway escalation comment — never an agent turn (PR #27 B1).
+    # 3. Gateway voice — never an agent turn (PR #27 B1 / #85).
+    #    Escalation keeps its own marker so §8.5 unpause stays distinct.
     #    Checked before paused-defer so the webhook is dropped, not parked
     #    and re-dispatched after unpause as a peer-bot event.
     if parse_escalation_marker(body):
         return RouteDecision(RouteAction.DROP, "gateway escalation comment")
+    if parse_gateway_marker(body):
+        return RouteDecision(RouteAction.DROP, "gateway comment")
 
     # 4. Paused: any non-owner defers (§9.1) — including peer bots.
     if session_paused:

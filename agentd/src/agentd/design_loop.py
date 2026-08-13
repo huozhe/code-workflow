@@ -14,7 +14,7 @@ from agentd.archive import archive_and_purge, format_completion_summary
 from agentd.config import Config
 from agentd.db import Store, decompress_payload
 from agentd.digest import build_digest, digest_to_markdown
-from agentd.fsm import transition
+from agentd.fsm import TERMINAL_STATES, transition
 from agentd.gitops import (
     is_design_head_ref,
     is_feature_head_ref,
@@ -100,7 +100,12 @@ _OBSERVED_PROGRESS_KINDS = frozenset(
     }
 )
 from agentd.refusals import CapacityRefusal, StructuralRefusal
-from agentd.routing import RouteAction, provenance_footer, route_for_recipient
+from agentd.routing import (
+    RouteAction,
+    gateway_footer,
+    provenance_footer,
+    route_for_recipient,
+)
 from agentd.rpc_client import RunnerClient
 from agentd.supervisor import SessionSupervisor
 
@@ -632,6 +637,20 @@ class DesignLoop:
                 decision.reason,
                 kind,
                 state,
+            )
+            return
+
+        # #85: ordinary path must not turn a terminal session. After FSM so a
+        # late event is still recorded; not inside _dispatch_turn (teardown
+        # turns run while state is TEARDOWN).
+        if state in TERMINAL_STATES:
+            self.store.set_delivery_status(delivery_id, "done")
+            log.info(
+                "no turn id=%s session=%s — terminal state=%s (%s)",
+                delivery_id,
+                session_key,
+                state,
+                kind,
             )
             return
 
@@ -1669,7 +1688,8 @@ class DesignLoop:
             f"Restored to: `{state_label}` (pre-edit body via "
             f"`changes.body.from` — not local `verified_at`).\n\n"
             f"Only {owner_tag} may tick the box — and only when that "
-            f"login is not also a configured agent identity."
+            f"login is not also a configured agent identity.\n\n"
+            f"{gateway_footer(session_key=session_key)}"
         )
         try:
             if self._post_comment is not None:
@@ -2232,6 +2252,16 @@ class DesignLoop:
         issue_num: int,
     ) -> None:
         """Owner issue_comment while PAUSED_HUMAN → close escalation, dispatch."""
+        if str(sess.get("state") or "") in TERMINAL_STATES:
+            self.store.set_delivery_status(delivery_id, "done")
+            log.info(
+                "no turn id=%s session=%s — terminal state=%s (resume)",
+                delivery_id,
+                session_key,
+                sess.get("state"),
+            )
+            return
+
         open_esc = self.store.get_open_escalation(session_key)
         resume_state = str(sess.get("resume_state") or "PLANNING")
         if resume_state == "PAUSED_HUMAN":

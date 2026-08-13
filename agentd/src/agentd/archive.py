@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from agentd.gitops import issue_session_rel, project_dir_name, project_path
+from agentd.routing import gateway_footer
 
 
 def archive_tarball_path(root: Path, repo: str, issue_num: int) -> Path:
@@ -152,4 +153,4 @@ def format_completion_summary(
     parts.append(f"Turns: {int(turn_count)}.")
     if archive_rel:
         parts.append(f"Archive: `{archive_rel}`.")
-    return " ".join(parts)
+    return " ".join(parts) + "\n\n" + gateway_footer(session_key=session_key)
