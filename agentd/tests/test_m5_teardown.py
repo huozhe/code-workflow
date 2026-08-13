@@ -257,6 +257,33 @@ def test_owner_close_unticked_is_abandoned(tmp_path: Path) -> None:
     store.close()
 
 
+def test_owner_close_unticked_null_verified_at_is_abandoned(tmp_path: Path) -> None:
+    """Ordinary abandon: no observed tick. Must not enter the ADR-17 gate."""
+    store = Store(tmp_path / "state.db")
+    sk = _seed(
+        store,
+        tmp_path,
+        state="IMPLEMENTING",
+        with_session_dir=True,
+        verified_at=0,
+    )
+    posts: list = []
+    _insert_close(
+        store,
+        did="d-abandon-null",
+        payload=_closed_payload(body=_block(checked=False)),
+    )
+    _loop(store, tmp_path, posts=posts).process_deferred_batch()
+    sess = store.get_session(sk)
+    assert sess is not None
+    assert sess["state"] == "CLOSED"
+    assert sess["classification"] == "ABANDONED"
+    assert not sess.get("verified_at")
+    assert store.get_open_escalation(sk) is None
+    assert posts == []
+    store.close()
+
+
 def test_owner_close_reads_payload_body_not_verified_at(tmp_path: Path) -> None:
     store = Store(tmp_path / "state.db")
     sk = _seed(store, tmp_path)

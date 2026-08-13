@@ -259,7 +259,7 @@ def test_ticked_null_verified_at_after_grace_escalates_and_lowers(
     assert str(sess["paused_reason"]).startswith(CLOSE_RECONCILE_PREFIX)
     assert len(patches) == 1
     assert checkbox_is_checked(patches[0]["body"], strict=True) is False
-    assert "<!-- agentd:gateway session=" in patches[0]["body"]
+    assert "<!-- agentd:gateway" not in patches[0]["body"]
     assert len(posts) == 1
     assert "reopen" in posts[0]["body"].lower()
     assert "tick" in posts[0]["body"].lower()

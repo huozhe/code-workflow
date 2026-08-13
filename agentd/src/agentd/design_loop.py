@@ -2105,9 +2105,6 @@ class DesignLoop:
         if checkbox_is_checked(current, strict=True) is not True:
             return "The checkbox is already down."
         new_body = set_checkbox_in_body(current, checked=False)
-        footer = gateway_footer(session_key=session_key)
-        if footer not in new_body:
-            new_body = new_body.rstrip() + "\n\n" + footer + "\n"
         try:
             patch_fn = self._patch_issue_body or patch_issue_body
             patch_fn(
