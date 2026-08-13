@@ -153,15 +153,17 @@ def test_turn_dispatch_writes_transcript(runner_env: tuple[int, Path]) -> None:
 
 
 def test_role_paths_home_tmp_xdg_under_tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """§7.3 env roots stay under role (or durable project) trees."""
+    """§7.3 env roots stay under the durable project tree (ADR-4 / #76 B1)."""
     sess = tmp_path / "sessions" / "k"
     monkeypatch.setenv("AGENTD_SESSION_DIR", str(sess))
     monkeypatch.setenv("AGENTD_PROJECT_ROOT", str(tmp_path / "proj"))
     (tmp_path / "proj" / "home").mkdir(parents=True)
     paths = turn_mod.role_paths("architect")
     assert paths["home"] == tmp_path / "proj" / "home" / "architect"
-    assert paths["tmp"] == sess / "architect" / "tmp"
-    assert str(paths["xdg"]).endswith(str(Path("architect") / "xdg"))
+    assert paths["tmp"] == tmp_path / "proj" / "home" / "architect" / "tmp"
+    assert paths["xdg"] == tmp_path / "proj" / "home" / "architect" / "xdg"
+    assert str(sess) not in str(paths["tmp"])
+    assert str(sess) not in str(paths["xdg"])
 
 
 def test_role_paths_keyed_by_issue_num_not_env(
@@ -246,6 +248,74 @@ def test_turn_dispatch_writes_under_issue_not_env(runner_env: tuple[int, Path]) 
     assert (p32 / "transcript.jsonl").is_file()
     assert not (pinned / "architect" / "context" / "prompt-t-issue58.txt").exists()
     assert not (pinned / "developer" / "context" / "prompt-t-issue32.txt").exists()
+
+
+def test_ensure_role_cli_spawned_tmp_xdg_ignore_env_pin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#76 B1: CLI spawn (no issue in scope) must not mkdir the env-pinned session."""
+    pinned = tmp_path / "sessions" / "47"
+    monkeypatch.setenv("AGENTD_SESSION_DIR", str(pinned))
+    monkeypatch.setenv("AGENTD_PROJECT_ROOT", str(tmp_path))
+    (tmp_path / "home").mkdir()
+    monkeypatch.delenv("AGENTD_CLI_MODE", raising=False)
+
+    captured: dict[str, Path] = {}
+
+    def fake_get_or_create(**kwargs):  # noqa: ANN003
+        captured.update(kwargs)
+        fake = MagicMock()
+        fake.proc = MagicMock()
+        fake.proc.pid = 1
+        fake.last_rss_kb = 0
+        fake.ensure_spawned = MagicMock()
+        return fake
+
+    with (
+        patch.object(turn_mod, "resolve_adapter", return_value="claude-code"),
+        patch.object(cli_session, "use_oneshot", return_value=False),
+        patch.object(cli_session, "get_or_create_session", side_effect=fake_get_or_create),
+    ):
+        result = turn_mod.ensure_role_cli_spawned("architect")
+
+    assert result.get("spawned") is True
+    assert captured["tmp"] == tmp_path / "home" / "architect" / "tmp"
+    assert captured["xdg"] == tmp_path / "home" / "architect" / "xdg"
+    assert captured["home"] == tmp_path / "home" / "architect"
+    assert str(pinned) not in str(captured["tmp"])
+    assert str(pinned) not in str(captured["xdg"])
+    assert not pinned.exists()
+
+
+def test_ensure_role_layout_without_issue_skips_env_pin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#76 B2: init-time layout is project-scoped; must not recreate a CLOSED session."""
+    pinned = tmp_path / "sessions" / "47"
+    monkeypatch.setenv("AGENTD_SESSION_DIR", str(pinned))
+    monkeypatch.setenv("AGENTD_PROJECT_ROOT", str(tmp_path))
+    (tmp_path / "home").mkdir()
+
+    env = runner_server.ensure_role_layout("architect")
+    assert Path(env["TMPDIR"]) == tmp_path / "home" / "architect" / "tmp"
+    assert (tmp_path / "home" / "architect" / "tmp").is_dir()
+    assert (tmp_path / "home" / "architect" / "xdg").is_dir()
+    assert not pinned.exists()
+
+
+def test_ensure_role_layout_with_issue_creates_context_not_env_pin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#76 B2: turn-time layout creates the issue tree, not the env pin."""
+    pinned = tmp_path / "sessions" / "47"
+    monkeypatch.setenv("AGENTD_SESSION_DIR", str(pinned))
+    monkeypatch.setenv("AGENTD_PROJECT_ROOT", str(tmp_path))
+    (tmp_path / "home").mkdir()
+
+    runner_server.ensure_role_layout("architect", 32)
+    assert (tmp_path / "sessions" / "32" / "architect" / "context").is_dir()
+    assert (tmp_path / "sessions" / "32" / "architect" / "scratch").is_dir()
+    assert not (pinned / "architect" / "context").exists()
 
 
 def test_live_spawn_drops_privs_once_via_popen_user(

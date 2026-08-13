@@ -16,7 +16,7 @@ from typing import Any, Callable
 
 from agentd_runner.adapters import resolve_adapter, run_adapter
 from agentd_runner import cli_session
-from agentd_runner.server import ROLE_UIDS, project_root, session_base
+from agentd_runner.server import ROLE_UIDS, ensure_role_layout, project_root, session_base
 
 log = logging.getLogger("agentd_runner.turn")
 
@@ -26,31 +26,44 @@ ProgressCb = Callable[[dict[str, Any]], None]
 def issue_num_from_params(params: dict[str, Any]) -> int | None:
     """Per-issue truth from turn.dispatch context (#76). None → env fallback."""
     ctx = params.get("context")
-    if not isinstance(ctx, dict):
-        return None
-    raw = ctx.get("issue_num")
+    raw = ctx.get("issue_num") if isinstance(ctx, dict) else None
     if raw is None or raw == "":
+        log.warning(
+            "turn missing context.issue_num; falling back to AGENTD_SESSION_DIR"
+        )
         return None
     try:
         return int(raw)
     except (TypeError, ValueError):
+        log.warning(
+            "turn context.issue_num=%r is not an int; falling back to AGENTD_SESSION_DIR",
+            raw,
+        )
         return None
 
 
 def role_paths(role: str, issue_num: int | None = None) -> dict[str, Path]:
-    """Issue-scoped work dirs + durable project HOME for auth (Option D)."""
+    """Issue-scoped audit dirs + project-scoped runtime (ADR-4 / #76 B1).
+
+    The CLI is cached per role for the container lifetime, so TMPDIR / XDG
+    cannot live under any one issue — teardown would delete them under the
+    running process. They live under durable ``home/<role>/`` (W2 allowlist).
+    """
     base = session_base(issue_num) / role
+    root = project_root()
     # Prefer durable project home for CLI credentials (Grok auth.json etc.).
-    durable = project_root() / "home" / role
-    if durable.is_dir() or (project_root() / "home").exists():
+    durable = root / "home" / role
+    if durable.is_dir() or (root / "home").exists():
         home = durable
     else:
         home = base / "home"
+    # Under home/<role>/ so W2's allowlist (repo, sessions, home) stays closed.
+    runtime_home = root / "home" / role
     return {
         "base": base,
         "home": home,
-        "tmp": base / "tmp",
-        "xdg": base / "xdg",
+        "tmp": runtime_home / "tmp",
+        "xdg": runtime_home / "xdg",
         "context": base / "context",
         "scratch": base / "scratch",
         "worktrees": base / "worktrees",
@@ -422,9 +435,8 @@ def exec_turn_as_role(
         }
 
     issue_num = issue_num_from_params(params)
+    ensure_role_layout(role, issue_num)
     paths = role_paths(role, issue_num)
-    for p in (paths["home"], paths["tmp"], paths["xdg"], paths["context"], paths["scratch"]):
-        p.mkdir(parents=True, exist_ok=True)
 
     rehydrate = load_rehydration(role, issue_num)
     # Live path: vendor process holds conversational state — inject transcript

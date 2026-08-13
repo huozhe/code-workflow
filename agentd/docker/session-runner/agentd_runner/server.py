@@ -148,27 +148,36 @@ def session_base(issue_num: int | None = None) -> Path:
 
 
 def ensure_role_layout(role: str, issue_num: int | None = None) -> dict[str, str]:
-    """HOME / TMPDIR / XDG under <session>/<role>/ at 0700.
+    """Create role runtime dirs as the role UID (0700) and, when known, the issue tree.
 
-    Directories are created *as the role UID* so ownership is real on the
-    container filesystem view. Host must leave base role dir traversable (0755).
+    TMPDIR / XDG live under the project mount, not under any issue (#76 B1).
+    Issue-scoped ``context`` / ``scratch`` / ``worktrees`` are created only when
+    *issue_num* is set — init has no issue and must not recreate AGENTD_SESSION_DIR.
     §7.3: fail if the role cannot write its TMPDIR.
     """
-    base = session_base(issue_num) / role
-    home = base / "home"
-    tmp = base / "tmp"
-    xdg = base / "xdg"
-    # Root ensures parent exists and is traversable so the role can mkdir children.
-    base.mkdir(parents=True, exist_ok=True)
-    try:
-        os.chmod(base, 0o755)
-    except OSError as exc:
-        log.warning("chmod base %s: %s", base, exc)
-    for p in (base / "worktrees", base / "context", base / "scratch"):
-        p.mkdir(parents=True, exist_ok=True)
+    from agentd_runner.turn import role_paths
+
+    paths_map = role_paths(role, issue_num)
+    home = paths_map["home"]
+    tmp = paths_map["tmp"]
+    xdg = paths_map["xdg"]
+    # Root creates project-level parents so the role can mkdir children.
+    tmp.parent.mkdir(parents=True, exist_ok=True)
+    xdg.parent.mkdir(parents=True, exist_ok=True)
+    home.parent.mkdir(parents=True, exist_ok=True)
+    if issue_num is not None:
+        base = paths_map["base"]
+        base.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(base, 0o755)
+        except OSError as exc:
+            log.warning("chmod base %s: %s", base, exc)
+        for p in (paths_map["worktrees"], paths_map["context"], paths_map["scratch"]):
+            p.mkdir(parents=True, exist_ok=True)
 
     uid = ROLE_UIDS[role]
-    paths = [str(home), str(tmp), str(xdg), str(xdg / "cache"), str(xdg / "config"), str(xdg / "data")]
+    # Durable HOME is host-created (755). Do not chmod it as the role.
+    paths = [str(tmp), str(xdg), str(xdg / "cache"), str(xdg / "config"), str(xdg / "data")]
     rc = _run_as_role(uid, f"ensure_role_layout({role})", paths)
     if rc != 0:
         # Unit tests on macOS cannot setuid(1001); create as current euid with warning.
@@ -311,9 +320,10 @@ def handle_request(req: dict[str, Any], authed: bool) -> dict[str, Any]:
         STATE.session_key = session_key
         STATE.roles = {str(k): str(v) for k, v in roles.items()}
 
-        # Issue-scoped layout is lazy on first turn (#76). session.init has
-        # no issue: creating dirs here would recreate AGENTD_SESSION_DIR
-        # (often a CLOSED session). GitHub PATs + model creds stay on tmpfs.
+        # Project-scoped TMPDIR/XDG as the role UID (§7.3). No issue in
+        # scope — do not mkdir AGENTD_SESSION_DIR (#76 B1/B2).
+        for role in ROLE_UIDS:
+            ensure_role_layout(role)
         for role, pat in tokens.items():
             if role in ROLE_UIDS and pat:
                 write_role_token(str(role), str(pat))
