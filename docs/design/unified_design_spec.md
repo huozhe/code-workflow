@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | **Status** | Proposed for formal approval (Phase 3 exit) |
-| **Version** | 1.8.0 — see [Revision history](#revision-history) |
+| **Version** | 1.9.0 — see [Revision history](#revision-history) |
 | **Implements** | [`docs/requirements/SRS_async_multiagent_ai_coding_system.md`](../requirements/SRS_async_multiagent_ai_coding_system.md) **v1.3** |
 | **Supersedes** | [`proposals/claude_design_spec.md`](proposals/claude_design_spec.md) (#4) · [`proposals/grok_design_spec.md`](proposals/grok_design_spec.md) (#2) · [`proposals/gemini_design_spec.md`](proposals/gemini_design_spec.md) (#3) |
 | **Ref** | Issue #1 |
@@ -18,6 +18,7 @@ Amendments are also marked inline at the point they apply, which is where an imp
 
 | Version | Date | Change |
 |---|---|---|
+| **1.9.0** | 2026-08-13 | **No ordinary turn on a terminal session; gateway comments do not wake agents** (#85). `_process_one` dispatched any routed event, including `issue_comment` on `CLOSED`/`TEARDOWN`. Live on #49 six minutes after a clean teardown: one Developer turn, `sessions/49/` recreated, ledger still 0. Gate is immediately after the FSM block and before stall observation (P1: late events are still recorded; a late `changes_requested` on an `ABANDONED` close must not escalate a `CLOSED` row back to `PAUSED_HUMAN`). Not inside `_dispatch_turn` (teardown turns run while the session is `TEARDOWN`). `_escalate` itself refuses a `CLOSED` session (TEARDOWN may still escalate when retries exhaust). Delivery is `done`, not `dropped`. `issues.reopened` still processes. Same family: `_restore_agent_verification_edit`'s warning (and the close completion summary) now carry `<!-- agentd:gateway session=… -->`; `route_for_recipient` drops that marker the way it drops `agentd:escalation`. Broad marker, not per-kind: the gateway is not an agent, and no comment it authors should drive a turn. Escalation keeps its own marker so §8.5 owner-unpause is unchanged. |
 | **1.8.0** | 2026-08-13 | **No restore may raise the checkbox without `verified_at`** (#89, ADR-16). #65's `was is True and now is False` branch treated `changes.body.from` as proof an *owner* tick was present and composed `checked=True`. Provenance was never established: an agent tick moments earlier produces the same `was=True`. Live on session #84 (gateway `d576107`, ADR-15 already deployed): `@huozhegrok` ticked then unticked; ADR-15 correctly aborted the first delivery (`payload now=True current=False`); the second delivery restored the tick up. `verified_at` stayed NULL; `classify_at_close` would still have recorded `VERIFIED`. The neighbouring spellings are the same forge: B4 (`was=True, now=None`) *inserts* a ticked line when the agent deletes rather than unticks; B2 re-splices a ticked `prev_block` when the agent deletes the whole block. New rule: a composition that raises the checkbox needs an owner tick this gateway observed (`sessions.verified_at` set, written only on `is_owner and not is_agent`); a composition that lowers or preserves it never does. Restore-up and B4 refuse and leave the body. B2 refuses the raise and reinserts the block unchecked — leaving no block would classify `ABANDONED` and drop the Architect's steps. Log the refusal with the branch name. Cost of the reversal: a genuine owner tick whose `issues.edited` delivery was dropped now costs one owner re-tick, instead of a silent false `VERIFIED`. B3/B5, B4-with-`was=False`, B2-with-an-unticked-block, and ADR-15's guards are unchanged. Close-time reconcile (ticked body + NULL `verified_at` must not classify `VERIFIED`) is defence in depth and a follow-up (#90). |
 | **1.7.0** | 2026-08-13 | **Verification-block restore composes against a fresh read** (#84, ADR-15). `_restore_agent_verification_edit` (#65) decided *and* composed from the same webhook payload; nothing checked whether the issue had moved on by drain time. Live on session #49: a corrupting `-f`-vs-`-F` `gh api` edit was hand-corrected within seconds, but the gateway drained the corrupting delivery afterward and PATCHed a reconstructed block onto the 25-character wreck, destroying the issue body (recovered by hand from the delivery's stored payload). Fix, layered onto #65's unchanged branch-selection logic: fetch the current body only once a branch other than the no-op is selected (zero extra cost on plain step-refinements); abort if the checkbox has moved since this delivery's own webhook (one equality check covers both an owner tick and an owner untick landing in the window, since the discriminator is "did anything change," not "which direction"); compose the selected branch against the fresh body so an already-self-corrected issue reduces to a no-op; escalate instead of restoring when the current body has collapsed below half its predecessor's length, since a stale-read fix alone does not stop a restore from writing onto damage that is still the latest reality. |
 | **1.6.0** | 2026-08-13 | **`agentctl review-stats` decided** (#49, ADR-14). #49's coalescing mechanism (PR #52) is code-complete; the outstanding checklist item is re-measuring turns-per-review rather than hand-writing a `SELECT`. Groups inline comments to their parent review via `comment.pull_request_review_id` (no linkage exists for thread-resolve events, so those are reported at session level instead of guessed into a review's count); session membership is `deliveries.repo` + `issue_num IN (sessions.issue_num, design_pr, feature_pr)`, since review traffic lands on the PR and `deliveries.issue_num` is the webhook's own issue-or-PR number, not the session issue (revised in review: the initial draft's `issue_num = sessions.issue_num` would have dropped all review traffic). Two separate grains: per-review `turns_woken`/`turns_empty` via the `turns.delivery_id` join is the coalescing check; session-wide `totals: {turns, empty}` via `turns.session_key` (no review join) is the #47-baseline comparison. `unmatched_inline_comments` reports comments whose review never emitted `review.submitted`. No new schema — decompresses `deliveries.payload` at query time. JSON output, `--session` optional, a `sessions` array always, following `write-verification`'s session resolution and `status`/`sessions`'s output convention. |
@@ -654,17 +655,19 @@ P5: no failure mode ends in silence.
 | `sender.login` == the intended recipient's identity | **Drop** (self-echo) |
 | `sender.login` == owner | **Route**, reset `consec_agent_turns` to 0 |
 | Body contains `<!-- agentd:escalation … -->` (gateway voice, §8.5) | **Drop** for every recipient |
+| Body contains `<!-- agentd:gateway … -->` (any other gateway comment, #85) | **Drop** for every recipient |
 | `sender.login` is the other agent bot | **Route**, increment `consec_agent_turns` |
 | Body contains a provenance footer written by the recipient | **Drop** (own artifact) |
 | `delivery_id` already terminal | **Drop** (redelivery) |
 | Session `PAUSED_*` and sender is not the owner | **Defer** (stays queued) |
 | `sender.login` is the gateway login (no escalation marker) | **Drop** (gateway is not a human collaborator) |
 
-Every agent-authored comment carries a machine-readable footer; gateway escalations carry a distinct marker. Both make drop rules mechanical:
+Every agent-authored comment carries a machine-readable footer; gateway comments carry a marker. Escalations keep `agentd:escalation` so §8.5 unpause stays distinct; every other gateway comment uses `agentd:gateway`. Both make drop rules mechanical:
 
 ```html
 <!-- agentd:turn session=huozhe/code-workflow#42 role=architect turn=01J8Z… -->
 <!-- agentd:escalation session=huozhe/code-workflow#42 -->
+<!-- agentd:gateway session=huozhe/code-workflow#42 -->
 ```
 
 Owner quote-replies that copy either footer still **route** — owner is evaluated before marker rules (same trap as M3-2).
@@ -737,7 +740,7 @@ The checkbox **records a fact; it authorizes nothing.** On `issues.edited`, a `-
 
 The second condition is not redundant with the first — it survives a configuration mistake in which an agent identity is also listed as owner. Under this design the checkbox is a data-integrity control rather than a security gate, because closure (§10.3) is the human's own act; it is checked twice anyway because a falsified verification record is worth preventing cheaply.
 
-If an agent edits the issue body while `AWAITING_VERIFICATION`, the restore is *decided* from that edit's own before/after image (`changes.body.from` vs. the payload's `issue.body`, PR #65) but *composed* against a fresh read of the issue taken immediately before the write (ADR-15) — never against the payload's after-image, which can be stale by the time the delivery drains. A warning comment is posted for every restore that PATCHes.
+If an agent edits the issue body while `AWAITING_VERIFICATION`, the restore is *decided* from that edit's own before/after image (`changes.body.from` vs. the payload's `issue.body`, PR #65) but *composed* against a fresh read of the issue taken immediately before the write (ADR-15) — never against the payload's after-image, which can be stale by the time the delivery drains. A warning comment is posted for every restore that PATCHes, with `<!-- agentd:gateway session=… -->` so routing drops it (#85).
 
 **No restore may raise the checkbox without a second signal.** `changes.body.from` does not say *who* made the prior tick. A composition that raises the box needs `sessions.verified_at`; a composition that lowers or preserves it never does (ADR-16). Restore-up and B4-with-`was=True` refuse and leave the body. B2 with a ticked `prev_block` refuses the raise and reinserts the block unchecked — otherwise the issue has no gate and §10.3 classifies `ABANDONED`. B1 (already-checked before and after a step-refine, including a missed owner-tick delivery) is unchanged.
 
@@ -1438,7 +1441,7 @@ Log the refusal at WARNING with the *branch name*, `was`, `now`, `verified_at`, 
 
 **Follow-up, not this ADR.** Close-time reconcile — a ticked body with `verified_at IS NULL` must escalate rather than classify `VERIFIED` — is the defence in depth for anything that slips past the branch. It is a different function (`_owner_close_teardown`) and it collides with §10.3 ("no attempt to reopen an issue the owner closed") plus the teardown suite that currently treats a ticked payload as sufficient authority. Filed as #90 so this reversal stays one branch.
 
-*Out of scope:* the §10.2 warning comment waking agent turns (gateway login is routed `human-or-other` → ROUTE). Same family as #85; scoped there.
+*Out of scope:* the §10.2 warning comment waking agent turns — closed by #85 (`agentd:gateway` marker).
 
 ---
 

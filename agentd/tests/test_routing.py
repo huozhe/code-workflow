@@ -5,7 +5,9 @@ from __future__ import annotations
 from agentd.github_write import format_escalation_comment
 from agentd.routing import (
     RouteAction,
+    gateway_footer,
     parse_escalation_marker,
+    parse_gateway_marker,
     parse_provenance,
     provenance_footer,
     route_for_recipient,
@@ -189,6 +191,51 @@ def test_gateway_login_not_human_collaborator() -> None:
     )
     assert d.action == RouteAction.DROP
     assert d.reason in ("unclassified sender", "gateway escalation comment")
+
+
+def test_gateway_marker_dropped_for_both_roles() -> None:
+    """#85: any gateway comment, not only escalations, must not wake a role."""
+    body = (
+        "**agentd** restored the checkbox.\n"
+        + gateway_footer(session_key="o/r#84")
+    )
+    assert parse_gateway_marker(body) is not None
+    assert parse_escalation_marker(body) is None
+    for role, login, other in (
+        ("architect", "huozheclaude", "huozhegrok"),
+        ("developer", "huozhegrok", "huozheclaude"),
+    ):
+        d = route_for_recipient(
+            sender=other,
+            recipient_login=login,
+            recipient_role=role,
+            other_bot_login=other,
+            owner="huozhe",
+            body=body,
+            session_paused=False,
+            bot_logins={"huozheclaude", "huozhegrok"},
+        )
+        assert d.action == RouteAction.DROP, (role, d)
+        assert d.reason == "gateway comment"
+
+
+def test_owner_quote_with_gateway_marker_still_routes() -> None:
+    body = (
+        "> quoted restore\n"
+        + gateway_footer(session_key="o/r#1")
+        + "\n\nProceed."
+    )
+    d = route_for_recipient(
+        sender="huozhe",
+        recipient_login="huozheclaude",
+        recipient_role="architect",
+        other_bot_login="huozhegrok",
+        owner="huozhe",
+        body=body,
+        session_paused=True,
+    )
+    assert d.action == RouteAction.ROUTE
+    assert d.reset_consec is True
 
 
 def test_owner_quote_with_escalation_marker_still_routes() -> None:
