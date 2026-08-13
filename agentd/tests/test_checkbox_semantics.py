@@ -216,6 +216,7 @@ def test_agent_tick_restores_and_warns(tmp_path: Path) -> None:
         supervisor=None,
         dispatch_turns=False,
         gateway_token="gw",
+        get_issue_body_fn=lambda **_: body,
         patch_issue_body_fn=fake_patch,
         post_comment=fake_comment,
     )
@@ -260,6 +261,7 @@ def test_agent_untick_restores_checked_from_prev(tmp_path: Path) -> None:
         supervisor=None,
         dispatch_turns=False,
         gateway_token="gw",
+        get_issue_body_fn=lambda **_: body,
         patch_issue_body_fn=fake_patch,
         post_comment=fake_comment,
     )
@@ -329,7 +331,14 @@ def test_agent_deletes_block_restored_from_prev(tmp_path: Path) -> None:
     cfg = _cfg(tmp_path)
     _seed(store, verified_at=int(time.time()))
     prev = _body(checked=True, steps=["pull", "test"])
-    new_body = "## Goal\n\nSession work — block deleted by agent.\n"
+    # Remaining prose must stay ≥ 0.5× prev so ADR-15's sanity floor
+    # (damage, not a block-only delete) does not fire. Real issues are
+    # mostly goal/checklist; this fixture used to be block-dominated.
+    new_body = (
+        "## Goal\n\nSession work — block deleted by agent.\n\n"
+        + ("Keep the session goal and checklist intact. " * 20)
+        + "\n"
+    )
     patches: list[str] = []
     comments: list[str] = []
 
@@ -346,6 +355,7 @@ def test_agent_deletes_block_restored_from_prev(tmp_path: Path) -> None:
         supervisor=None,
         dispatch_turns=False,
         gateway_token="gw",
+        get_issue_body_fn=lambda **_: new_body,
         patch_issue_body_fn=fake_patch,
         post_comment=fake_comment,
     )
@@ -424,6 +434,7 @@ def test_agent_adds_preticked_block_where_none_existed(tmp_path: Path) -> None:
         supervisor=None,
         dispatch_turns=False,
         gateway_token="gw",
+        get_issue_body_fn=lambda **_: body,
         patch_issue_body_fn=fake_patch,
         post_comment=fake_comment,
     )
@@ -469,6 +480,7 @@ def test_agent_inserts_tick_into_block_without_line(tmp_path: Path) -> None:
         supervisor=None,
         dispatch_turns=False,
         gateway_token="gw",
+        get_issue_body_fn=lambda **_: body,
         patch_issue_body_fn=lambda **kw: patches.append(kw["body"]),  # noqa: ARG005
         post_comment=lambda **kw: comments.append(kw) or 1,  # noqa: ARG005
     )
@@ -516,6 +528,7 @@ def test_agent_removes_unticked_line_restored(tmp_path: Path) -> None:
         supervisor=None,
         dispatch_turns=False,
         gateway_token="gw",
+        get_issue_body_fn=lambda **_: body,
         patch_issue_body_fn=lambda **kw: patches.append(kw["body"]),  # noqa: ARG005
         post_comment=lambda **kw: comments.append(kw["body"]) or 1,  # noqa: ARG005
     )
@@ -556,6 +569,7 @@ def test_agent_bare_tick_outside_sentinels_neutralized(tmp_path: Path) -> None:
         supervisor=None,
         dispatch_turns=False,
         gateway_token="gw",
+        get_issue_body_fn=lambda **_: body,
         patch_issue_body_fn=lambda **kw: patches.append(kw["body"]),  # noqa: ARG005
         post_comment=lambda **kw: comments.append(kw["body"]) or 1,  # noqa: ARG005
     )
@@ -604,6 +618,7 @@ def test_failed_patch_does_not_claim_restored(tmp_path: Path) -> None:
         supervisor=None,
         dispatch_turns=False,
         gateway_token="gw",
+        get_issue_body_fn=lambda **_: body,
         patch_issue_body_fn=boom,
         post_comment=lambda **kw: comments.append(kw) or 1,  # noqa: ARG005
     )
@@ -691,6 +706,7 @@ def test_owner_who_is_agent_not_recorded(tmp_path: Path) -> None:
         supervisor=None,
         dispatch_turns=False,
         gateway_token="gw",
+        get_issue_body_fn=lambda **_: body,
         patch_issue_body_fn=lambda **kw: patches.append(kw.get("body")),  # noqa: ARG005
         post_comment=lambda **kw: comments.append(kw) or 1,  # noqa: ARG005
     )
@@ -768,3 +784,192 @@ def test_config_agent_logins_excludes_gateway(tmp_path: Path) -> None:
     assert "huozhegrok" in cfg.agent_logins()
     assert "huozhegateway" not in cfg.agent_logins()
     assert "huozhegateway" in cfg.all_bot_logins()
+
+
+def test_adr15_corrected_body_survives_stale_corrupting_delivery(
+    tmp_path: Path,
+) -> None:
+    """#49: drain the 25-char wreck after a refined correction — no PATCH."""
+    store = Store(tmp_path / "state.db")
+    cfg = _cfg(tmp_path)
+    _seed(store, verified_at=None)
+    prev = _body(checked=False, steps=["scaffold"])
+    wreck = "@/tmp/issue49_new_body.md"
+    assert len(wreck) < 0.5 * len(prev)
+    corrected = _body(checked=False, steps=["human-runnable refine"])
+    patches: list = []
+    fetches: list[int] = []
+
+    loop = DesignLoop(
+        store,
+        cfg,
+        supervisor=None,
+        dispatch_turns=False,
+        gateway_token="gw",
+        get_issue_body_fn=lambda **_: fetches.append(1) or corrected,
+        patch_issue_body_fn=lambda **kw: patches.append(kw),  # noqa: ARG005
+        post_comment=lambda **kw: 1,  # noqa: ARG005
+    )
+    _insert(
+        store,
+        "d-wreck",
+        _edited_payload(
+            issue=58, sender="huozheclaude", body=wreck, body_from=prev
+        ),
+        issue=58,
+        sender="huozheclaude",
+    )
+    loop.process_deferred_batch()
+    assert fetches == [1]
+    assert patches == []
+    assert store.get_session("huozhe/code-workflow#58")["state"] == (
+        "AWAITING_VERIFICATION"
+    )
+    store.close()
+
+
+def test_adr15_owner_tick_in_window_skips_patch(tmp_path: Path) -> None:
+    """Owner ticked on a later body; stale B2 must not overwrite or stamp."""
+    store = Store(tmp_path / "state.db")
+    cfg = _cfg(tmp_path)
+    sk = _seed(store, verified_at=None)
+    prev = _body(checked=False)
+    wreck = "## Goal\n\nblock deleted by agent.\n"
+    current = _body(checked=True)
+    patches: list = []
+
+    loop = DesignLoop(
+        store,
+        cfg,
+        supervisor=None,
+        dispatch_turns=False,
+        gateway_token="gw",
+        get_issue_body_fn=lambda **_: current,
+        patch_issue_body_fn=lambda **kw: patches.append(kw),  # noqa: ARG005
+        post_comment=lambda **kw: 1,  # noqa: ARG005
+    )
+    _insert(
+        store,
+        "d-tick-window",
+        _edited_payload(
+            issue=58, sender="huozheclaude", body=wreck, body_from=prev
+        ),
+        issue=58,
+        sender="huozheclaude",
+    )
+    loop.process_deferred_batch()
+    assert patches == []
+    assert store.get_session(sk)["verified_at"] is None
+    store.close()
+
+
+def test_adr15_redelivery_patches_at_most_once(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.db")
+    cfg = _cfg(tmp_path)
+    _seed(store, verified_at=None)
+    prev = _body(checked=False)
+    body = _body(checked=True)
+    live = {"body": body}
+    patches: list[str] = []
+
+    def fake_get(**_):  # noqa: ANN003
+        return live["body"]
+
+    def fake_patch(*, repo, issue_num, body, token):  # noqa: ANN001
+        patches.append(body)
+        live["body"] = body
+
+    loop = DesignLoop(
+        store,
+        cfg,
+        supervisor=None,
+        dispatch_turns=False,
+        gateway_token="gw",
+        get_issue_body_fn=fake_get,
+        patch_issue_body_fn=fake_patch,
+        post_comment=lambda **kw: 1,  # noqa: ARG005
+    )
+    payload = _edited_payload(
+        issue=58, sender="huozheclaude", body=body, body_from=prev
+    )
+    _insert(store, "d-once", payload, issue=58, sender="huozheclaude")
+    loop.process_deferred_batch()
+    assert len(patches) == 1
+    store.set_delivery_status("d-once", "deferred")
+    loop.process_deferred_batch()
+    assert len(patches) == 1
+    store.close()
+
+
+def test_adr15_collapsed_current_escalates_no_patch(tmp_path: Path) -> None:
+    """Wreck still live at drain time → escalate, do not splice onto it."""
+    store = Store(tmp_path / "state.db")
+    cfg = _cfg(tmp_path)
+    sk = _seed(store, verified_at=None)
+    prev = _body(checked=False, steps=["scaffold"])
+    wreck = "@/tmp/issue49_new_body.md"
+    patches: list = []
+    comments: list[str] = []
+
+    loop = DesignLoop(
+        store,
+        cfg,
+        supervisor=None,
+        dispatch_turns=False,
+        gateway_token="gw",
+        get_issue_body_fn=lambda **_: wreck,
+        patch_issue_body_fn=lambda **kw: patches.append(kw),  # noqa: ARG005
+        post_comment=lambda **kw: comments.append(kw["body"]) or 1,  # noqa: ARG005
+    )
+    _insert(
+        store,
+        "d-floor",
+        _edited_payload(
+            issue=58, sender="huozheclaude", body=wreck, body_from=prev
+        ),
+        issue=58,
+        sender="huozheclaude",
+    )
+    loop.process_deferred_batch()
+    assert patches == []
+    sess = store.get_session(sk)
+    assert sess is not None
+    assert sess["state"] == "PAUSED_HUMAN"
+    assert sess["resume_state"] == "AWAITING_VERIFICATION"
+    assert comments and "Gateway wrote nothing" in comments[0]
+    assert "collapsed" in comments[0]
+    store.close()
+
+
+def test_adr15_get_failure_skips_restore(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.db")
+    cfg = _cfg(tmp_path)
+    _seed(store, verified_at=None)
+    prev = _body(checked=False)
+    body = _body(checked=True)
+    patches: list = []
+
+    def boom(**_):  # noqa: ANN003
+        raise RuntimeError("github down")
+
+    loop = DesignLoop(
+        store,
+        cfg,
+        supervisor=None,
+        dispatch_turns=False,
+        gateway_token="gw",
+        get_issue_body_fn=boom,
+        patch_issue_body_fn=lambda **kw: patches.append(kw),  # noqa: ARG005
+    )
+    _insert(
+        store,
+        "d-get-fail",
+        _edited_payload(
+            issue=58, sender="huozheclaude", body=body, body_from=prev
+        ),
+        issue=58,
+        sender="huozheclaude",
+    )
+    loop.process_deferred_batch()
+    assert patches == []
+    store.close()

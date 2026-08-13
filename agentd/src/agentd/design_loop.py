@@ -1430,12 +1430,16 @@ class DesignLoop:
         body: str,
         changes: dict[str, Any],
     ) -> None:
-        """Restore checkbox/block using changes.body.from (PR #65 B1/B2/B3).
+        """Restore checkbox/block using changes.body.from (PR #65 / ADR-15).
 
         Invariant (B3): the box must never leave an agent edit *more checked*
         than it entered. ``now is True and was is not True`` covers no prior
         block, no prior line, and an explicit unticked prior — none of those
         is an owner tick.
+
+        ADR-15: *which* branch fires is still decided from the payload pair
+        ``(prev, body)``. The text the write is built from is a fresh GET,
+        taken only after a non-no-op branch is selected.
         """
         body_change = changes.get("body")
         prev: str | None = None
@@ -1465,32 +1469,46 @@ class DesignLoop:
             and checkbox_is_checked(body, strict=False) is True
         )
 
-        restored: str | None = None
+        compose: Any = None
         reason = ""
 
         if prev_block is not None and curr_block is None:
             # B2: whole block deleted — re-splice prior block; keep agent prose.
-            restored = reinsert_verification_block(body, prev_block)
+            block = prev_block
+
+            def compose(current: str, _block: str = block) -> str:
+                return reinsert_verification_block(current, _block)
+
             reason = "verification block removed"
         elif now is True and was is not True:
             # B3: agent supplied an in-block tick the owner never had.
-            restored = set_checkbox_in_body(body, checked=False)
+            def compose(current: str) -> str:
+                return set_checkbox_in_body(current, checked=False)
+
             reason = (
                 "checkbox ticked without prior owner tick "
                 f"(was={was!r} → now=True)"
             )
         elif bare_tick:
             # B5: bare ``- [x] Human Verification Complete`` outside sentinels.
-            restored = neutralize_bare_verification_ticks(body)
+            def compose(current: str) -> str:
+                return neutralize_bare_verification_ticks(current)
+
             reason = "bare checkbox outside sentinels (no protocol block)"
         elif was is True and now is False:
             # Owner tick was present before this edit; agent unticked — restore up.
-            restored = set_checkbox_in_body(body, checked=True)
+            def compose(current: str) -> str:
+                return set_checkbox_in_body(current, checked=True)
+
             reason = "checkbox True → False"
         elif was is not None and now is None:
             # B4: line removed (ticked or unticked) — restore pre-edit state.
             # Restoring False cannot violate B3 (not more checked than was).
-            restored = set_checkbox_in_body(body, checked=was)
+            want = was
+
+            def compose(current: str, _want: bool = want) -> str:
+                return set_checkbox_in_body(current, checked=_want)
+
             reason = f"checkbox line removed (was={was})"
         else:
             log.info(
@@ -1503,7 +1521,54 @@ class DesignLoop:
             self.store.set_delivery_status(delivery_id, "done")
             return
 
-        if restored is None or restored == body:
+        # ADR-15: fetch → sanity floor → checkbox abort → compose on current.
+        try:
+            get_fn = self._get_issue_body or get_issue_body
+            fetched = get_fn(
+                repo=repo,
+                issue_num=int(issue_num),
+                token=self._gateway_github_token(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "issues.edited by agent session=%s — GET issue body failed; "
+                "skip restore (safe default): %s",
+                session_key,
+                exc,
+            )
+            self.store.set_delivery_status(delivery_id, "done")
+            return
+        current = fetched if isinstance(fetched, str) else ""
+
+        if len(current) < 0.5 * len(prev):
+            self._escalate(
+                session_key,
+                "system",
+                (
+                    f"verification-block restore aborted: issue body collapsed "
+                    f"from {len(prev)} to {len(current)} characters "
+                    f"(sender=`{sender}`). Gateway wrote nothing. "
+                    f"Pre-edit body is recoverable from delivery "
+                    f"{delivery_id}'s stored payload."
+                ),
+            )
+            self.store.set_delivery_status(delivery_id, "done")
+            return
+
+        now_current = checkbox_is_checked(current, strict=True)
+        if now_current != now:
+            log.info(
+                "issues.edited by agent session=%s — checkbox moved since "
+                "webhook (payload now=%s current=%s); skip stale restore",
+                session_key,
+                now,
+                now_current,
+            )
+            self.store.set_delivery_status(delivery_id, "done")
+            return
+
+        restored = compose(current)
+        if restored is None or restored == current:
             self.store.set_delivery_status(delivery_id, "done")
             return
 
