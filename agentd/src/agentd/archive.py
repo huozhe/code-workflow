@@ -54,13 +54,30 @@ def write_manifest(session_dir: Path, manifest: dict[str, Any]) -> Path:
     return path
 
 
+# Role-level runtime dirs that live *inside* the session tree (#74).
+# Transcript, context, scratch, and manifest stay. tmp/ logs are debug, not audit.
+_EXCLUDE_ROLE_DIRS = frozenset({"home", "xdg", "tmp"})
+
+
+def exclude_runtime_dirs(info: tarfile.TarInfo) -> tarfile.TarInfo | None:
+    """Drop ``<issue>/<role>/{home,xdg,tmp}``. Keep everything else."""
+    parts = Path(info.name).parts
+    if len(parts) >= 3 and parts[2] in _EXCLUDE_ROLE_DIRS:
+        return None
+    return info
+
+
 def write_tarball(session_dir: Path, dest: Path) -> Path:
     """Write dest.tmp, fsync the write handle, rename, fsync the parent dir."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_name(dest.name + ".tmp")
     with open(tmp, "wb") as fh:
         with tarfile.open(fileobj=fh, mode="w:gz") as tf:
-            tf.add(session_dir, arcname=session_dir.name)
+            tf.add(
+                session_dir,
+                arcname=session_dir.name,
+                filter=exclude_runtime_dirs,
+            )
         fh.flush()
         os.fsync(fh.fileno())
     os.replace(tmp, dest)

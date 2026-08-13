@@ -181,6 +181,35 @@ def test_write_tarball_uses_tmp_then_rename(tmp_path: Path, monkeypatch) -> None
     assert not dest.with_name("58.tar.gz.tmp").exists()
 
 
+def test_write_tarball_excludes_role_runtime_dirs(tmp_path: Path) -> None:
+    """#74: xdg/, home/, tmp/ sit under the session dir; do not archive them."""
+    session = tmp_path / "sessions" / "47"
+    for role in ("architect", "developer"):
+        base = session / role
+        (base / "xdg" / "cache" / "gh").mkdir(parents=True)
+        (base / "xdg" / "cache" / "gh" / "resp").write_bytes(b"secret-shaped")
+        (base / "home" / ".config").mkdir(parents=True)
+        (base / "home" / ".config" / "hosts.yml").write_text("token: x\n")
+        (base / "tmp").mkdir(parents=True)
+        (base / "tmp" / "cli-architect.stderr.log").write_text("debug\n")
+        (base / "context").mkdir()
+        (base / "transcript.jsonl").write_text("{}\n")
+        (base / "scratch").mkdir()
+        (base / "scratch" / "note.txt").write_text("keep\n")
+        (base / "scratch" / "tmp-name.txt").write_text("also keep\n")
+    dest = tmp_path / "47.tar.gz"
+    write_tarball(session, dest)
+    with tarfile.open(dest, "r:gz") as tf:
+        names = set(tf.getnames())
+    assert "47/architect/transcript.jsonl" in names
+    assert "47/architect/scratch/note.txt" in names
+    assert "47/architect/scratch/tmp-name.txt" in names
+    assert "47/developer/transcript.jsonl" in names
+    assert not any("/xdg" in n for n in names)
+    assert not any("/home" in n or n.endswith("/home") for n in names)
+    assert not any(n.endswith("/tmp") or "/tmp/" in n for n in names)
+
+
 # --- owner close: archive → purge → CLOSED ---
 
 
