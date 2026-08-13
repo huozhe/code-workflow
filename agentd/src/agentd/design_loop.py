@@ -604,6 +604,19 @@ class DesignLoop:
                     feature_pr=sess_after.get("feature_pr") or dig.get("pr"),
                 )
 
+        # #85: after FSM (P1 still records a late event), before stall /
+        # DROP / dispatch. Those act for a live session.
+        if state in TERMINAL_STATES:
+            self.store.set_delivery_status(delivery_id, "done")
+            log.info(
+                "no turn id=%s session=%s — terminal state=%s (%s)",
+                delivery_id,
+                session_key,
+                state,
+                kind,
+            )
+            return
+
         # Stall only when a turn would be routed — self-echo under §5.3 adapter
         # swap must not advance zero-thread (M3-D NB1).
         if (
@@ -637,20 +650,6 @@ class DesignLoop:
                 decision.reason,
                 kind,
                 state,
-            )
-            return
-
-        # #85: ordinary path must not turn a terminal session. After FSM so a
-        # late event is still recorded; not inside _dispatch_turn (teardown
-        # turns run while state is TEARDOWN).
-        if state in TERMINAL_STATES:
-            self.store.set_delivery_status(delivery_id, "done")
-            log.info(
-                "no turn id=%s session=%s — terminal state=%s (%s)",
-                delivery_id,
-                session_key,
-                state,
-                kind,
             )
             return
 
@@ -2182,6 +2181,14 @@ class DesignLoop:
         """§8.5: pause, post @owner comment, record escalation with comment_id."""
         sess = self.store.get_session(session_key) or {}
         prev_state = str(sess.get("state") or "PLANNING")
+        # CLOSED is archived; do not flip it to PAUSED_HUMAN. TEARDOWN
+        # still escalates when retries exhaust (#69).
+        if prev_state == "CLOSED":
+            log.info(
+                "escalate skipped session=%s — already CLOSED",
+                session_key,
+            )
+            return
         if prev_state == "PAUSED_HUMAN":
             prev_state = str(sess.get("resume_state") or "PLANNING")
         repo = str(sess.get("repo") or "")
@@ -2252,6 +2259,8 @@ class DesignLoop:
         issue_num: int,
     ) -> None:
         """Owner issue_comment while PAUSED_HUMAN → close escalation, dispatch."""
+        # Fires when the owner closes the issue while an escalation is open
+        # (state is already TEARDOWN/CLOSED; resume_state would be wrong).
         if str(sess.get("state") or "") in TERMINAL_STATES:
             self.store.set_delivery_status(delivery_id, "done")
             log.info(

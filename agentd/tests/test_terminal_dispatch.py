@@ -206,3 +206,100 @@ def test_gateway_restore_comment_no_turn_owner_still_wakes(tmp_path: Path) -> No
     _loop(store, tmp_path, _Supervisor())
     assert store.count_turns(sk) >= 1
     store.close()
+
+
+def _insert_feature_changes_requested(store: Store, *, did: str, issue: int) -> None:
+    from agentd.gitops import role_branch_name
+
+    ref = role_branch_name("huozhe/code-workflow", issue, "developer")
+    payload = json.dumps(
+        {
+            "action": "submitted",
+            "review": {"state": "changes_requested", "id": 1},
+            "pull_request": {
+                "number": 900,
+                "title": "feat",
+                "html_url": "https://example/pr/900",
+                "head": {"ref": ref, "sha": "a" * 40},
+                "base": {"ref": "main"},
+            },
+            "repository": {"full_name": "huozhe/code-workflow"},
+            "sender": {"login": "huozheclaude"},
+        }
+    ).encode()
+    store.insert_delivery(
+        delivery_id=did,
+        event="pull_request_review",
+        action="submitted",
+        repo="huozhe/code-workflow",
+        issue_num=900,
+        sender="huozheclaude",
+        payload=payload,
+        status="deferred",
+    )
+
+
+def test_closed_late_review_does_not_observe_stall(tmp_path: Path) -> None:
+    """#93 B1: terminal gate sits above the stall observer."""
+    store = Store(tmp_path / "state.db")
+    sk = _seed(store, state="CLOSED")
+    _insert_feature_changes_requested(store, did="d-cr", issue=49)
+    seen: list[str] = []
+    fsm_calls: list[tuple[str, str]] = []
+
+    import agentd.design_loop as dl
+
+    orig_tr = dl.transition
+
+    def spy_tr(state: str, kind: str):
+        fsm_calls.append((state, kind))
+        return orig_tr(state, kind)
+
+    dl.transition = spy_tr  # type: ignore[misc]
+    loop = DesignLoop(
+        store,
+        _cfg(tmp_path),
+        supervisor=_Supervisor(),
+        dispatch_turns=True,
+        gateway_token="gw",
+    )
+    loop._observe_stall_signals = (  # type: ignore[method-assign]
+        lambda **k: seen.append(str(k.get("kind"))) or False
+    )
+    orig_client = dl.RunnerClient
+    dl.RunnerClient = _RecordingClient  # type: ignore[misc]
+    try:
+        loop.process_deferred_batch()
+    finally:
+        dl.RunnerClient = orig_client  # type: ignore[misc]
+        dl.transition = orig_tr  # type: ignore[misc]
+
+    assert seen == []
+    assert ("CLOSED", "code_changes_requested") in fsm_calls
+    sess = store.get_session(sk)
+    assert sess is not None
+    assert sess["state"] == "CLOSED"
+    assert sess.get("paused_reason") is None
+    assert store.count_turns(sk) == 0
+    assert _delivery_status(store, "d-cr") == "done"
+    store.close()
+
+
+def test_escalate_on_closed_session_is_noop(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.db")
+    sk = _seed(store, state="CLOSED")
+    posts: list = []
+    loop = DesignLoop(
+        store,
+        _cfg(tmp_path),
+        supervisor=None,
+        dispatch_turns=False,
+        post_comment=lambda **k: posts.append(k) or 1,
+    )
+    loop._escalate(sk, "system", "should not land on a closed issue")
+    sess = store.get_session(sk)
+    assert sess is not None
+    assert sess["state"] == "CLOSED"
+    assert sess.get("paused_reason") is None
+    assert posts == []
+    store.close()
