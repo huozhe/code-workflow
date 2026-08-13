@@ -1,4 +1,4 @@
-"""agentctl version | status | sessions | logs | quarantine-deferred | write-verification."""
+"""agentctl version | status | sessions | logs | quarantine-deferred | write-verification | review-stats."""
 
 from __future__ import annotations
 
@@ -59,6 +59,16 @@ def main(argv: list[str] | None = None) -> None:
         "--dry-run",
         action="store_true",
         help="Print the new body without PATCHing GitHub",
+    )
+    p_rs = sub.add_parser(
+        "review-stats",
+        help="Turns-per-review measurement (ADR-14 / #49)",
+    )
+    p_rs.add_argument(
+        "--session",
+        default=None,
+        metavar="KEY",
+        help="Session key (repo#issue) or bare issue number (default: all sessions)",
     )
     args = parser.parse_args(argv)
 
@@ -251,6 +261,26 @@ def main(argv: list[str] | None = None) -> None:
                 indent=2,
             )
         )
+        store.close()
+        return
+
+    if args.cmd == "review-stats":
+        from agentd.review_stats import collect_review_stats
+
+        store = Store(config.state_db)
+        if args.session is not None:
+            sess = _resolve_session(store, args.session)
+            if not sess:
+                print(f"no session for {args.session!r}", file=sys.stderr)
+                store.close()
+                sys.exit(1)
+            targets = [sess]
+        else:
+            targets = []
+            for row in store.list_sessions():
+                full = store.get_session(str(row["session_key"])) or row
+                targets.append(full)
+        print(json.dumps(collect_review_stats(store, sessions=targets), indent=2))
         store.close()
         return
 

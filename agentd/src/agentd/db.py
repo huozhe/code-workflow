@@ -775,6 +775,46 @@ class Store:
             ).fetchone()
         return int(row["n"] if row else 0)
 
+    def list_deliveries_for(
+        self, repo: str, issue_nums: list[int]
+    ) -> list[dict[str, Any]]:
+        """Deliveries whose issue_num is in ``issue_nums`` (ADR-14 membership).
+
+        ``issue_nums`` must already omit NULL — SQLite ``IN`` does not match
+        NULL list members. Empty list → no rows (do not emit ``IN ()``).
+        """
+        nums = [int(n) for n in issue_nums]
+        if not nums:
+            return []
+        placeholders = ",".join("?" * len(nums))
+        with self._lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT delivery_id, event, action, repo, issue_num, sender,
+                       received_at, payload, status
+                FROM deliveries
+                WHERE repo = ? AND issue_num IN ({placeholders})
+                ORDER BY received_at ASC
+                """,
+                (repo, *nums),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def list_turns(self, session_key: str) -> list[dict[str, Any]]:
+        """All turn rows for ``session_key``, oldest first (ADR-14 totals)."""
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT turn_id, session_key, role, delivery_id,
+                       started_at, ended_at, status, summary, public_actions
+                FROM turns
+                WHERE session_key = ?
+                ORDER BY started_at ASC
+                """,
+                (session_key,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
     def insert_turn(
         self,
         *,
