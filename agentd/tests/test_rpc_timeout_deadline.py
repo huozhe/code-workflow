@@ -206,6 +206,8 @@ def test_gateway_timeout_role_busy_returns_immediately(tmp_path: Path) -> None:
             return False
 
         def call(self, method, params=None):  # noqa: ANN001
+            if method != "turn.dispatch":
+                return {"ok": True}
             calls["n"] += 1
             if calls["n"] == 1:
                 raise TimeoutError("timed out")

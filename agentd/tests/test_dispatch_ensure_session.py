@@ -80,6 +80,15 @@ class _RecordingClient:
         return {"status": "done", "summary": "ok", "public_actions": []}
 
 
+class _UnreachablePing(_RecordingClient):
+    """health.ping fails (dead endpoint); turn.dispatch still works after ensure."""
+
+    def call(self, method, params=None):  # noqa: ANN001
+        if method == "health.ping":
+            raise OSError("Connection refused")
+        return super().call(method, params)
+
+
 class _EnsureSupervisor:
     def __init__(self, store: Store, *, clobber_intake: bool = False) -> None:
         self.store = store
@@ -109,7 +118,14 @@ class _EnsureSupervisor:
         )
 
 
-def _run(store: Store, tmp: Path, supervisor, *, posts: list | None = None) -> DesignLoop:
+def _run(
+    store: Store,
+    tmp: Path,
+    supervisor,
+    *,
+    posts: list | None = None,
+    client: type = _RecordingClient,
+) -> DesignLoop:
     import agentd.design_loop as dl
 
     def _post(**k):  # noqa: ANN003
@@ -127,7 +143,7 @@ def _run(store: Store, tmp: Path, supervisor, *, posts: list | None = None) -> D
         gateway_token="gw",
     )
     orig = dl.RunnerClient
-    dl.RunnerClient = _RecordingClient  # type: ignore[misc]
+    dl.RunnerClient = client  # type: ignore[misc]
     try:
         loop.process_deferred_batch()
     finally:
@@ -157,7 +173,7 @@ def test_no_runner_row_calls_ensure_and_dispatches(tmp_path: Path) -> None:
 
 
 def test_stale_runner_row_still_calls_ensure_on_turn(tmp_path: Path) -> None:
-    """#78: a runners row is not reachability. Always probe."""
+    """#78: a runners row is not reachability. Ping fail → ensure."""
     store = Store(tmp_path / "state.db")
     _seed_session(store)
     store.upsert_runner(
@@ -169,8 +185,27 @@ def test_stale_runner_row_still_calls_ensure_on_turn(tmp_path: Path) -> None:
     )
     sup = _EnsureSupervisor(store)
     _owner_comment(store, did="d-stale")
-    _run(store, tmp_path, sup)
+    _run(store, tmp_path, sup, client=_UnreachablePing)
     assert sup.calls == 1
+    assert any(m == "turn.dispatch" for m, _ in _RecordingClient.calls)
+    store.close()
+
+
+def test_reachable_runner_does_not_call_ensure(tmp_path: Path) -> None:
+    """#78 B1: health.ping ok → do not run ensure_session (no layout churn)."""
+    store = Store(tmp_path / "state.db")
+    _seed_session(store)
+    store.upsert_runner(
+        "huozhe/code-workflow",
+        container_id="live",
+        endpoint="127.0.0.1:9",
+        token="tok",
+        tier="hot",
+    )
+    sup = _EnsureSupervisor(store)
+    _owner_comment(store, did="d-live")
+    _run(store, tmp_path, sup)
+    assert sup.calls == 0
     assert any(m == "turn.dispatch" for m, _ in _RecordingClient.calls)
     store.close()
 
@@ -187,7 +222,7 @@ def test_ensure_failure_leaves_deferred_not_routed(tmp_path: Path) -> None:
     _owner_comment(store, did="d-boom")
     import agentd.design_loop as dl
 
-    dl._teardown_attempts.clear()
+    dl._delivery_attempts.clear()
     _run(store, tmp_path, Boom())
     row = store._conn.execute(
         "SELECT status FROM deliveries WHERE delivery_id=?", ("d-boom",)
@@ -209,7 +244,7 @@ def test_capacity_refusal_stays_typed_and_deferred(tmp_path: Path) -> None:
     _owner_comment(store, did="d-cap")
     import agentd.design_loop as dl
 
-    dl._teardown_attempts.clear()
+    dl._delivery_attempts.clear()
     _run(store, tmp_path, Cap())
     row = store._conn.execute(
         "SELECT status FROM deliveries WHERE delivery_id=?", ("d-cap",)
@@ -246,7 +281,7 @@ def test_ensure_failure_exhausts_and_escalates(tmp_path: Path) -> None:
 
     import agentd.design_loop as dl
 
-    dl._teardown_attempts.clear()
+    dl._delivery_attempts.clear()
     _owner_comment(store, did="d-ex")
     for _ in range(5):
         store._conn.execute(

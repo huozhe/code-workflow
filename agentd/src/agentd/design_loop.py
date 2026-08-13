@@ -79,8 +79,6 @@ _MERGE_AUTH_MAX_ATTEMPTS = 5
 # §9.2 budgets do not apply on these paths. Restart resets the counter.
 _delivery_attempts: dict[str, int] = {}
 _DELIVERY_MAX_ATTEMPTS = 5
-_teardown_attempts = _delivery_attempts
-_TEARDOWN_MAX_ATTEMPTS = _DELIVERY_MAX_ATTEMPTS
 
 # Webhook kinds that are observed GitHub progress (P1) — reset silent_turns
 # even when the FSM string does not change (e.g. design_revised while already
@@ -678,6 +676,7 @@ class DesignLoop:
                     return
                 self.store.set_delivery_status(delivery_id, "done")
                 return
+            _delivery_attempts.pop(delivery_id, None)
             status = (turn_result or {}).get("status")
             # Role still held after prior gateway timeout — leave deferred so
             # the single drain thread is not blocked (PR #37 B1 / #34).
@@ -722,6 +721,24 @@ class DesignLoop:
             kind,
         )
 
+    def _runner_reachable(self, runner: dict[str, Any]) -> bool:
+        """health.ping only — no layout work. A ledger row is not reachability."""
+        endpoint = str(runner.get("endpoint") or "")
+        host, _, port_s = endpoint.partition(":")
+        token = str(runner.get("token") or runner.get("runner_token") or "")
+        if not host or not port_s or not token:
+            return False
+        try:
+            port = int(port_s)
+        except ValueError:
+            return False
+        try:
+            with RunnerClient(host, port, token, timeout_s=2.0) as cli:
+                cli.call("health.ping")
+            return True
+        except Exception:
+            return False
+
     def _dispatch_turn(
         self,
         *,
@@ -736,29 +753,57 @@ class DesignLoop:
         sess = self.store.get_session(session_key) or {}
         repo = str(sess.get("repo") or "")
         project_key = str(sess.get("project_key") or project_key_from_repo(repo))
-        # #78: a runners row is not reachability. Probe/adopt/recreate first.
-        # CapacityRefusal / StructuralRefusal stay typed for the caller.
-        if self.supervisor is not None and hasattr(self.supervisor, "ensure_session"):
-            try:
-                self.supervisor.ensure_session(
-                    session_key=session_key,
-                    repo=repo,
-                    issue_num=int(issue_num),
-                    architect_login=str(sess.get("architect") or "") or None,
-                    developer_login=str(sess.get("developer") or "") or None,
-                )
-            except CapacityRefusal:
-                raise
-            except StructuralRefusal:
-                raise
-            except Exception:
-                log.exception("ensure_session before turn failed %s", session_key)
-                return None
-            sess = self.store.get_session(session_key) or sess
-            project_key = str(sess.get("project_key") or project_key)
+        rkey = _role_key(project_key, role)
+        # Residual busy after a prior gateway timeout: do **not** sleep on the
+        # single drain thread (PR #37 B1). Leave the delivery deferred; next
+        # drain cycle retries when busy expires. Check before ping.
+        busy_until = _role_busy_until.get(rkey, 0.0)
+        now = time.time()
+        if busy_until > now:
+            retry_in = busy_until - now
+            log.warning(
+                "role busy after gateway timeout project=%s role=%s "
+                "retry_in=%.1fs — leaving delivery deferred",
+                project_key,
+                role,
+                retry_in,
+            )
+            return {
+                "status": "role_busy",
+                "summary": f"role busy; retry_in={retry_in:.1f}s",
+            }
+        if rkey in _role_busy_until:
+            _role_busy_until.pop(rkey, None)
+
         runner = self.store.get_runner(project_key) or self.store.get_runner_for_session(
             session_key
         )
+        # #78: a runners row is not reachability. Ping first (no layout
+        # side effects). ensure_session only when the probe fails.
+        if not (runner and self._runner_reachable(runner)):
+            if self.supervisor is not None and hasattr(
+                self.supervisor, "ensure_session"
+            ):
+                try:
+                    self.supervisor.ensure_session(
+                        session_key=session_key,
+                        repo=repo,
+                        issue_num=int(issue_num),
+                        architect_login=str(sess.get("architect") or "") or None,
+                        developer_login=str(sess.get("developer") or "") or None,
+                    )
+                except CapacityRefusal:
+                    raise
+                except StructuralRefusal:
+                    raise
+                except Exception:
+                    log.exception("ensure_session before turn failed %s", session_key)
+                    return None
+                sess = self.store.get_session(session_key) or sess
+                project_key = str(sess.get("project_key") or project_key)
+            runner = self.store.get_runner(project_key) or self.store.get_runner_for_session(
+                session_key
+            )
         if not runner:
             return None
         endpoint = str(runner["endpoint"])
@@ -785,28 +830,6 @@ class DesignLoop:
         )
         digest_path.write_text(framed, encoding="utf-8")
         transcript_path = role_base / "transcript.jsonl"
-
-        rkey = _role_key(project_key, role)
-        # Residual busy after a prior gateway timeout: do **not** sleep on the
-        # single drain thread (PR #37 B1). Leave the delivery deferred; next
-        # drain cycle retries when busy expires.
-        busy_until = _role_busy_until.get(rkey, 0.0)
-        now = time.time()
-        if busy_until > now:
-            retry_in = busy_until - now
-            log.warning(
-                "role busy after gateway timeout project=%s role=%s "
-                "retry_in=%.1fs — leaving delivery deferred",
-                project_key,
-                role,
-                retry_in,
-            )
-            return {
-                "status": "role_busy",
-                "summary": f"role busy; retry_in={retry_in:.1f}s",
-            }
-        if rkey in _role_busy_until:
-            _role_busy_until.pop(rkey, None)
 
         started = time.time()  # float: residual busy-until needs sub-second accuracy
         self.store.insert_turn(
@@ -1816,7 +1839,7 @@ class DesignLoop:
                 "teardown skip turns session=%s — ledger already drained",
                 session_key,
             )
-            _teardown_attempts.pop(delivery_id, None)
+            _delivery_attempts.pop(delivery_id, None)
             return False
         project_key = str(sess.get("project_key") or project_key_from_repo(repo))
         # #67: a runners row is not reachability. Always ask ensure_session
@@ -1895,7 +1918,7 @@ class DesignLoop:
 
         self._log_teardown_leaks(session_key)
         if not turn_failed:
-            _teardown_attempts.pop(delivery_id, None)
+            _delivery_attempts.pop(delivery_id, None)
             return False
         return self._teardown_retry_or_give_up(
             delivery_id=delivery_id,
@@ -2209,6 +2232,7 @@ class DesignLoop:
                     return
                 self.store.set_delivery_status(delivery_id, "done")
                 return
+            _delivery_attempts.pop(delivery_id, None)
             status = (turn_result or {}).get("status")
             if status == "role_busy":
                 return

@@ -404,7 +404,7 @@ def test_no_dir_no_tarball_does_not_close(tmp_path: Path) -> None:
     sk = _seed(store, state="TEARDOWN", classification="ABANDONED")
     import agentd.design_loop as dl
 
-    dl._teardown_attempts.clear()
+    dl._delivery_attempts.clear()
     _insert_close(
         store,
         did="d-nodir",
@@ -431,7 +431,7 @@ def test_archive_failure_exhausts_and_escalates(tmp_path: Path, monkeypatch) -> 
     posts: list = []
     import agentd.design_loop as dl
 
-    dl._teardown_attempts.clear()
+    dl._delivery_attempts.clear()
 
     def boom(**k):  # noqa: ANN003
         raise OSError("disk full")

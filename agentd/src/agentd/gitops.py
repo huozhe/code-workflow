@@ -134,6 +134,19 @@ def ensure_shared_clone(
     return path
 
 
+def _worktree_already_on_branch(worktree_path: Path, branch: str) -> bool:
+    """True when path is a git worktree whose HEAD is *branch* (#78 B1)."""
+    if not worktree_path.exists():
+        return False
+    head = subprocess.run(
+        ["git", "-C", str(worktree_path), "rev-parse", "--abbrev-ref", "HEAD"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return head.returncode == 0 and head.stdout.strip() == branch
+
+
 def worktree_add(
     clone: Path,
     worktree_path: Path,
@@ -145,6 +158,8 @@ def worktree_add(
     worktree_path.parent.mkdir(parents=True, exist_ok=True)
     with _lock_for(clone):
         t0 = time.perf_counter()
+        if _worktree_already_on_branch(worktree_path, branch):
+            return 0.0
         # Remove stale worktree dir if present
         if worktree_path.exists():
             try:
