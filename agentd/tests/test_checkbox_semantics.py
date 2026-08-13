@@ -1098,7 +1098,7 @@ def test_agent_tick_then_delete_line_queued_does_not_restore_up(
 def test_agent_tick_then_delete_block_queued_does_not_restore_up(
     tmp_path: Path,
 ) -> None:
-    """Same rule, B2 spelling: delete the whole block after an agent tick."""
+    """B2: refuse the raise, reinsert the block unchecked. One PATCH."""
     store = Store(tmp_path / "state.db")
     cfg = _cfg(tmp_path)
     sk = _seed(store, verified_at=None)
@@ -1145,8 +1145,11 @@ def test_agent_tick_then_delete_block_queued_does_not_restore_up(
     )
     loop.process_deferred_batch()
     assert store.get_session(sk)["verified_at"] is None
-    assert checkbox_is_checked(live["body"], strict=True) is not True
-    assert all(checkbox_is_checked(p, strict=True) is not True for p in patches)
+    assert len(patches) == 1
+    assert extract_verification_block(patches[0]) is not None
+    assert checkbox_is_checked(patches[0], strict=True) is False
+    assert extract_verification_block(live["body"]) is not None
+    assert checkbox_is_checked(live["body"], strict=True) is False
     store.close()
 
 

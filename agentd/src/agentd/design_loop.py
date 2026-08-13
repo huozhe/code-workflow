@@ -1318,8 +1318,10 @@ class DesignLoop:
         valid owner tick. It is not the authority for classification. It *is*
         the gate on any restore that would raise the checkbox (ADR-16 / #89):
         restore-up, B4 with ``was=True``, B2 with a ticked ``prev_block``.
-        A missed owner-tick delivery then costs one re-tick; trusting an
-        unproven ``was=True`` can VERIFY a session no human verified.
+        B2 without an observed tick reinserts the block unchecked — the
+        raise is refused, the gate stays. A missed owner-tick delivery
+        then costs one re-tick; trusting an unproven ``was=True`` can
+        VERIFY a session no human verified.
 
         Gateway body edits are ignored (#64 Architect note): the gateway is a
         bot but not an agent, and it authors the verification scaffold.
@@ -1420,21 +1422,20 @@ class DesignLoop:
     def _can_raise_checkbox(
         self,
         session_key: str,
-        delivery_id: str,
         *,
         branch: str,
         was: bool | None,
         now: bool | None,
         sender: str,
     ) -> bool:
-        """ADR-16: any composition that raises the checkbox needs verified_at."""
+        """ADR-16: True iff verified_at is set. Logs on refuse. Does not dispose."""
         sess_now = self.store.get_session(session_key) or {}
         observed = sess_now.get("verified_at")
         if observed:
             return True
         log.warning(
             "issues.edited by agent session=%s — raise refused branch=%s "
-            "(was=%s now=%s verified_at=%s sender=%s); leave body",
+            "(was=%s now=%s verified_at=%s sender=%s)",
             session_key,
             branch,
             was,
@@ -1442,7 +1443,6 @@ class DesignLoop:
             observed,
             sender,
         )
-        self.store.set_delivery_status(delivery_id, "done")
         return False
 
     def _restore_agent_verification_edit(
@@ -1468,9 +1468,10 @@ class DesignLoop:
         ``(prev, body)``. The text the write is built from is a fresh GET,
         taken only after a non-no-op branch is selected.
 
-        ADR-16: any composition that can raise the checkbox (restore-up,
-        B4 with ``was=True``, B2 with a ticked ``prev_block``) requires
-        ``sessions.verified_at``. Absent that record, leave the body alone.
+        ADR-16: a composition that raises the checkbox needs
+        ``verified_at``; a composition that lowers or preserves it never
+        does. B2 with a ticked ``prev_block`` and no observed tick
+        reinserts the block unchecked — refuse the raise, keep the gate.
         """
         body_change = changes.get("body")
         prev: str | None = None
@@ -1505,17 +1506,17 @@ class DesignLoop:
 
         if prev_block is not None and curr_block is None:
             # B2: whole block deleted — re-splice prior block; keep agent prose.
-            # Reinserting a ticked prev_block raises the checkbox.
+            # A ticked prev_block is a raise; without verified_at, drop only
+            # the raise and reinsert unchecked (steps / sentinels stay).
+            block = prev_block
             if was is True and not self._can_raise_checkbox(
                 session_key,
-                delivery_id,
                 branch="B2",
                 was=was,
                 now=now,
                 sender=sender,
             ):
-                return
-            block = prev_block
+                block = set_checkbox_in_body(prev_block, checked=False)
 
             def compose(current: str, _block: str = block) -> str:
                 return reinsert_verification_block(current, _block)
@@ -1539,12 +1540,12 @@ class DesignLoop:
         elif was is True and now is False:
             if not self._can_raise_checkbox(
                 session_key,
-                delivery_id,
                 branch="restore-up",
                 was=was,
                 now=now,
                 sender=sender,
             ):
+                self.store.set_delivery_status(delivery_id, "done")
                 return
 
             def compose(current: str) -> str:
@@ -1556,12 +1557,12 @@ class DesignLoop:
             # Restoring False cannot forge; restoring True is a raise.
             if was is True and not self._can_raise_checkbox(
                 session_key,
-                delivery_id,
                 branch="B4",
                 was=was,
                 now=now,
                 sender=sender,
             ):
+                self.store.set_delivery_status(delivery_id, "done")
                 return
             want = was
 
