@@ -89,10 +89,41 @@ def create_app(
             state.governor.start()
             state.dispatcher.start()
             try:
+                from agentd.github_fetch import fetch_session_snapshot
+                from agentd.keychain import get_password
                 from agentd.reconciler import Reconciler
 
+                def _fetch(sess: dict[str, Any]) -> dict[str, Any] | None:
+                    return fetch_session_snapshot(
+                        repo=str(sess.get("repo") or ""),
+                        issue_num=int(sess.get("issue_num") or 0),
+                        feature_pr=sess.get("feature_pr"),
+                        design_pr=sess.get("design_pr"),
+                        token=get_password("gateway"),
+                    )
+
+                def _escalate(sk: str, reason: str, **kw: Any) -> None:
+                    if design_loop is None:
+                        return
+                    design_loop._escalate(
+                        sk,
+                        "system",
+                        reason,
+                        hold=bool(kw.get("hold", True)),
+                        reply_does=(
+                            "- **Reopen the issue** — lifts this hold (ADR-18); "
+                            "the session stays paused until you reply.\n"
+                            "- **Reply after reopen** — resumes through §8.5.\n"
+                            "- **No reply** — session stays live and paused; "
+                            "nothing is classified."
+                        ),
+                    )
+
                 state.reconciler = Reconciler(
-                    store, nudge=state.nudge.set
+                    store,
+                    nudge=state.nudge.set,
+                    fetch_snapshot=_fetch,
+                    escalate=_escalate,
                 )
                 state.reconciler.start()
             except Exception:

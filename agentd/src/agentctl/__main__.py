@@ -203,7 +203,24 @@ def main(argv: list[str] | None = None) -> None:
             print(json.dumps({"integrity": integrity}, indent=2))
             sys.exit(1)
         store = Store(db_path)
-        report = Reconciler(store).reconcile_once(dry_run=True)
+        from agentd.github_fetch import fetch_session_snapshot
+        from agentd.keychain import get_password
+
+        def _fetch(sess):
+            try:
+                return fetch_session_snapshot(
+                    repo=str(sess.get("repo") or ""),
+                    issue_num=int(sess.get("issue_num") or 0),
+                    feature_pr=sess.get("feature_pr"),
+                    design_pr=sess.get("design_pr"),
+                    token=get_password("gateway"),
+                )
+            except Exception:
+                return None
+
+        report = Reconciler(store, fetch_snapshot=_fetch).reconcile_once(
+            dry_run=True
+        )
         report["integrity"] = integrity
         print(json.dumps(report, indent=2, default=str))
         store.close()

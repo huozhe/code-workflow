@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 import threading
@@ -14,7 +15,7 @@ log = logging.getLogger("agentd.db")
 
 # Bump when DDL changes require a rebuild. SQLite is a derived cache (ADR-2);
 # mismatch ⇒ wipe + recreate. GitHub remains source of truth (P1).
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 # Schema DDL only — connection pragmas are set separately (see Store.__init__).
 # v2 (#20): runners keyed by project (N sessions : 1 runner); sessions.project_key.
@@ -23,6 +24,7 @@ SCHEMA_VERSION = 7
 # v5 (#35): project_blocks for structural ensure_session refusal (per project).
 # v6 (#39): turns.public_actions JSON; sessions.silent_turns for dead-end stall.
 # v7 (M5-2): sessions.classification — VERIFIED/ABANDONED at issues.closed.
+# v8 (M6-1b / ADR-21): delivery_nodes — GitHub node-ID membership index.
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS deliveries (
   delivery_id TEXT PRIMARY KEY,
@@ -37,6 +39,12 @@ CREATE TABLE IF NOT EXISTS deliveries (
 );
 CREATE INDEX IF NOT EXISTS ix_deliveries_pending
   ON deliveries(status, received_at);
+
+CREATE TABLE IF NOT EXISTS delivery_nodes (
+  node_id TEXT PRIMARY KEY,
+  delivery_id TEXT NOT NULL,
+  seen_at INTEGER NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS circuit_breaker (
   id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -143,6 +151,16 @@ def decompress_payload(blob: bytes) -> bytes:
     return zlib.decompress(blob)
 
 
+def node_ids_from_payload(data: dict[str, Any]) -> list[str]:
+    """Stable GitHub object IDs carried on webhook envelopes (ADR-21)."""
+    out: list[str] = []
+    for key in ("comment", "review", "pull_request", "issue"):
+        nid = (data.get(key) or {}).get("node_id")
+        if nid:
+            out.append(str(nid))
+    return out
+
+
 class Store:
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -207,6 +225,9 @@ class Store:
         if ver == 6:
             self._migrate_v6_to_v7()
             ver = 7
+        if ver == 7:
+            self._migrate_v7_to_v8()
+            ver = 8
         if ver == SCHEMA_VERSION:
             return
         log.warning(
@@ -377,6 +398,25 @@ class Store:
         self._conn.commit()
         log.info("schema migration v6 → v7 complete; user_version=7")
 
+    def _migrate_v7_to_v8(self) -> None:
+        """ADR-21: node-ID index. Preserve deliveries — backfill reads them."""
+        log.info("migrating schema v7 → v8 (delivery_nodes; preserve deliveries)")
+        self._conn.executescript(SCHEMA)
+        rows = self._conn.execute(
+            "SELECT delivery_id, payload, received_at FROM deliveries"
+        ).fetchall()
+        for row in rows:
+            try:
+                data = json.loads(decompress_payload(row["payload"]))
+            except (zlib.error, json.JSONDecodeError, TypeError, ValueError):
+                continue
+            self._index_nodes_locked(
+                str(row["delivery_id"]), data, int(row["received_at"] or 0)
+            )
+        self._conn.execute("PRAGMA user_version = 8")
+        self._conn.commit()
+        log.info("schema migration v7 → v8 complete; user_version=8")
+
     def _rebuild_schema(self) -> None:
         tables = self._conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
@@ -410,6 +450,7 @@ class Store:
     ) -> bool:
         """INSERT OR IGNORE. Returns True if a new row was inserted."""
         blob = compress_payload(payload)
+        now = int(time.time())
         with self._lock:
             cur = self._conn.execute(
                 """
@@ -425,13 +466,55 @@ class Store:
                     repo if repo is not None else "",
                     issue_num,
                     sender if sender is not None else "",
-                    int(time.time()),
+                    now,
                     blob,
                     status,
                 ),
             )
+            inserted = cur.rowcount == 1
+            if inserted:
+                try:
+                    data = json.loads(payload)
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    data = {}
+                if isinstance(data, dict):
+                    self._index_nodes_locked(delivery_id, data, now)
             self._conn.commit()
-            return cur.rowcount == 1
+            return inserted
+
+    def _index_nodes_locked(
+        self, delivery_id: str, data: dict[str, Any], seen_at: int
+    ) -> None:
+        for nid in node_ids_from_payload(data):
+            self._conn.execute(
+                """
+                INSERT OR IGNORE INTO delivery_nodes(node_id, delivery_id, seen_at)
+                VALUES (?, ?, ?)
+                """,
+                (nid, delivery_id, seen_at),
+            )
+
+    def has_delivery_node(self, node_id: str) -> bool:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT 1 FROM delivery_nodes WHERE node_id = ?",
+                (node_id,),
+            ).fetchone()
+            return row is not None
+
+    def list_nonterminal_sessions(self) -> list[dict[str, Any]]:
+        """Sessions the sweep visits — not CLOSED, not TEARDOWN (§11.2)."""
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT session_key, project_key, repo, issue_num, state,
+                       paused_reason, architect, developer, design_pr,
+                       feature_pr, verified_at, created_at
+                FROM sessions
+                WHERE state NOT IN ('CLOSED', 'TEARDOWN')
+                """
+            ).fetchall()
+            return [dict(r) for r in rows]
 
     def list_queued(self, limit: int = 100) -> list[sqlite3.Row]:
         with self._lock:

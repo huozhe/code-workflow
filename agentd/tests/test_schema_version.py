@@ -150,3 +150,81 @@ def test_unknown_version_gap_rebuilds_with_honest_log(
     assert store2.delivery_count() == 0
     assert any("Reconciler is not implemented" in r.message for r in caplog.records)
     store2.close()
+
+
+def test_v7_to_v8_preserves_deliveries_and_backfills_nodes(tmp_path: Path) -> None:
+    """ADR-21: v8 adds delivery_nodes and backfills; must not wipe the ledger."""
+    import json
+    import sqlite3
+
+    from agentd.db import compress_payload
+
+    path = tmp_path / "state.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE deliveries (
+          delivery_id TEXT PRIMARY KEY,
+          event TEXT NOT NULL,
+          action TEXT,
+          repo TEXT NOT NULL DEFAULT '',
+          issue_num INTEGER,
+          sender TEXT NOT NULL DEFAULT '',
+          received_at INTEGER NOT NULL,
+          payload BLOB NOT NULL,
+          status TEXT NOT NULL DEFAULT 'queued'
+        );
+        CREATE TABLE circuit_breaker (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          disk_paused INTEGER NOT NULL DEFAULT 0,
+          reason TEXT,
+          updated_at INTEGER NOT NULL
+        );
+        INSERT INTO circuit_breaker(id, disk_paused, reason, updated_at)
+        VALUES (1, 0, NULL, 0);
+        PRAGMA user_version = 7;
+        """
+    )
+    payload = json.dumps(
+        {
+            "action": "created",
+            "issue": {"node_id": "I_kw_issue32", "number": 32},
+            "comment": {"node_id": "IC_kw_comment1", "user": {"login": "huozhe"}},
+            "sender": {"login": "huozhe"},
+        }
+    ).encode()
+    conn.execute(
+        """
+        INSERT INTO deliveries(
+          delivery_id, event, action, repo, issue_num, sender,
+          received_at, payload, status
+        ) VALUES (?, 'issue_comment', 'created', 'huozhe/code-workflow', 32,
+                  'huozhe', 100, ?, 'done')
+        """,
+        ("keep-ledger", compress_payload(payload)),
+    )
+    conn.commit()
+    conn.close()
+
+    store = Store(path)
+    assert store._schema_version() == SCHEMA_VERSION
+    assert store.delivery_count() == 1
+    assert store.has_delivery_node("IC_kw_comment1")
+    assert store.has_delivery_node("I_kw_issue32")
+    store.close()
+
+
+def test_insert_delivery_indexes_node_ids(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.db")
+    store.insert_delivery(
+        delivery_id="d1",
+        event="issue_comment",
+        action="created",
+        repo="huozhe/code-workflow",
+        issue_num=1,
+        sender="huozhe",
+        payload=b'{"comment":{"node_id":"IC_new"},"issue":{"node_id":"I_new"}}',
+    )
+    assert store.has_delivery_node("IC_new")
+    assert store.has_delivery_node("I_new")
+    store.close()

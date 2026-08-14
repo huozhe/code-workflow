@@ -161,6 +161,92 @@ def _gh_graphql(url: str, *, token: str, json_body: dict[str, Any]) -> Any:
         return r.json()
 
 
+def _iso_to_epoch(raw: str) -> int | None:
+    s = (raw or "").strip()
+    if not s:
+        return None
+    s = s.replace("Z", "+00:00")
+    try:
+        from datetime import datetime
+
+        return int(datetime.fromisoformat(s).timestamp())
+    except ValueError:
+        return None
+
+
+def fetch_session_snapshot(
+    *,
+    repo: str,
+    issue_num: int,
+    feature_pr: int | None,
+    design_pr: int | None,
+    token: str | None,
+    http_get: Callable[..., Any] | None = None,
+) -> dict[str, Any] | None:
+    """REST snapshot for the M6-1b sweep: issue + comments + known PRs."""
+    if not token or not repo or not issue_num:
+        return None
+    get = http_get or _gh_get
+    try:
+        issue = get(f"https://api.github.com/repos/{repo}/issues/{int(issue_num)}", token=token)
+        comments = get(
+            f"https://api.github.com/repos/{repo}/issues/{int(issue_num)}/comments?per_page=100",
+            token=token,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("sweep snapshot failed repo=%s issue=%s: %s", repo, issue_num, exc)
+        return None
+    if not isinstance(issue, dict):
+        return None
+    nodes: list[dict[str, Any]] = []
+    if isinstance(comments, list):
+        for c in comments:
+            if not isinstance(c, dict) or not c.get("node_id"):
+                continue
+            nodes.append(
+                {
+                    "id": str(c["node_id"]),
+                    "kind": "comment",
+                    "created_at": _iso_to_epoch(str(c.get("created_at") or "")),
+                    "author": str((c.get("user") or {}).get("login") or ""),
+                    "body": str(c.get("body") or ""),
+                }
+            )
+
+    def _add_pr(num: int | None) -> bool:
+        if not num:
+            return False
+        try:
+            pr = get(f"https://api.github.com/repos/{repo}/pulls/{int(num)}", token=token)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("sweep PR fetch failed repo=%s pr=%s: %s", repo, num, exc)
+            return False
+        if not isinstance(pr, dict) or not pr.get("node_id"):
+            return bool(isinstance(pr, dict) and pr.get("merged"))
+        nodes.append(
+            {
+                "id": str(pr["node_id"]),
+                "kind": "pull_request",
+                "created_at": _iso_to_epoch(str(pr.get("created_at") or "")),
+                "author": str((pr.get("user") or {}).get("login") or ""),
+                "merged": bool(pr.get("merged")),
+                "number": int(num),
+            }
+        )
+        return bool(pr.get("merged"))
+
+    feature_merged = _add_pr(int(feature_pr) if feature_pr else None)
+    design_merged = _add_pr(int(design_pr) if design_pr else None)
+    return {
+        "issue_state": str(issue.get("state") or ""),
+        "issue_body": issue.get("body") if isinstance(issue.get("body"), str) else "",
+        "issue_node_id": str(issue.get("node_id") or ""),
+        "nodes": nodes,
+        "feature_merged": feature_merged,
+        "design_merged": design_merged,
+    }
+
+
 def _gh_get(url: str, *, token: str) -> Any:
     with httpx.Client(timeout=30.0) as client:
         r = client.get(
