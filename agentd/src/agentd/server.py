@@ -35,6 +35,7 @@ class AppState:
         self.nudge = threading.Event()
         self.governor: ResourceGovernor | None = None
         self.dispatcher: Dispatcher | None = None
+        self.reconciler = None
 
 
 def create_app(
@@ -87,10 +88,21 @@ def create_app(
             )
             state.governor.start()
             state.dispatcher.start()
-            log.info("governor + dispatcher started")
+            try:
+                from agentd.reconciler import Reconciler
+
+                state.reconciler = Reconciler(
+                    store, nudge=state.nudge.set
+                )
+                state.reconciler.start()
+            except Exception:
+                log.exception("reconciler init failed")
+            log.info("governor + dispatcher + reconciler started")
         try:
             yield
         finally:
+            if state.reconciler:
+                state.reconciler.stop()
             if state.dispatcher:
                 state.dispatcher.stop()
             if state.governor:

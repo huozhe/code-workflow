@@ -1,4 +1,4 @@
-"""agentctl version | status | sessions | logs | quarantine-deferred | write-verification | review-stats."""
+"""agentctl version | status | sessions | logs | quarantine-deferred | write-verification | review-stats | reconcile."""
 
 from __future__ import annotations
 
@@ -69,6 +69,15 @@ def main(argv: list[str] | None = None) -> None:
         default=None,
         metavar="KEY",
         help="Session key (repo#issue) or bare issue number (default: all sessions)",
+    )
+    p_rec = sub.add_parser(
+        "reconcile",
+        help="M6-1a local report (ADR-20). --once waits for the GitHub half.",
+    )
+    p_rec.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Read-only inventory: orphans, runners, open turns, closed-live",
     )
     args = parser.parse_args(argv)
 
@@ -175,6 +184,28 @@ def main(argv: list[str] | None = None) -> None:
                 f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} INFO agentctl {msg}\n")
         except OSError:
             pass
+        store.close()
+        return
+
+    if args.cmd == "reconcile":
+        from agentd.reconciler import Reconciler, pragma_integrity_check
+
+        if not args.dry_run:
+            print(
+                "agentctl reconcile --once waits for the GitHub half (M6-1b). "
+                "This half is --dry-run only.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        db_path = config.state_db
+        integrity = pragma_integrity_check(db_path)
+        if integrity != "ok":
+            print(json.dumps({"integrity": integrity}, indent=2))
+            sys.exit(1)
+        store = Store(db_path)
+        report = Reconciler(store).reconcile_once(dry_run=True)
+        report["integrity"] = integrity
+        print(json.dumps(report, indent=2, default=str))
         store.close()
         return
 

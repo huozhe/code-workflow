@@ -1030,6 +1030,80 @@ class Store:
             self._conn.commit()
             return int(cur.rowcount or 0)
 
+    def list_runners(self) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute("SELECT * FROM runners").fetchall()
+            return [dict(r) for r in rows]
+
+    def delete_runner(self, project_key: str) -> int:
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM runners WHERE project_key = ?",
+                (project_key,),
+            )
+            self._conn.commit()
+            return int(cur.rowcount or 0)
+
+    def live_project_keys(self) -> set[str]:
+        """Projects with at least one session not CLOSED. TEARDOWN is live."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT DISTINCT project_key FROM sessions WHERE state != 'CLOSED'"
+            ).fetchall()
+            return {str(r["project_key"]) for r in rows if r["project_key"]}
+
+    def projects_with_open_turns(self) -> set[str]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT DISTINCT s.project_key
+                FROM turns t
+                JOIN sessions s ON s.session_key = t.session_key
+                WHERE t.ended_at IS NULL
+                """
+            ).fetchall()
+            return {str(r["project_key"]) for r in rows if r["project_key"]}
+
+    def list_open_turns(self) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT t.turn_id, t.session_key, t.role, t.status, t.started_at
+                FROM turns t
+                WHERE t.ended_at IS NULL
+                ORDER BY t.started_at ASC
+                """
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def list_live_sessions_with_closed_delivery(self) -> list[dict[str, Any]]:
+        """Live sessions whose ledger has a routed issues.closed (local record)."""
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT s.session_key, s.state, s.issue_num, d.delivery_id
+                FROM sessions s
+                JOIN deliveries d
+                  ON d.repo = s.repo AND d.issue_num = s.issue_num
+                 AND d.event = 'issues' AND d.action = 'closed'
+                 AND d.status = 'routed'
+                WHERE s.state != 'CLOSED'
+                ORDER BY s.session_key
+                """
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def count_open_artifacts(self, session_key: str) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT COUNT(*) AS n FROM artifacts
+                WHERE session_key = ? AND removed_at IS NULL
+                """,
+                (session_key,),
+            ).fetchone()
+            return int(row["n"]) if row else 0
+
     def get_runner(self, project_key: str) -> dict[str, Any] | None:
         """Look up the project runner. ``project_key`` is ``owner/repo``."""
         with self._lock:
