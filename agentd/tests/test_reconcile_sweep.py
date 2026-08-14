@@ -93,6 +93,9 @@ def test_new_comments_synthesize_once(tmp_path: Path) -> None:
     snap = {
         "issue_state": "open",
         "issue_body": "",
+        "issue_title": "M6-1",
+        "issue_html_url": "https://github.com/huozhe/code-workflow/issues/32",
+        "issue_labels": [{"name": "agentd"}],
         "nodes": [
             {
                 "id": "IC_a",
@@ -122,6 +125,9 @@ def test_new_comments_synthesize_once(tmp_path: Path) -> None:
     payload = json.loads(decompress_payload(a["payload"]))
     assert payload["comment"]["node_id"] == "IC_a"
     assert payload["sender"]["login"] == "alice"
+    assert payload["issue"]["title"] == "M6-1"
+    assert payload["issue"]["html_url"].endswith("/issues/32")
+    assert payload["issue"]["labels"] == [{"name": "agentd"}]
     assert store.has_delivery_node("IC_a")
     _, report2, _ = _sweep_rec(store, snap)
     assert report2["synthesized"] == 0
@@ -191,6 +197,38 @@ def test_closed_issue_escalates_leaves_session_live(tmp_path: Path) -> None:
     assert sess is not None
     assert sess["state"] == "IMPLEMENTING"
     assert sess.get("classification") in (None, "")
+    store.close()
+
+
+def test_closed_issue_escalates_only_once(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.db")
+    sk = _sess(store, state="IMPLEMENTING")
+    snap = {"issue_state": "closed", "issue_body": "", "nodes": []}
+    esc: list = []
+
+    def escalate(session_key: str, reason: str, **kw) -> None:
+        esc.append((session_key, reason, kw))
+        store.update_session_fields(
+            session_key,
+            state="PAUSED_HUMAN",
+            paused_reason=f"{CLOSE_RECONCILE_PREFIX}{reason}",
+            resume_state="IMPLEMENTING",
+        )
+
+    rec = Reconciler(
+        store,
+        list_containers=lambda: [],
+        remove_container=lambda _c: None,
+        fetch_snapshot=lambda _s: dict(snap),
+        escalate=escalate,
+    )
+    rec.reconcile_once()
+    rec.reconcile_once()
+    rec.reconcile_once()
+    assert len(esc) == 1
+    sess = store.get_session(sk)
+    assert sess is not None
+    assert sess["state"] == "PAUSED_HUMAN"
     store.close()
 
 
@@ -265,3 +303,54 @@ def test_dry_run_sweep_does_not_write(tmp_path: Path) -> None:
     assert not store.has_delivery_node("IC_x")
     assert store.get_session(sk)["state"] == "MERGING"
     store.close()
+
+
+def test_fetch_snapshot_includes_reviews() -> None:
+    from agentd.github_fetch import fetch_session_snapshot
+
+    def fake_get(url: str, *, token: str):
+        if url.endswith("/issues/32") and "/comments" not in url:
+            return {
+                "state": "open",
+                "node_id": "I_1",
+                "body": "",
+                "title": "t",
+                "html_url": "https://example/issues/32",
+                "labels": [{"name": "agentd"}],
+            }
+        if "/issues/32/comments" in url:
+            return []
+        if url.endswith("/pulls/111"):
+            return {
+                "node_id": "PR_1",
+                "merged": False,
+                "user": {"login": "dev"},
+                "created_at": "2026-08-14T00:00:00Z",
+            }
+        if "/pulls/111/reviews" in url:
+            return [
+                {
+                    "node_id": "PRR_1",
+                    "state": "APPROVED",
+                    "user": {"login": "arch"},
+                    "submitted_at": "2026-08-14T01:00:00Z",
+                }
+            ]
+        raise AssertionError(url)
+
+    snap = fetch_session_snapshot(
+        repo="huozhe/code-workflow",
+        issue_num=32,
+        feature_pr=111,
+        design_pr=None,
+        token="t",
+        http_get=fake_get,
+    )
+    assert snap is not None
+    kinds = [n["kind"] for n in snap["nodes"]]
+    assert "review" in kinds
+    assert "pull_request" in kinds
+    review = next(n for n in snap["nodes"] if n["kind"] == "review")
+    assert review["id"] == "PRR_1"
+    assert review["state"] == "APPROVED"
+    assert review["number"] == 111

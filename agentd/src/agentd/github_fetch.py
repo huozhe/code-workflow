@@ -233,6 +233,28 @@ def fetch_session_snapshot(
                 "number": int(num),
             }
         )
+        try:
+            reviews = get(
+                f"https://api.github.com/repos/{repo}/pulls/{int(num)}/reviews?per_page=100",
+                token=token,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("sweep reviews fetch failed repo=%s pr=%s: %s", repo, num, exc)
+            reviews = []
+        if isinstance(reviews, list):
+            for rev in reviews:
+                if not isinstance(rev, dict) or not rev.get("node_id"):
+                    continue
+                nodes.append(
+                    {
+                        "id": str(rev["node_id"]),
+                        "kind": "review",
+                        "created_at": _iso_to_epoch(str(rev.get("submitted_at") or "")),
+                        "author": str((rev.get("user") or {}).get("login") or ""),
+                        "state": str(rev.get("state") or ""),
+                        "number": int(num),
+                    }
+                )
         return bool(pr.get("merged"))
 
     feature_merged = _add_pr(int(feature_pr) if feature_pr else None)
@@ -241,6 +263,9 @@ def fetch_session_snapshot(
         "issue_state": str(issue.get("state") or ""),
         "issue_body": issue.get("body") if isinstance(issue.get("body"), str) else "",
         "issue_node_id": str(issue.get("node_id") or ""),
+        "issue_title": str(issue.get("title") or ""),
+        "issue_html_url": str(issue.get("html_url") or ""),
+        "issue_labels": list(issue.get("labels") or []),
         "nodes": nodes,
         "feature_merged": feature_merged,
         "design_merged": design_merged,

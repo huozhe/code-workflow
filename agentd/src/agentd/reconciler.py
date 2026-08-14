@@ -14,8 +14,9 @@ from pathlib import Path
 from typing import Any
 
 from agentd.db import Store
-from agentd.design_loop import CLOSE_RECONCILE_PREFIX
+from agentd.design_loop import CLOSE_RECONCILE_PREFIX, _close_reconcile_held
 from agentd.fsm import transition
+from agentd.verification import checkbox_is_checked
 
 log = logging.getLogger("agentd.reconciler")
 
@@ -337,16 +338,18 @@ class Reconciler:
     ) -> int:
         sk = str(sess.get("session_key") or "")
         issue_state = str(snap.get("issue_state") or "")
-        paused = str(sess.get("paused_reason") or "")
+        held = _close_reconcile_held(str(sess.get("state") or ""), sess)
 
-        if issue_state == "open" and paused.startswith(CLOSE_RECONCILE_PREFIX):
+        if issue_state == "open" and held:
             report["holds_lifted"] = int(report["holds_lifted"]) + 1
             if not dry_run:
+                paused = str(sess.get("paused_reason") or "")
                 stripped = paused.removeprefix(CLOSE_RECONCILE_PREFIX) or None
                 self.store.update_session_fields(sk, paused_reason=stripped)
+                sess["paused_reason"] = stripped
                 log.info("close-reconcile lift session=%s (issue open)", sk)
 
-        if issue_state == "closed":
+        if issue_state == "closed" and not held:
             report["escalated"] = int(report["escalated"]) + 1
             if not dry_run and self.escalate:
                 reason = (
@@ -362,13 +365,16 @@ class Reconciler:
             self._adopt_forward(sess, "design_merged", report, dry_run=dry_run)
 
         body = snap.get("issue_body")
-        if body and bool(sess.get("verified_at")) != ("[x]" in str(body).lower() or "[X]" in str(body)):
-            # cheap drift signal — do not write verified_at
-            log.info(
-                "body drift session=%s verified_at=%s",
-                sk,
-                sess.get("verified_at"),
-            )
+        if isinstance(body, str) and body:
+            box = checkbox_is_checked(body, strict=True)
+            stamped = bool(sess.get("verified_at"))
+            if (box is True) != stamped:
+                log.info(
+                    "body drift session=%s verified_at=%s box=%s",
+                    sk,
+                    sess.get("verified_at"),
+                    box,
+                )
 
         nodes = list(snap.get("nodes") or [])
         report["nodes_seen"] = int(report["nodes_seen"]) + len(nodes)
@@ -435,6 +441,9 @@ class Reconciler:
                     "number": issue_num,
                     "node_id": str(snap.get("issue_node_id") or ""),
                     "state": str(snap.get("issue_state") or ""),
+                    "title": str(snap.get("issue_title") or ""),
+                    "html_url": str(snap.get("issue_html_url") or ""),
+                    "labels": list(snap.get("issue_labels") or []),
                 },
                 "comment": {
                     "node_id": nid,
