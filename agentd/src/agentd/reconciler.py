@@ -310,16 +310,16 @@ class Reconciler:
         for sess in sessions:
             try:
                 snap = self.fetch_snapshot(sess)
+                if not snap:
+                    continue
+                remaining = self._apply_snapshot(
+                    sess, snap, report, dry_run=dry_run, remaining=remaining
+                )
             except Exception:
                 log.exception(
-                    "sweep fetch failed session=%s", sess.get("session_key")
+                    "sweep session failed session=%s", sess.get("session_key")
                 )
                 continue
-            if not snap:
-                continue
-            remaining = self._apply_snapshot(
-                sess, snap, report, dry_run=dry_run, remaining=remaining
-            )
         if int(report.get("capped") or 0):
             log.warning(
                 "reconcile synthesis cap=%s hit leftover=%s",
@@ -341,10 +341,12 @@ class Reconciler:
         held = _close_reconcile_held(str(sess.get("state") or ""), sess)
 
         if issue_state == "open":
-            if sess.get("closed_live"):
+            if sess.get("closed_issue_escalated_at"):
                 if not dry_run:
-                    self.store.update_session_fields(sk, closed_live=None)
-                    sess["closed_live"] = None
+                    self.store.update_session_fields(
+                        sk, closed_issue_escalated_at=None
+                    )
+                    sess["closed_issue_escalated_at"] = None
             if held:
                 report["holds_lifted"] = int(report["holds_lifted"]) + 1
                 if not dry_run:
@@ -354,11 +356,14 @@ class Reconciler:
                     sess["paused_reason"] = stripped
                     log.info("close-reconcile lift session=%s (issue open)", sk)
 
-        if issue_state == "closed" and not sess.get("closed_live"):
+        if issue_state == "closed" and not sess.get("closed_issue_escalated_at"):
             report["escalated"] = int(report["escalated"]) + 1
             if not dry_run:
-                self.store.update_session_fields(sk, closed_live=1)
-                sess["closed_live"] = 1
+                noted = int(self._now())
+                self.store.update_session_fields(
+                    sk, closed_issue_escalated_at=noted
+                )
+                sess["closed_issue_escalated_at"] = noted
                 if self.escalate:
                     reason = (
                         f"GitHub issue is closed; session is still {sess.get('state')} "

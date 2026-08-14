@@ -182,6 +182,41 @@ def test_v7_to_v8_preserves_deliveries_and_backfills_nodes(tmp_path: Path) -> No
         );
         INSERT INTO circuit_breaker(id, disk_paused, reason, updated_at)
         VALUES (1, 0, NULL, 0);
+        CREATE TABLE sessions (
+          session_key TEXT PRIMARY KEY,
+          project_key TEXT NOT NULL,
+          repo TEXT NOT NULL,
+          issue_num INTEGER NOT NULL,
+          state TEXT NOT NULL,
+          paused_reason TEXT,
+          resume_state TEXT,
+          stall_open_threads TEXT,
+          architect TEXT NOT NULL,
+          developer TEXT NOT NULL,
+          roles_locked INTEGER NOT NULL DEFAULT 0,
+          design_pr INTEGER,
+          feature_pr INTEGER,
+          turn_count INTEGER NOT NULL DEFAULT 0,
+          consec_agent_turns INTEGER NOT NULL DEFAULT 0,
+          review_rounds INTEGER NOT NULL DEFAULT 0,
+          progress_fp TEXT,
+          progress_repeat INTEGER NOT NULL DEFAULT 0,
+          zero_thread_rounds INTEGER NOT NULL DEFAULT 0,
+          silent_turns INTEGER NOT NULL DEFAULT 0,
+          gh_watermark INTEGER,
+          verified_at INTEGER,
+          classification TEXT,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        INSERT INTO sessions(
+          session_key, project_key, repo, issue_num, state,
+          architect, developer, created_at, updated_at
+        ) VALUES (
+          'huozhe/code-workflow#32', 'huozhe/code-workflow',
+          'huozhe/code-workflow', 32, 'IMPLEMENTING',
+          'huozheclaude', 'huozhegrok', 1, 1
+        );
         PRAGMA user_version = 7;
         """
     )
@@ -211,6 +246,11 @@ def test_v7_to_v8_preserves_deliveries_and_backfills_nodes(tmp_path: Path) -> No
     assert store.delivery_count() == 1
     assert store.has_delivery_node("IC_kw_comment1")
     assert store.has_delivery_node("I_kw_issue32")
+    sess = store.get_session("huozhe/code-workflow#32")
+    assert sess is not None
+    assert sess["state"] == "IMPLEMENTING"
+    assert "closed_issue_escalated_at" in sess
+    assert sess.get("closed_issue_escalated_at") is None
     store.close()
 
 
