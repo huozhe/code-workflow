@@ -58,14 +58,14 @@ def reopen_issue(
     log.info("reopened issue repo=%s issue=%s", repo, issue_num)
 
 
-def get_issue_body(
+def get_issue(
     *,
     repo: str,
     issue_num: int,
     token: str | None,
     http_get: Callable[..., Any] | None = None,
-) -> str:
-    """GET /repos/{repo}/issues/{n} → body string (may be empty)."""
+) -> dict[str, str]:
+    """GET /repos/{repo}/issues/{n} → {body, state}. One fetch for close-time paths."""
     if not token:
         raise RuntimeError("no token for gateway GitHub read")
     if not repo or not issue_num:
@@ -77,7 +77,23 @@ def get_issue_body(
     if not isinstance(data, dict):
         raise RuntimeError(f"GitHub issue response not an object: {data!r}")
     body = data.get("body")
-    return body if isinstance(body, str) else ""
+    return {
+        "body": body if isinstance(body, str) else "",
+        "state": str(data.get("state") or ""),
+    }
+
+
+def get_issue_body(
+    *,
+    repo: str,
+    issue_num: int,
+    token: str | None,
+    http_get: Callable[..., Any] | None = None,
+) -> str:
+    """GET /repos/{repo}/issues/{n} → body string (may be empty)."""
+    return get_issue(
+        repo=repo, issue_num=issue_num, token=token, http_get=http_get
+    )["body"]
 
 
 def patch_issue_body(

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
+import time
 from pathlib import Path
 
 from agentd.config import Config
@@ -115,6 +116,7 @@ def _insert_close(
     payload: dict,
     issue: int = 58,
     sender: str = "huozhe",
+    received_at: int | None = None,
 ) -> None:
     store.insert_delivery(
         delivery_id=did,
@@ -126,6 +128,12 @@ def _insert_close(
         payload=json.dumps(payload).encode(),
         status="deferred",
     )
+    if received_at is not None:
+        store._conn.execute(
+            "UPDATE deliveries SET received_at = ? WHERE delivery_id = ?",
+            (int(received_at), did),
+        )
+        store._conn.commit()
 
 
 def _register_open(store: Store, sk: str, *, kind: str = "scratch", ref: str = "/tmp/x") -> None:
@@ -140,11 +148,19 @@ def _loop(
     client_factory=None,
     supervisor=None,
     posts: list | None = None,
+    live_body: str | None = None,
+    live_state: str = "closed",
 ) -> DesignLoop:
     def _post(**k):  # noqa: ANN003
         if posts is not None:
             posts.append(k)
         return 1
+
+    def _get_issue(**k):  # noqa: ANN003
+        return {
+            "body": live_body if live_body is not None else _block(checked=True),
+            "state": live_state,
+        }
 
     loop = DesignLoop(
         store,
@@ -153,6 +169,7 @@ def _loop(
         dispatch_turns=dispatch,
         post_comment=_post,
         reopen_issue_fn=lambda **k: None,
+        get_issue_fn=_get_issue,
         gateway_token="gw",
     )
     if client_factory is not None:
@@ -242,14 +259,19 @@ def test_owner_close_ticked_is_verified_teardown(tmp_path: Path) -> None:
 
 
 def test_owner_close_unticked_is_abandoned(tmp_path: Path) -> None:
+    """ADR-19 fourth row: stamp + unticked payload, re-read still down."""
     store = Store(tmp_path / "state.db")
     sk = _seed(store, tmp_path, state="IMPLEMENTING", with_session_dir=True)
+    now = int(time.time())
     _insert_close(
         store,
         did="d-untick",
         payload=_closed_payload(body=_block(checked=False)),
+        received_at=now - 15 * 60 - 5,
     )
-    _loop(store, tmp_path).process_deferred_batch()
+    _loop(
+        store, tmp_path, live_body=_block(checked=False), live_state="closed"
+    ).process_deferred_batch()
     sess = store.get_session(sk)
     assert sess is not None
     assert sess["state"] == "CLOSED"
@@ -285,25 +307,31 @@ def test_owner_close_unticked_null_verified_at_is_abandoned(tmp_path: Path) -> N
 
 
 def test_owner_close_reads_payload_body_not_verified_at(tmp_path: Path) -> None:
+    """ADR-19: payload unticked + stamp; re-read ticked → VERIFIED."""
     store = Store(tmp_path / "state.db")
-    sk = _seed(store, tmp_path)
+    sk = _seed(store, tmp_path, with_session_dir=True)
     store.update_session_fields(sk, verified_at=1_700_000_000)
+    now = int(time.time())
     _insert_close(
         store,
         did="d-body",
         payload=_closed_payload(body=_block(checked=False)),
+        received_at=now - 15 * 60 - 5,
     )
-    _loop(store, tmp_path).process_deferred_batch()
+    _loop(
+        store, tmp_path, live_body=_block(checked=True), live_state="closed"
+    ).process_deferred_batch()
     sess = store.get_session(sk)
     assert sess is not None
-    assert sess["classification"] == "ABANDONED"
+    assert sess["classification"] == "VERIFIED"
+    assert sess["state"] == "CLOSED"
     assert sess["verified_at"] == 1_700_000_000
     store.close()
 
 
 def test_classification_never_revised_after_close(tmp_path: Path) -> None:
     store = Store(tmp_path / "state.db")
-    sk = _seed(store, tmp_path, with_session_dir=True)
+    sk = _seed(store, tmp_path, with_session_dir=True, verified_at=0)
     _insert_close(
         store,
         did="d-first",

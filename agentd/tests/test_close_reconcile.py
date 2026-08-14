@@ -224,6 +224,8 @@ def _loop(
     patches: list | None = None,
     gets: list | None = None,
     live_body: str | None = None,
+    live_state: str = "closed",
+    get_issue_fn=None,
 ) -> DesignLoop:
     def _post(**k):  # noqa: ANN003
         if posts is not None:
@@ -241,6 +243,14 @@ def _loop(
             gets.append(k)
         return live_body if live_body is not None else _body(checked=True)
 
+    def _get_issue(**k):  # noqa: ANN003
+        if gets is not None:
+            gets.append(k)
+        return {
+            "body": live_body if live_body is not None else _body(checked=True),
+            "state": live_state,
+        }
+
     return DesignLoop(
         store,
         _cfg(tmp),
@@ -249,6 +259,7 @@ def _loop(
         post_comment=_post,
         patch_issue_body_fn=_patch,
         get_issue_body_fn=_get,
+        get_issue_fn=get_issue_fn if get_issue_fn is not None else _get_issue,
         gateway_token="gw",
     )
 
@@ -564,4 +575,174 @@ def test_hold_refuses_owner_reply_resume(tmp_path: Path) -> None:
     assert _status(store, "d-reply") == "done"
     assert store.get_session(sk)["state"] == "PAUSED_HUMAN"
     assert store.get_open_escalation(sk) is not None
+    store.close()
+
+
+def test_mirror_unticked_verified_at_within_grace_stays_deferred(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "state.db")
+    sk = _seed(store, tmp_path, verified_at=int(time.time()))
+    _close_grace_warned.clear()
+    now = int(time.time())
+    _insert_close(
+        store, did="d-m-grace", body=_body(checked=False), received_at=now - 60
+    )
+    posts: list = []
+    _loop(store, tmp_path, posts=posts).process_deferred_batch()
+    assert _status(store, "d-m-grace") == "deferred"
+    sess = store.get_session(sk)
+    assert sess is not None
+    assert sess.get("classification") in (None, "")
+    assert sess["state"] == "AWAITING_VERIFICATION"
+    assert posts == []
+    store.close()
+
+
+def test_mirror_after_grace_reread_ticked_is_verified(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.db")
+    sk = _seed(store, tmp_path, verified_at=int(time.time()))
+    _close_grace_warned.clear()
+    now = int(time.time())
+    _insert_close(
+        store,
+        did="d-m-up",
+        body=_body(checked=False),
+        received_at=now - CLOSE_RECONCILE_GRACE_S - 5,
+    )
+    _loop(
+        store, tmp_path, live_body=_body(checked=True), live_state="closed"
+    ).process_deferred_batch()
+    sess = store.get_session(sk)
+    assert sess is not None
+    assert sess["classification"] == "VERIFIED"
+    assert sess["state"] == "CLOSED"
+    assert _status(store, "d-m-up") == "done"
+    store.close()
+
+
+def test_mirror_after_grace_reread_down_is_abandoned(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.db")
+    sk = _seed(store, tmp_path, verified_at=int(time.time()))
+    _close_grace_warned.clear()
+    now = int(time.time())
+    _insert_close(
+        store,
+        did="d-m-down",
+        body=_body(checked=False),
+        received_at=now - CLOSE_RECONCILE_GRACE_S - 5,
+    )
+    _loop(
+        store, tmp_path, live_body=_body(checked=False), live_state="closed"
+    ).process_deferred_batch()
+    sess = store.get_session(sk)
+    assert sess is not None
+    assert sess["classification"] == "ABANDONED"
+    assert sess["state"] == "CLOSED"
+    store.close()
+
+
+def test_mirror_fetch_fail_classifies_from_payload(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.db")
+    sk = _seed(store, tmp_path, verified_at=int(time.time()))
+    _close_grace_warned.clear()
+    now = int(time.time())
+    _insert_close(
+        store,
+        did="d-m-fail",
+        body=_body(checked=False),
+        received_at=now - CLOSE_RECONCILE_GRACE_S - 5,
+    )
+
+    def boom(**_):  # noqa: ANN003
+        raise RuntimeError("github down")
+
+    DesignLoop(
+        store,
+        _cfg(tmp_path),
+        supervisor=None,
+        dispatch_turns=False,
+        post_comment=lambda **k: 1,
+        get_issue_fn=boom,
+        gateway_token="gw",
+    ).process_deferred_batch()
+    sess = store.get_session(sk)
+    assert sess is not None
+    assert sess["classification"] == "ABANDONED"
+    assert sess["state"] == "CLOSED"
+    store.close()
+
+
+def test_mirror_open_issue_cancels_no_classify(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.db")
+    sk = _seed(store, tmp_path, verified_at=int(time.time()))
+    _close_grace_warned.clear()
+    now = int(time.time())
+    _insert_close(
+        store,
+        did="d-m-open",
+        body=_body(checked=False),
+        received_at=now - CLOSE_RECONCILE_GRACE_S - 5,
+    )
+    posts: list = []
+    _loop(
+        store,
+        tmp_path,
+        posts=posts,
+        live_body=_body(checked=True),
+        live_state="open",
+    ).process_deferred_batch()
+    assert _status(store, "d-m-open") == "done"
+    sess = store.get_session(sk)
+    assert sess is not None
+    assert sess.get("classification") in (None, "")
+    assert sess["state"] == "AWAITING_VERIFICATION"
+    assert posts == []
+    store.close()
+
+
+def test_adr17_open_issue_no_escalate(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.db")
+    sk = _seed(store, tmp_path, verified_at=None)
+    _close_grace_warned.clear()
+    now = int(time.time())
+    _insert_close(
+        store,
+        did="d-17-open",
+        body=_body(checked=True),
+        received_at=now - CLOSE_RECONCILE_GRACE_S - 5,
+    )
+    posts: list = []
+    _loop(
+        store,
+        tmp_path,
+        posts=posts,
+        live_body=_body(checked=True),
+        live_state="open",
+    ).process_deferred_batch()
+    assert _status(store, "d-17-open") == "done"
+    sess = store.get_session(sk)
+    assert sess is not None
+    assert sess.get("classification") in (None, "")
+    assert sess["state"] == "AWAITING_VERIFICATION"
+    assert posts == []
+    store.close()
+
+
+def test_withdraw_during_grace_classifies_abandoned(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.db")
+    sk = _seed(store, tmp_path, verified_at=int(time.time()))
+    _close_grace_warned.clear()
+    now = int(time.time())
+    _insert_close(
+        store, did="d-wd", body=_body(checked=False), received_at=now - 60
+    )
+    _loop(store, tmp_path).process_deferred_batch()
+    assert _status(store, "d-wd") == "deferred"
+    store.update_session_fields(sk, verified_at=None)
+    _loop(store, tmp_path).process_deferred_batch()
+    sess = store.get_session(sk)
+    assert sess is not None
+    assert sess["classification"] == "ABANDONED"
+    assert sess["state"] == "CLOSED"
     store.close()
