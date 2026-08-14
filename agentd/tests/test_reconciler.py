@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import re
 from pathlib import Path
 
 from agentd.db import Store
@@ -237,6 +239,31 @@ def test_healthy_left_alone(tmp_path: Path) -> None:
     )
     assert removed == []
     assert store.get_runner(pk) is not None
+    store.close()
+
+
+def test_pass_logs_counts_on_healthy_keep(tmp_path: Path, caplog) -> None:
+    store = Store(tmp_path / "state.db")
+    pk = "huozhe/code-workflow"
+    _sess(store, issue=1, state="IMPLEMENTING")
+    store.upsert_runner(pk, container_id="abc123def", endpoint="127.0.0.1:1", token="t", tier="hot")
+    with caplog.at_level(logging.INFO, logger="agentd.reconciler"):
+        _rec(
+            store,
+            [{"id": "abc123def456", "project": pk, "started_at": 1}],
+            now=1 + CONTAINER_AGE_FLOOR_S + 60,
+        )
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("reconcile pass ")]
+    assert len(lines) == 1
+    msg = lines[0]
+    assert "containers=1" in msg
+    assert "kept=1" in msg
+    assert "spared=0" in msg
+    assert "removed=0" in msg
+    assert "cleared=0" in msg
+    assert "open_turns=0" in msg
+    assert "closed_live=0" in msg
+    assert re.search(r" in \d+ms$", msg)
     store.close()
 
 

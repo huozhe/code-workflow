@@ -162,7 +162,23 @@ class Reconciler:
                 log.exception("reconcile_once failed")
             self._stop.wait(self.interval_s)
 
+    def _log_pass(self, report: dict[str, Any], *, containers: int, kept: int, started: float) -> None:
+        ms = int((time.monotonic() - started) * 1000)
+        log.info(
+            "reconcile pass containers=%d kept=%d spared=%d removed=%d cleared=%d "
+            "open_turns=%d closed_live=%d in %dms",
+            containers,
+            kept,
+            len(report["spared"]),
+            len(report["removed"]),
+            len(report["cleared_rows"]),
+            len(report["open_turns"]),
+            len(report["closed_live"]),
+            ms,
+        )
+
     def reconcile_once(self, *, dry_run: bool = False) -> dict[str, Any]:
+        t0 = time.monotonic()
         report: dict[str, Any] = {
             "orphans": [],
             "spared": [],
@@ -185,6 +201,7 @@ class Reconciler:
             if not dry_run and self.nudge:
                 self.nudge()
             report["inventory_error"] = True
+            self._log_pass(report, containers=0, kept=0, started=t0)
             return report
 
         now = int(self._now())
@@ -194,6 +211,7 @@ class Reconciler:
         )
         runners = {str(r["project_key"]): r for r in self.store.list_runners()}
         seen_ids = [str(c.get("id") or "") for c in containers]
+        n_kept = 0
 
         for c in containers:
             cid = str(c.get("id") or "")
@@ -216,7 +234,9 @@ class Reconciler:
                 "action": decision["action"],
                 "reason": decision["reason"],
             }
-            if decision["action"] == "spare":
+            if decision["action"] == "keep":
+                n_kept += 1
+            elif decision["action"] == "spare":
                 report["spared"].append(entry)
             elif decision["action"] == "remove":
                 report["orphans"].append(entry)
@@ -252,6 +272,7 @@ class Reconciler:
 
         if not dry_run and self.nudge:
             self.nudge()
+        self._log_pass(report, containers=len(containers), kept=n_kept, started=t0)
         return report
 
     def _decide(
