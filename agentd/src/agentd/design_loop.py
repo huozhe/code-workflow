@@ -33,6 +33,7 @@ from agentd.github_fetch import (
 )
 from agentd.github_write import (
     format_escalation_comment,
+    get_issue,
     get_issue_body,
     patch_issue_body,
     post_issue_comment,
@@ -260,6 +261,7 @@ class DesignLoop:
         fetch_diff: Any | None = None,
         github_token: str | None = None,
         get_issue_body_fn: Any | None = None,
+        get_issue_fn: Any | None = None,
         patch_issue_body_fn: Any | None = None,
     ) -> None:
         self.store = store
@@ -274,6 +276,7 @@ class DesignLoop:
         self._fetch_diff = fetch_diff
         self._github_token = github_token
         self._get_issue_body = get_issue_body_fn
+        self._get_issue = get_issue_fn
         self._patch_issue_body = patch_issue_body_fn
 
     def process_deferred_batch(self, limit: int = 20) -> int:
@@ -1517,12 +1520,22 @@ class DesignLoop:
                     session_key,
                     sender,
                 )
-            elif have_checked is False and already_recorded:
+            elif (
+                already_recorded
+                and have_checked is not True
+                and checkbox_is_checked(
+                    (changes.get("body") or {}).get("from") or "",
+                    strict=True,
+                )
+                is True
+            ):
+                # This edit removed a ticked box (untick or delete). ADR-19.
                 self.store.update_session_fields(session_key, verified_at=None)
                 log.info(
-                    "verification checkbox cleared session=%s sender=%s",
+                    "verification checkbox cleared session=%s sender=%s checked=%s",
                     session_key,
                     sender,
+                    have_checked,
                 )
             else:
                 log.info(
@@ -1943,23 +1956,30 @@ class DesignLoop:
         if existing in ("VERIFIED", "ABANDONED"):
             classification = existing
         else:
+            sess = self.store.get_session(session_key) or sess
             issue = data.get("issue") if isinstance(data.get("issue"), dict) else {}
             body = issue.get("body") if isinstance(issue.get("body"), str) else ""
-            # ADR-17: ticked body is not VERIFIED without an observed owner tick.
-            if (
-                checkbox_is_checked(body, strict=True) is True
-                and not sess.get("verified_at")
+            checked = checkbox_is_checked(body, strict=True)
+            has_tick = bool(sess.get("verified_at"))
+            # ADR-17: ticked + no stamp. ADR-19: not ticked + stamp.
+            if (checked is True and not has_tick) or (
+                checked is not True and has_tick
             ):
                 if not self._close_grace_elapsed(delivery_id, received_at):
                     return
-                self._reconcile_unverifiable_close(
+                live = self._finish_close_grace(
                     session_key=session_key,
                     repo=repo,
                     issue_num=int(issue_num),
                     delivery_id=delivery_id,
+                    payload_body=body,
+                    adr17=checked is True and not has_tick,
                 )
-                return
-            classification = classify_at_close(body)
+                if live is None:
+                    return
+                classification = classify_at_close(live)
+            else:
+                classification = classify_at_close(body)
             self.store.update_session_fields(
                 session_key, classification=classification
             )
@@ -2049,6 +2069,76 @@ class DesignLoop:
         _close_grace_warned.discard(delivery_id)
         return True
 
+    def _read_close_issue(self, *, repo: str, issue_num: int) -> dict[str, str]:
+        """One fetch of state+body for close-time grace (ADR-17 / ADR-19)."""
+        token = self._gateway_github_token()
+        if self._get_issue is not None:
+            raw = self._get_issue(
+                repo=repo, issue_num=int(issue_num), token=token
+            )
+            if not isinstance(raw, dict):
+                raise RuntimeError("get_issue did not return an object")
+            body = raw.get("body")
+            return {
+                "body": body if isinstance(body, str) else "",
+                "state": str(raw.get("state") or ""),
+            }
+        if self._get_issue_body is not None:
+            fetched = self._get_issue_body(
+                repo=repo, issue_num=int(issue_num), token=token
+            )
+            return {
+                "body": fetched if isinstance(fetched, str) else "",
+                "state": "closed",
+            }
+        return get_issue(repo=repo, issue_num=int(issue_num), token=token)
+
+    def _finish_close_grace(
+        self,
+        *,
+        session_key: str,
+        repo: str,
+        issue_num: int,
+        delivery_id: str,
+        payload_body: str,
+        adr17: bool,
+    ) -> str | None:
+        """After grace: cancel if open, else body to classify. None = handled."""
+        try:
+            info = self._read_close_issue(repo=repo, issue_num=int(issue_num))
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "close-time GET failed session=%s: %s",
+                session_key,
+                exc,
+            )
+            if adr17:
+                self._reconcile_unverifiable_close(
+                    session_key=session_key,
+                    repo=repo,
+                    issue_num=int(issue_num),
+                    delivery_id=delivery_id,
+                )
+                return None
+            return payload_body
+        if str(info.get("state") or "").lower() == "open":
+            log.info(
+                "close cancelled session=%s — issue open at re-read",
+                session_key,
+            )
+            self.store.set_delivery_status(delivery_id, "done")
+            return None
+        if adr17:
+            self._reconcile_unverifiable_close(
+                session_key=session_key,
+                repo=repo,
+                issue_num=int(issue_num),
+                delivery_id=delivery_id,
+                current_body=info.get("body") or "",
+            )
+            return None
+        return info.get("body") or ""
+
     def _reconcile_unverifiable_close(
         self,
         *,
@@ -2056,12 +2146,14 @@ class DesignLoop:
         repo: str,
         issue_num: int,
         delivery_id: str,
+        current_body: str | None = None,
     ) -> None:
         """ADR-17 post-grace: lower the box, escalate, hold. No classify/teardown."""
         box_note = self._lower_close_checkbox(
             session_key=session_key,
             repo=repo,
             issue_num=issue_num,
+            current=current_body,
         )
         reason = (
             f"body was ticked with no owner tick this gateway observed "
@@ -2117,26 +2209,28 @@ class DesignLoop:
         session_key: str,
         repo: str,
         issue_num: int,
+        current: str | None = None,
     ) -> str:
-        """PATCH the box down against a fresh read. Skip if already down or GET fails."""
-        try:
-            get_fn = self._get_issue_body or get_issue_body
-            fetched = get_fn(
-                repo=repo,
-                issue_num=int(issue_num),
-                token=self._gateway_github_token(),
-            )
-        except Exception as exc:  # noqa: BLE001
-            log.warning(
-                "close-reconcile GET failed session=%s — skip PATCH: %s",
-                session_key,
-                exc,
-            )
-            return (
-                "The checkbox was not lowered (issue body read failed); "
-                "untick it by hand before the next close."
-            )
-        current = fetched if isinstance(fetched, str) else ""
+        """PATCH the box down. Reuse a close-time fetch when provided."""
+        if current is None:
+            try:
+                get_fn = self._get_issue_body or get_issue_body
+                fetched = get_fn(
+                    repo=repo,
+                    issue_num=int(issue_num),
+                    token=self._gateway_github_token(),
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "close-reconcile GET failed session=%s — skip PATCH: %s",
+                    session_key,
+                    exc,
+                )
+                return (
+                    "The checkbox was not lowered (issue body read failed); "
+                    "untick it by hand before the next close."
+                )
+            current = fetched if isinstance(fetched, str) else ""
         if checkbox_is_checked(current, strict=True) is not True:
             return "The checkbox is already down."
         new_body = set_checkbox_in_body(current, checked=False)

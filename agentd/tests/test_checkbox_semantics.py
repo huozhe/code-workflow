@@ -193,6 +193,68 @@ def test_owner_untick_clears_verified_at(tmp_path: Path) -> None:
     store.close()
 
 
+def test_owner_deletes_checkbox_line_clears_verified_at(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.db")
+    cfg = _cfg(tmp_path)
+    sk = _seed(store, verified_at=int(time.time()) - 10)
+    prev = _body(checked=True)
+    body = prev.replace(CHECKBOX_CHECKED + "\n", "")
+    assert checkbox_is_checked(body, strict=True) is None
+    _insert(
+        store,
+        "d-owner-del-line",
+        _edited_payload(issue=58, sender="huozhe", body=body, body_from=prev),
+        issue=58,
+        sender="huozhe",
+    )
+    DesignLoop(store, cfg, supervisor=None, dispatch_turns=False).process_deferred_batch()
+    assert store.get_session(sk)["verified_at"] is None
+    store.close()
+
+
+def test_owner_deletes_block_clears_verified_at(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.db")
+    cfg = _cfg(tmp_path)
+    sk = _seed(store, verified_at=int(time.time()) - 10)
+    prev = _body(checked=True)
+    body = "## Goal\n\nSession work.\n"
+    assert extract_verification_block(body) is None
+    _insert(
+        store,
+        "d-owner-del-block",
+        _edited_payload(issue=58, sender="huozhe", body=body, body_from=prev),
+        issue=58,
+        sender="huozhe",
+    )
+    DesignLoop(store, cfg, supervisor=None, dispatch_turns=False).process_deferred_batch()
+    assert store.get_session(sk)["verified_at"] is None
+    store.close()
+
+
+def test_owner_prose_edit_while_box_gone_keeps_verified_at(
+    tmp_path: Path,
+) -> None:
+    """Box already absent before this edit — do not treat as a withdrawal."""
+    store = Store(tmp_path / "state.db")
+    cfg = _cfg(tmp_path)
+    stamped = int(time.time()) - 10
+    sk = _seed(store, verified_at=stamped)
+    prev = "## Goal\n\nSession work.\n"
+    body = "## Goal\n\nSession work.\n\nOne more line.\n"
+    assert checkbox_is_checked(prev, strict=True) is None
+    assert checkbox_is_checked(body, strict=True) is None
+    _insert(
+        store,
+        "d-owner-prose",
+        _edited_payload(issue=58, sender="huozhe", body=body, body_from=prev),
+        issue=58,
+        sender="huozhe",
+    )
+    DesignLoop(store, cfg, supervisor=None, dispatch_turns=False).process_deferred_batch()
+    assert store.get_session(sk)["verified_at"] == stamped
+    store.close()
+
+
 def test_agent_tick_restores_and_warns(tmp_path: Path) -> None:
     """Agent flips unchecked → checked; restore to pre-edit (was=False)."""
     store = Store(tmp_path / "state.db")
