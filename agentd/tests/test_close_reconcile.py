@@ -129,6 +129,67 @@ def _insert_close(
         store._conn.commit()
 
 
+def _insert_reopen(
+    store: Store,
+    *,
+    did: str,
+    issue: int = 90,
+    sender: str = "huozhe",
+) -> None:
+    payload = json.dumps(
+        {
+            "action": "reopened",
+            "issue": {
+                "number": issue,
+                "state": "open",
+                "title": "session",
+                "author_association": "OWNER",
+                "labels": [{"name": "agentd"}],
+            },
+            "repository": {"full_name": "huozhe/code-workflow"},
+            "sender": {"login": sender},
+        }
+    ).encode()
+    store.insert_delivery(
+        delivery_id=did,
+        event="issues",
+        action="reopened",
+        repo="huozhe/code-workflow",
+        issue_num=issue,
+        sender=sender,
+        payload=payload,
+        status="deferred",
+    )
+
+
+def _insert_owner_reply(
+    store: Store,
+    *,
+    did: str,
+    issue: int = 90,
+    issue_state: str = "open",
+) -> None:
+    payload = json.dumps(
+        {
+            "action": "created",
+            "issue": {"number": issue, "title": "session", "state": issue_state},
+            "comment": {"body": "continue the work", "user": {"login": "huozhe"}},
+            "repository": {"full_name": "huozhe/code-workflow"},
+            "sender": {"login": "huozhe"},
+        }
+    ).encode()
+    store.insert_delivery(
+        delivery_id=did,
+        event="issue_comment",
+        action="created",
+        repo="huozhe/code-workflow",
+        issue_num=issue,
+        sender="huozhe",
+        payload=payload,
+        status="deferred",
+    )
+
+
 def _status(store: Store, did: str) -> str:
     row = store._conn.execute(
         "SELECT status FROM deliveries WHERE delivery_id=?", (did,)
@@ -264,6 +325,9 @@ def test_ticked_null_verified_at_after_grace_escalates_and_lowers(
     assert "reopen" in posts[0]["body"].lower()
     assert "tick" in posts[0]["body"].lower()
     assert "Any reply from you" not in posts[0]["body"]
+    body_l = posts[0]["body"].lower()
+    assert "closed" in body_l
+    assert "continue" in body_l
     esc = store.get_open_escalation(sk)
     assert esc is not None
     store.close()
@@ -360,8 +424,7 @@ def test_later_close_closes_escalation(tmp_path: Path) -> None:
     store.close()
 
 
-def test_hold_refuses_turn_on_reopened_issue(tmp_path: Path) -> None:
-    """Live-review point: reopen must not dispatch while the hold is on."""
+def test_owner_reopen_lifts_hold_no_dispatch(tmp_path: Path) -> None:
     store = Store(tmp_path / "state.db")
     sk = _seed(
         store,
@@ -369,30 +432,8 @@ def test_hold_refuses_turn_on_reopened_issue(tmp_path: Path) -> None:
         state="PAUSED_HUMAN",
         paused_reason=f"{CLOSE_RECONCILE_PREFIX}hold",
     )
-    payload = json.dumps(
-        {
-            "action": "reopened",
-            "issue": {
-                "number": 90,
-                "state": "open",
-                "title": "session",
-                "author_association": "OWNER",
-                "labels": [{"name": "agentd"}],
-            },
-            "repository": {"full_name": "huozhe/code-workflow"},
-            "sender": {"login": "huozhe"},
-        }
-    ).encode()
-    store.insert_delivery(
-        delivery_id="d-reopen",
-        event="issues",
-        action="reopened",
-        repo="huozhe/code-workflow",
-        issue_num=90,
-        sender="huozhe",
-        payload=payload,
-        status="deferred",
-    )
+    store.open_escalation(session_key=sk, role="system", reason="hold")
+    _insert_reopen(store, did="d-reopen", sender="huozhe")
     import agentd.design_loop as dl
 
     _RecordingClient.calls = []
@@ -402,10 +443,91 @@ def test_hold_refuses_turn_on_reopened_issue(tmp_path: Path) -> None:
         _loop(store, tmp_path, dispatch=True).process_deferred_batch()
     finally:
         dl.RunnerClient = orig  # type: ignore[misc]
-    assert store.count_turns(sk) == 0
+    sess = store.get_session(sk)
+    assert sess is not None
     assert _status(store, "d-reopen") == "done"
-    assert store.get_session(sk)["state"] == "PAUSED_HUMAN"
+    assert sess["state"] == "PAUSED_HUMAN"
+    assert sess["resume_state"] == "AWAITING_VERIFICATION"
+    assert not str(sess["paused_reason"] or "").startswith(CLOSE_RECONCILE_PREFIX)
+    assert store.get_open_escalation(sk) is not None
+    assert store.count_turns(sk) == 0
     assert not any(m == "turn.dispatch" for m, _ in _RecordingClient.calls)
+    store.close()
+
+
+def test_non_owner_reopen_lifts_hold_done_not_deferred(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.db")
+    sk = _seed(
+        store,
+        tmp_path,
+        state="PAUSED_HUMAN",
+        paused_reason=f"{CLOSE_RECONCILE_PREFIX}hold",
+    )
+    store.open_escalation(session_key=sk, role="system", reason="hold")
+    _insert_reopen(store, did="d-agent-reopen", sender="huozhegrok")
+    import agentd.design_loop as dl
+
+    _RecordingClient.calls = []
+    orig = dl.RunnerClient
+    dl.RunnerClient = _RecordingClient  # type: ignore[misc]
+    try:
+        _loop(store, tmp_path, dispatch=True).process_deferred_batch()
+    finally:
+        dl.RunnerClient = orig  # type: ignore[misc]
+    sess = store.get_session(sk)
+    assert sess is not None
+    assert _status(store, "d-agent-reopen") == "done"
+    assert sess["state"] == "PAUSED_HUMAN"
+    assert sess["resume_state"] == "AWAITING_VERIFICATION"
+    assert not str(sess["paused_reason"] or "").startswith(CLOSE_RECONCILE_PREFIX)
+    assert store.get_open_escalation(sk) is not None
+    assert store.count_turns(sk) == 0
+    assert not any(m == "turn.dispatch" for m, _ in _RecordingClient.calls)
+    store.close()
+
+
+def test_owner_reply_after_owner_reopen_resumes(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.db")
+    sk = _seed(
+        store,
+        tmp_path,
+        state="PAUSED_HUMAN",
+        paused_reason=f"{CLOSE_RECONCILE_PREFIX}hold",
+    )
+    store.open_escalation(session_key=sk, role="system", reason="hold")
+    _insert_reopen(store, did="d-reopen", sender="huozhe")
+    _insert_owner_reply(store, did="d-reply")
+    _loop(store, tmp_path, dispatch=False).process_deferred_batch()
+    sess = store.get_session(sk)
+    assert sess is not None
+    assert _status(store, "d-reopen") == "done"
+    assert _status(store, "d-reply") == "routed"
+    assert sess["state"] == "AWAITING_VERIFICATION"
+    assert sess.get("paused_reason") is None
+    assert sess.get("resume_state") is None
+    assert store.get_open_escalation(sk) is None
+    store.close()
+
+
+def test_owner_reply_after_agent_reopen_resumes(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.db")
+    sk = _seed(
+        store,
+        tmp_path,
+        state="PAUSED_HUMAN",
+        paused_reason=f"{CLOSE_RECONCILE_PREFIX}hold",
+    )
+    store.open_escalation(session_key=sk, role="system", reason="hold")
+    _insert_reopen(store, did="d-agent-reopen", sender="huozhegrok")
+    _insert_owner_reply(store, did="d-reply")
+    _loop(store, tmp_path, dispatch=False).process_deferred_batch()
+    sess = store.get_session(sk)
+    assert sess is not None
+    assert _status(store, "d-agent-reopen") == "done"
+    assert _status(store, "d-reply") == "routed"
+    assert sess["state"] == "AWAITING_VERIFICATION"
+    assert sess.get("paused_reason") is None
+    assert store.get_open_escalation(sk) is None
     store.close()
 
 
