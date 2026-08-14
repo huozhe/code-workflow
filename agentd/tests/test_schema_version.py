@@ -150,3 +150,121 @@ def test_unknown_version_gap_rebuilds_with_honest_log(
     assert store2.delivery_count() == 0
     assert any("Reconciler is not implemented" in r.message for r in caplog.records)
     store2.close()
+
+
+def test_v7_to_v8_preserves_deliveries_and_backfills_nodes(tmp_path: Path) -> None:
+    """ADR-21: v8 adds delivery_nodes and backfills; must not wipe the ledger."""
+    import json
+    import sqlite3
+
+    from agentd.db import compress_payload
+
+    path = tmp_path / "state.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE deliveries (
+          delivery_id TEXT PRIMARY KEY,
+          event TEXT NOT NULL,
+          action TEXT,
+          repo TEXT NOT NULL DEFAULT '',
+          issue_num INTEGER,
+          sender TEXT NOT NULL DEFAULT '',
+          received_at INTEGER NOT NULL,
+          payload BLOB NOT NULL,
+          status TEXT NOT NULL DEFAULT 'queued'
+        );
+        CREATE TABLE circuit_breaker (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          disk_paused INTEGER NOT NULL DEFAULT 0,
+          reason TEXT,
+          updated_at INTEGER NOT NULL
+        );
+        INSERT INTO circuit_breaker(id, disk_paused, reason, updated_at)
+        VALUES (1, 0, NULL, 0);
+        CREATE TABLE sessions (
+          session_key TEXT PRIMARY KEY,
+          project_key TEXT NOT NULL,
+          repo TEXT NOT NULL,
+          issue_num INTEGER NOT NULL,
+          state TEXT NOT NULL,
+          paused_reason TEXT,
+          resume_state TEXT,
+          stall_open_threads TEXT,
+          architect TEXT NOT NULL,
+          developer TEXT NOT NULL,
+          roles_locked INTEGER NOT NULL DEFAULT 0,
+          design_pr INTEGER,
+          feature_pr INTEGER,
+          turn_count INTEGER NOT NULL DEFAULT 0,
+          consec_agent_turns INTEGER NOT NULL DEFAULT 0,
+          review_rounds INTEGER NOT NULL DEFAULT 0,
+          progress_fp TEXT,
+          progress_repeat INTEGER NOT NULL DEFAULT 0,
+          zero_thread_rounds INTEGER NOT NULL DEFAULT 0,
+          silent_turns INTEGER NOT NULL DEFAULT 0,
+          gh_watermark INTEGER,
+          verified_at INTEGER,
+          classification TEXT,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        INSERT INTO sessions(
+          session_key, project_key, repo, issue_num, state,
+          architect, developer, created_at, updated_at
+        ) VALUES (
+          'huozhe/code-workflow#32', 'huozhe/code-workflow',
+          'huozhe/code-workflow', 32, 'IMPLEMENTING',
+          'huozheclaude', 'huozhegrok', 1, 1
+        );
+        PRAGMA user_version = 7;
+        """
+    )
+    payload = json.dumps(
+        {
+            "action": "created",
+            "issue": {"node_id": "I_kw_issue32", "number": 32},
+            "comment": {"node_id": "IC_kw_comment1", "user": {"login": "huozhe"}},
+            "sender": {"login": "huozhe"},
+        }
+    ).encode()
+    conn.execute(
+        """
+        INSERT INTO deliveries(
+          delivery_id, event, action, repo, issue_num, sender,
+          received_at, payload, status
+        ) VALUES (?, 'issue_comment', 'created', 'huozhe/code-workflow', 32,
+                  'huozhe', 100, ?, 'done')
+        """,
+        ("keep-ledger", compress_payload(payload)),
+    )
+    conn.commit()
+    conn.close()
+
+    store = Store(path)
+    assert store._schema_version() == SCHEMA_VERSION
+    assert store.delivery_count() == 1
+    assert store.has_delivery_node("IC_kw_comment1")
+    assert store.has_delivery_node("I_kw_issue32")
+    sess = store.get_session("huozhe/code-workflow#32")
+    assert sess is not None
+    assert sess["state"] == "IMPLEMENTING"
+    assert "closed_issue_escalated_at" in sess
+    assert sess.get("closed_issue_escalated_at") is None
+    store.close()
+
+
+def test_insert_delivery_indexes_node_ids(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.db")
+    store.insert_delivery(
+        delivery_id="d1",
+        event="issue_comment",
+        action="created",
+        repo="huozhe/code-workflow",
+        issue_num=1,
+        sender="huozhe",
+        payload=b'{"comment":{"node_id":"IC_new"},"issue":{"node_id":"I_new"}}',
+    )
+    assert store.has_delivery_node("IC_new")
+    assert store.has_delivery_node("I_new")
+    store.close()
