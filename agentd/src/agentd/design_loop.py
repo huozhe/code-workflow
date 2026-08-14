@@ -422,6 +422,15 @@ class DesignLoop:
             )
             return
 
+        # ADR-18: lift sits above the paused defer. Any sender.
+        if event == "issues" and action == "reopened":
+            if self._lift_close_reconcile_hold(
+                session_key=session_key,
+                sess=sess,
+                delivery_id=delivery_id,
+            ):
+                return
+
         state = str(sess.get("state") or "PLANNING")
         paused = state == "PAUSED_HUMAN" or bool(sess.get("paused_reason"))
 
@@ -2063,9 +2072,10 @@ class DesignLoop:
             f"`{delivery_id}` stored payload."
         )
         reply_does = (
-            "A reply changes nothing. This pause is a hold, not a question.\n\n"
-            "- **Reopen** the issue, **tick** the box, then **close**.\n"
-            "- A reply does not resume the session and does not classify."
+            "While the issue is closed, a reply changes nothing.\n\n"
+            "- **Tick**, then **close** — records the verification.\n"
+            "- **Reopen** first to continue work. After the issue is open, "
+            "a reply resumes the session normally."
         )
         self._escalate(
             session_key,
@@ -2075,6 +2085,31 @@ class DesignLoop:
             hold=True,
         )
         self.store.set_delivery_status(delivery_id, "done")
+
+    def _lift_close_reconcile_hold(
+        self,
+        *,
+        session_key: str,
+        sess: dict[str, Any],
+        delivery_id: str,
+    ) -> bool:
+        """ADR-18: if held, strip prefix, mark done, return True. Else fall through."""
+        state = str(sess.get("state") or "")
+        if not _close_reconcile_held(state, sess):
+            return False
+        reason = str(sess.get("paused_reason") or "")
+        stripped = reason.removeprefix(CLOSE_RECONCILE_PREFIX)
+        self.store.update_session_fields(
+            session_key, paused_reason=stripped or None
+        )
+        sess["paused_reason"] = stripped or None
+        self.store.set_delivery_status(delivery_id, "done")
+        log.info(
+            "close-reconcile lift id=%s session=%s",
+            delivery_id,
+            session_key,
+        )
+        return True
 
     def _lower_close_checkbox(
         self,
