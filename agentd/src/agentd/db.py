@@ -1052,7 +1052,9 @@ class Store:
             ).fetchall()
             return {str(r["project_key"]) for r in rows if r["project_key"]}
 
-    def projects_with_open_turns(self) -> set[str]:
+    def projects_with_open_turns(self, *, now: int, max_age_s: int) -> set[str]:
+        """Projects with a turn still inside the turn-timeout window."""
+        cutoff = now - max_age_s
         with self._lock:
             rows = self._conn.execute(
                 """
@@ -1060,7 +1062,10 @@ class Store:
                 FROM turns t
                 JOIN sessions s ON s.session_key = t.session_key
                 WHERE t.ended_at IS NULL
-                """
+                  AND t.started_at IS NOT NULL
+                  AND t.started_at > ?
+                """,
+                (cutoff,),
             ).fetchall()
             return {str(r["project_key"]) for r in rows if r["project_key"]}
 

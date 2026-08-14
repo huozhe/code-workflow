@@ -8,7 +8,9 @@ from pathlib import Path
 from agentd.db import Store
 from agentd.reconciler import (
     CONTAINER_AGE_FLOOR_S,
+    INFLIGHT_TURN_MAX_AGE_S,
     Reconciler,
+    _parse_started_at,
     pragma_integrity_check,
 )
 
@@ -105,6 +107,29 @@ def test_age_floor_spares_orphan(tmp_path: Path) -> None:
     store.close()
 
 
+def test_zero_started_at_spares_as_young(tmp_path: Path) -> None:
+    """Docker create-not-started is 0001-01-01T00:00:00Z — not evidence of age."""
+    store = Store(tmp_path / "state.db")
+    pk = "huozhe/code-workflow"
+    _sess(store, issue=1, state="IMPLEMENTING")
+    removed: list = []
+    report = _rec(
+        store,
+        [
+            {
+                "id": "cnew",
+                "project": pk,
+                "started_at": _parse_started_at("0001-01-01T00:00:00Z"),
+            }
+        ],
+        now=1_000_000,
+        removed=removed,
+    )
+    assert removed == []
+    assert any(s["reason"] == "age < 10m" for s in report["spared"])
+    store.close()
+
+
 def test_inflight_turn_spares_orphan(tmp_path: Path) -> None:
     store = Store(tmp_path / "state.db")
     pk = "huozhe/code-workflow"
@@ -128,6 +153,32 @@ def test_inflight_turn_spares_orphan(tmp_path: Path) -> None:
     )
     assert removed == []
     assert any(s["reason"] == "open turn" for s in report["spared"])
+    store.close()
+
+
+def test_stale_open_turn_does_not_spare(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.db")
+    pk = "huozhe/code-workflow"
+    sk = _sess(store, issue=1, state="CLOSED")
+    store.insert_turn(
+        turn_id="t-stale",
+        session_key=sk,
+        role="developer",
+        delivery_id=None,
+        started_at=1,
+        ended_at=None,
+        status=None,
+        summary=None,
+    )
+    removed: list = []
+    report = _rec(
+        store,
+        [{"id": "old", "project": pk, "started_at": 1}],
+        now=1 + INFLIGHT_TURN_MAX_AGE_S + 60,
+        removed=removed,
+    )
+    assert removed == ["old"]
+    assert not any(s["reason"] == "open turn" for s in report["spared"])
     store.close()
 
 

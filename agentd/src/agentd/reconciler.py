@@ -19,6 +19,7 @@ from agentd.db import Store
 log = logging.getLogger("agentd.reconciler")
 
 CONTAINER_AGE_FLOOR_S = 10 * 60
+INFLIGHT_TURN_MAX_AGE_S = 900  # matches gateway turn_deadline_s default
 RECONCILE_INTERVAL_S = 5 * 60
 
 ListContainers = Callable[[], list[dict[str, Any]]]
@@ -186,20 +187,24 @@ class Reconciler:
             report["inventory_error"] = True
             return report
 
-        live = self.store.live_project_keys()
-        inflight = self.store.projects_with_open_turns()
-        runners = {str(r["project_key"]): r for r in self.store.list_runners()}
         now = int(self._now())
+        live = self.store.live_project_keys()
+        inflight = self.store.projects_with_open_turns(
+            now=now, max_age_s=INFLIGHT_TURN_MAX_AGE_S
+        )
+        runners = {str(r["project_key"]): r for r in self.store.list_runners()}
         seen_ids = [str(c.get("id") or "") for c in containers]
 
         for c in containers:
             cid = str(c.get("id") or "")
             pk = str(c.get("project") or "")
-            age = now - int(c.get("started_at") or 0)
+            started = int(c.get("started_at") or 0)
+            age = now - started
             decision = self._decide(
                 project=pk,
                 container_id=cid,
                 age_s=age,
+                started_at=started,
                 live=pk in live if pk else False,
                 inflight=pk in inflight if pk else False,
                 runner=runners.get(pk) if pk else None,
@@ -255,11 +260,12 @@ class Reconciler:
         project: str,
         container_id: str,
         age_s: int,
+        started_at: int,
         live: bool,
         inflight: bool,
         runner: dict[str, Any] | None,
     ) -> dict[str, str]:
-        young = age_s < CONTAINER_AGE_FLOOR_S
+        young = started_at <= 0 or age_s < CONTAINER_AGE_FLOOR_S
         if live and runner and _cid_match(str(runner.get("container_id") or ""), container_id):
             return {"action": "keep", "reason": "live runner"}
         if young:
