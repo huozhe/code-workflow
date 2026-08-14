@@ -340,23 +340,31 @@ class Reconciler:
         issue_state = str(snap.get("issue_state") or "")
         held = _close_reconcile_held(str(sess.get("state") or ""), sess)
 
-        if issue_state == "open" and held:
-            report["holds_lifted"] = int(report["holds_lifted"]) + 1
-            if not dry_run:
-                paused = str(sess.get("paused_reason") or "")
-                stripped = paused.removeprefix(CLOSE_RECONCILE_PREFIX) or None
-                self.store.update_session_fields(sk, paused_reason=stripped)
-                sess["paused_reason"] = stripped
-                log.info("close-reconcile lift session=%s (issue open)", sk)
+        if issue_state == "open":
+            if sess.get("closed_live"):
+                if not dry_run:
+                    self.store.update_session_fields(sk, closed_live=None)
+                    sess["closed_live"] = None
+            if held:
+                report["holds_lifted"] = int(report["holds_lifted"]) + 1
+                if not dry_run:
+                    paused = str(sess.get("paused_reason") or "")
+                    stripped = paused.removeprefix(CLOSE_RECONCILE_PREFIX) or None
+                    self.store.update_session_fields(sk, paused_reason=stripped)
+                    sess["paused_reason"] = stripped
+                    log.info("close-reconcile lift session=%s (issue open)", sk)
 
-        if issue_state == "closed" and not held:
+        if issue_state == "closed" and not sess.get("closed_live"):
             report["escalated"] = int(report["escalated"]) + 1
-            if not dry_run and self.escalate:
-                reason = (
-                    f"GitHub issue is closed; session is still {sess.get('state')} "
-                    f"(reconcile sweep). Nothing classified; session left live."
-                )
-                self.escalate(sk, reason, hold=True)
+            if not dry_run:
+                self.store.update_session_fields(sk, closed_live=1)
+                sess["closed_live"] = 1
+                if self.escalate:
+                    reason = (
+                        f"GitHub issue is closed; session is still {sess.get('state')} "
+                        f"(reconcile sweep). Nothing classified; session left live."
+                    )
+                    self.escalate(sk, reason, hold=True)
             # still run set-diff for comments; never synthesize the close
 
         if snap.get("feature_merged"):
@@ -461,7 +469,9 @@ class Reconciler:
                     "node_id": nid,
                     "number": node.get("number"),
                     "merged": bool(node.get("merged")),
+                    "title": str(node.get("title") or ""),
                     "user": {"login": author},
+                    "head": {"ref": str(node.get("head_ref") or "")},
                 },
                 "sender": {"login": author},
                 "repository": {"full_name": repo},
@@ -475,7 +485,11 @@ class Reconciler:
                     "state": str(node.get("state") or ""),
                     "user": {"login": author},
                 },
-                "pull_request": {"number": node.get("number")},
+                "pull_request": {
+                    "number": node.get("number"),
+                    "title": str(node.get("title") or ""),
+                    "head": {"ref": str(node.get("head_ref") or "")},
+                },
                 "sender": {"login": author},
                 "repository": {"full_name": repo},
             }

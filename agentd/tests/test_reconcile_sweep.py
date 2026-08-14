@@ -232,6 +232,47 @@ def test_closed_issue_escalates_only_once(tmp_path: Path) -> None:
     store.close()
 
 
+def test_closed_issue_escalate_survives_resume(tmp_path: Path) -> None:
+    """§8.5 resume clears paused_reason; the closed-episode flag must stay."""
+    store = Store(tmp_path / "state.db")
+    sk = _sess(store, state="IMPLEMENTING")
+    snap_closed = {"issue_state": "closed", "issue_body": "", "nodes": []}
+    esc: list = []
+
+    def escalate(session_key: str, reason: str, **kw) -> None:
+        esc.append((session_key, reason, kw))
+        store.update_session_fields(
+            session_key,
+            state="PAUSED_HUMAN",
+            paused_reason=f"{CLOSE_RECONCILE_PREFIX}{reason}",
+            resume_state="IMPLEMENTING",
+        )
+
+    rec = Reconciler(
+        store,
+        list_containers=lambda: [],
+        remove_container=lambda _c: None,
+        fetch_snapshot=lambda _s: dict(snap_closed),
+        escalate=escalate,
+    )
+    rec.reconcile_once()
+    assert len(esc) == 1
+    # Owner reply: §8.5 clears the pause; issue stays closed.
+    store.update_session_fields(
+        sk, state="IMPLEMENTING", paused_reason=None, resume_state=None
+    )
+    rec.reconcile_once()
+    rec.reconcile_once()
+    assert len(esc) == 1
+    # Reopen re-arms; a later close escalates once more.
+    rec.fetch_snapshot = lambda _s: {"issue_state": "open", "issue_body": "", "nodes": []}
+    rec.reconcile_once()
+    rec.fetch_snapshot = lambda _s: dict(snap_closed)
+    rec.reconcile_once()
+    assert len(esc) == 2
+    store.close()
+
+
 def test_merged_feature_pr_adopts_forward(tmp_path: Path) -> None:
     store = Store(tmp_path / "state.db")
     sk = _sess(store, state="MERGING")
@@ -324,8 +365,10 @@ def test_fetch_snapshot_includes_reviews() -> None:
             return {
                 "node_id": "PR_1",
                 "merged": False,
+                "title": "feat: x",
                 "user": {"login": "dev"},
                 "created_at": "2026-08-14T00:00:00Z",
+                "head": {"ref": "agentd/huozhe__code-workflow/32/developer"},
             }
         if "/pulls/111/reviews" in url:
             return [
@@ -334,7 +377,13 @@ def test_fetch_snapshot_includes_reviews() -> None:
                     "state": "APPROVED",
                     "user": {"login": "arch"},
                     "submitted_at": "2026-08-14T01:00:00Z",
-                }
+                },
+                {
+                    "node_id": "PRR_pending",
+                    "state": "PENDING",
+                    "user": {"login": "arch"},
+                    "submitted_at": None,
+                },
             ]
         raise AssertionError(url)
 
@@ -354,3 +403,46 @@ def test_fetch_snapshot_includes_reviews() -> None:
     assert review["id"] == "PRR_1"
     assert review["state"] == "APPROVED"
     assert review["number"] == 111
+    assert review.get("head_ref")
+    assert not any(n["id"] == "PRR_pending" for n in snap["nodes"])
+
+
+def test_synthesized_review_classifies_as_feature_approved(tmp_path: Path) -> None:
+    from agentd.config import Config
+    from agentd.design_loop import DesignLoop
+    from agentd.gitops import role_branch_name
+
+    store = Store(tmp_path / "state.db")
+    sk = _sess(store, issue=32, state="CODE_REVIEW")
+    store.update_session_fields(sk, feature_pr=111)
+    head = role_branch_name("huozhe/code-workflow", 32, "developer")
+    snap = {
+        "issue_state": "open",
+        "issue_body": "",
+        "nodes": [
+            {
+                "id": "PRR_appr",
+                "kind": "review",
+                "created_at": 200,
+                "author": "huozheclaude",
+                "state": "APPROVED",
+                "number": 111,
+                "head_ref": head,
+                "title": "feat: x",
+            }
+        ],
+    }
+    _sweep_rec(store, snap)
+    queued = [dict(r) for r in store.list_queued()]
+    row = next(r for r in queued if r["delivery_id"] == "recon:PRR_appr")
+    payload = json.loads(decompress_payload(row["payload"]))
+    loop = DesignLoop(store, Config(), dispatch_turns=False, gateway_token="")
+    kind = loop._event_kind(
+        row["event"],
+        row["action"],
+        payload,
+        str(row["sender"]),
+        repo="huozhe/code-workflow",
+    )
+    assert kind == "feature_approved_unverified"
+    store.close()

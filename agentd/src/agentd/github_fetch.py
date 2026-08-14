@@ -223,6 +223,9 @@ def fetch_session_snapshot(
             return False
         if not isinstance(pr, dict) or not pr.get("node_id"):
             return bool(isinstance(pr, dict) and pr.get("merged"))
+        head = pr.get("head") if isinstance(pr.get("head"), dict) else {}
+        head_ref = str(head.get("ref") or "")
+        pr_title = str(pr.get("title") or "")
         nodes.append(
             {
                 "id": str(pr["node_id"]),
@@ -231,6 +234,8 @@ def fetch_session_snapshot(
                 "author": str((pr.get("user") or {}).get("login") or ""),
                 "merged": bool(pr.get("merged")),
                 "number": int(num),
+                "head_ref": head_ref,
+                "title": pr_title,
             }
         )
         try:
@@ -245,6 +250,8 @@ def fetch_session_snapshot(
             for rev in reviews:
                 if not isinstance(rev, dict) or not rev.get("node_id"):
                     continue
+                if not rev.get("submitted_at"):
+                    continue
                 nodes.append(
                     {
                         "id": str(rev["node_id"]),
@@ -253,6 +260,8 @@ def fetch_session_snapshot(
                         "author": str((rev.get("user") or {}).get("login") or ""),
                         "state": str(rev.get("state") or ""),
                         "number": int(num),
+                        "head_ref": head_ref,
+                        "title": pr_title,
                     }
                 )
         return bool(pr.get("merged"))

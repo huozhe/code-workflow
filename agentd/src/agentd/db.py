@@ -24,7 +24,7 @@ SCHEMA_VERSION = 8
 # v5 (#35): project_blocks for structural ensure_session refusal (per project).
 # v6 (#39): turns.public_actions JSON; sessions.silent_turns for dead-end stall.
 # v7 (M5-2): sessions.classification — VERIFIED/ABANDONED at issues.closed.
-# v8 (M6-1b / ADR-21): delivery_nodes — GitHub node-ID membership index.
+# v8 (M6-1b / ADR-21): delivery_nodes + sessions.closed_live.
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS deliveries (
   delivery_id TEXT PRIMARY KEY,
@@ -89,6 +89,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   gh_watermark INTEGER,
   verified_at INTEGER,
   classification TEXT,
+  closed_live INTEGER,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
@@ -400,8 +401,11 @@ class Store:
 
     def _migrate_v7_to_v8(self) -> None:
         """ADR-21: node-ID index. Preserve deliveries — backfill reads them."""
-        log.info("migrating schema v7 → v8 (delivery_nodes; preserve deliveries)")
+        log.info("migrating schema v7 → v8 (delivery_nodes + closed_live)")
         self._conn.executescript(SCHEMA)
+        scols = self._table_columns("sessions")
+        if scols and "closed_live" not in scols:
+            self._conn.execute("ALTER TABLE sessions ADD COLUMN closed_live INTEGER")
         rows = self._conn.execute(
             "SELECT delivery_id, payload, received_at FROM deliveries"
         ).fetchall()
@@ -509,7 +513,7 @@ class Store:
                 """
                 SELECT session_key, project_key, repo, issue_num, state,
                        paused_reason, architect, developer, design_pr,
-                       feature_pr, verified_at, created_at
+                       feature_pr, verified_at, closed_live, created_at
                 FROM sessions
                 WHERE state NOT IN ('CLOSED', 'TEARDOWN')
                 """
@@ -743,6 +747,7 @@ class Store:
             "stall_open_threads",
             "verified_at",  # §10.2 checkbox record (M5-1)
             "classification",  # §10.3 VERIFIED/ABANDONED (M5-2)
+            "closed_live",  # ADR-21: one escalate per closed-issue episode
             "updated_at",
         }
         cols = []
