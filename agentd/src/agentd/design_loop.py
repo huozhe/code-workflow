@@ -2102,6 +2102,7 @@ class DesignLoop:
         self.store.update_session_fields(
             session_key, paused_reason=stripped or None
         )
+        sess["paused_reason"] = stripped or None
         self.store.set_delivery_status(delivery_id, "done")
         log.info(
             "close-reconcile lift id=%s session=%s",
