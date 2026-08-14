@@ -1520,8 +1520,16 @@ class DesignLoop:
                     session_key,
                     sender,
                 )
-            elif already_recorded and have_checked is not True:
-                # Untick (False) or owner removal (None) — ADR-19 / §10.2.
+            elif (
+                already_recorded
+                and have_checked is not True
+                and checkbox_is_checked(
+                    (changes.get("body") or {}).get("from") or "",
+                    strict=True,
+                )
+                is True
+            ):
+                # This edit removed a ticked box (untick or delete). ADR-19.
                 self.store.update_session_fields(session_key, verified_at=None)
                 log.info(
                     "verification checkbox cleared session=%s sender=%s checked=%s",
