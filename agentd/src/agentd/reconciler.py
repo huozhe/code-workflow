@@ -24,12 +24,17 @@ CONTAINER_AGE_FLOOR_S = 10 * 60
 INFLIGHT_TURN_MAX_AGE_S = 900  # matches gateway turn_deadline_s default
 RECONCILE_INTERVAL_S = 5 * 60
 SYNTHESIS_CAP = 50
+RESUME_MAX_AGE_S = 3600
+NON_RUNNING_STATES = frozenset({"PAUSED_HUMAN", "TEARDOWN", "CLOSED"})
+RESUME_MAX_ATTEMPTS = 2
 
 ListContainers = Callable[[], list[dict[str, Any]]]
 RemoveContainer = Callable[[str], None]
 NudgeFn = Callable[[], None]
 FetchSnapshot = Callable[[dict[str, Any]], dict[str, Any] | None]
 EscalateFn = Callable[..., None]
+ResumeTurnFn = Callable[[dict[str, Any]], None]
+NotifyMissedFn = Callable[[str, list[dict[str, Any]]], None]
 
 
 def pragma_integrity_check(db_path: Path) -> str:
@@ -134,6 +139,9 @@ class Reconciler:
         nudge: NudgeFn | None = None,
         fetch_snapshot: FetchSnapshot | None = None,
         escalate: EscalateFn | None = None,
+        resume_turn: ResumeTurnFn | None = None,
+        notify_missed: NotifyMissedFn | None = None,
+        resume_max_age_s: int = RESUME_MAX_AGE_S,
         interval_s: float = RECONCILE_INTERVAL_S,
         now_fn: Callable[[], int] | None = None,
     ) -> None:
@@ -143,10 +151,14 @@ class Reconciler:
         self.nudge = nudge
         self.fetch_snapshot = fetch_snapshot
         self.escalate = escalate
+        self.resume_turn = resume_turn
+        self.notify_missed = notify_missed
+        self.resume_max_age_s = int(resume_max_age_s)
         self.interval_s = interval_s
         self._now = now_fn or (lambda: int(time.time()))
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._resuming: set[str] = set()
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -176,7 +188,7 @@ class Reconciler:
         log.info(
             "reconcile pass containers=%d kept=%d spared=%d removed=%d cleared=%d "
             "open_turns=%d closed_live=%d nodes=%d synthesized=%d capped=%d "
-            "adopted=%d escalated=%d in %dms",
+            "adopted=%d escalated=%d retired=%d resumed=%d in %dms",
             containers,
             kept,
             len(report["spared"]),
@@ -189,6 +201,8 @@ class Reconciler:
             int(report.get("capped") or 0),
             int(report.get("adopted") or 0),
             int(report.get("escalated") or 0),
+            int(report.get("retired") or 0),
+            int(report.get("resumed") or 0),
             ms,
         )
 
@@ -209,6 +223,8 @@ class Reconciler:
             "adopted": 0,
             "escalated": 0,
             "holds_lifted": 0,
+            "retired": 0,
+            "resumed": 0,
         }
         for row in report["closed_live"]:
             sk = str(row.get("session_key") or "")
@@ -221,6 +237,7 @@ class Reconciler:
             log.exception("container inventory failed — no removals this pass")
             report["inventory_error"] = True
             self._sweep_github(report, dry_run=dry_run)
+            self._handle_open_turns(report, dry_run=dry_run)
             if not dry_run and self.nudge:
                 self.nudge()
             self._log_pass(report, containers=0, kept=0, started=t0)
@@ -293,10 +310,109 @@ class Reconciler:
                     log.info("reconcile cleared stale runner project=%s", pk)
 
         self._sweep_github(report, dry_run=dry_run)
+        self._handle_open_turns(report, dry_run=dry_run)
         if not dry_run and self.nudge:
             self.nudge()
         self._log_pass(report, containers=len(containers), kept=n_kept, started=t0)
         return report
+
+    def _handle_open_turns(self, report: dict[str, Any], *, dry_run: bool) -> None:
+        now = int(self._now())
+        for turn in self.store.list_open_turns():
+            tid = str(turn.get("turn_id") or "")
+            if not tid:
+                continue
+            try:
+                self._apply_open_turn(turn, report, now=now, dry_run=dry_run)
+            except Exception:
+                log.exception("open-turn handle failed turn=%s", tid)
+        report["open_turns"] = self.store.list_open_turns()
+
+    def _apply_open_turn(
+        self,
+        turn: dict[str, Any],
+        report: dict[str, Any],
+        *,
+        now: int,
+        dry_run: bool,
+    ) -> None:
+        tid = str(turn["turn_id"])
+        sk = str(turn.get("session_key") or "")
+        state = str(turn.get("session_state") or "")
+        started = int(turn.get("started_at") or 0)
+        age = now - started if started > 0 else self.resume_max_age_s + 1
+        attempts = int(turn.get("resume_attempts") or 0)
+        not_running = state in NON_RUNNING_STATES or not state
+        too_old = age >= self.resume_max_age_s
+        if not_running or too_old:
+            reason = (
+                f"session {state or 'unknown'} is not running"
+                if not_running
+                else f"age {age}s >= resume_max_age_s {self.resume_max_age_s}"
+            )
+            report["retired"] = int(report["retired"]) + 1
+            if dry_run:
+                return
+            self._retire_turn(turn, reason, escalate=False)
+            return
+
+        if tid in self._resuming:
+            return
+        if attempts >= RESUME_MAX_ATTEMPTS:
+            report["retired"] = int(report["retired"]) + 1
+            if dry_run:
+                return
+            self._retire_turn(
+                turn, "resume failed twice", escalate=True
+            )
+            return
+
+        report["resumed"] = int(report["resumed"]) + 1
+        if dry_run or self.resume_turn is None:
+            return
+        self._resuming.add(tid)
+        n = self.store.mark_turn_resuming(tid)
+        try:
+            self.resume_turn(dict(turn))
+        except Exception:
+            log.exception("turn.resume failed turn=%s", tid)
+            self.store.clear_turn_resuming(tid)
+            if n >= RESUME_MAX_ATTEMPTS:
+                report["retired"] = int(report["retired"]) + 1
+                report["resumed"] = int(report["resumed"]) - 1
+                self._retire_turn(turn, "resume failed twice", escalate=True)
+        finally:
+            self._resuming.discard(tid)
+
+    def _retire_turn(
+        self, turn: dict[str, Any], reason: str, *, escalate: bool
+    ) -> None:
+        tid = str(turn["turn_id"])
+        sk = str(turn.get("session_key") or "")
+        self.store.finish_turn(
+            tid,
+            ended_at=int(self._now()),
+            status="interrupted",
+            summary=reason[:500],
+        )
+        log.warning("reconcile retired turn=%s session=%s reason=%s", tid, sk, reason)
+        notice = {
+            "turn_id": tid,
+            "session_key": sk,
+            "role": turn.get("role"),
+            "reason": reason,
+        }
+        if self.notify_missed and sk:
+            try:
+                self.notify_missed(sk, [notice])
+            except Exception:
+                log.exception("notify_missed failed session=%s", sk)
+        if escalate and self.escalate and sk:
+            self.escalate(
+                sk,
+                f"interrupted turn {tid} retired after failed resume: {reason}",
+                hold=False,
+            )
 
     def _sweep_github(self, report: dict[str, Any], *, dry_run: bool) -> None:
         if self.fetch_snapshot is None:

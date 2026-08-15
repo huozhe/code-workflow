@@ -124,6 +124,15 @@ def create_app(
                     nudge=state.nudge.set,
                     fetch_snapshot=_fetch,
                     escalate=_escalate,
+                    resume_turn=(
+                        design_loop.resume_interrupted_turn
+                        if design_loop is not None
+                        else None
+                    ),
+                    notify_missed=(
+                        design_loop.report_missed if design_loop is not None else None
+                    ),
+                    resume_max_age_s=config.resume_max_age_s,
                 )
                 state.reconciler.start()
             except Exception:

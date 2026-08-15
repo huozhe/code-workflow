@@ -560,6 +560,11 @@ class SessionSupervisor:
         host_port = _host_port_from_inspect(cid)
         self._wait_rpc(host_port, bearer, timeout_s=30)
         tokens = self._load_tokens()
+        retired = [
+            {"turn_id": t.get("turn_id"), "reason": t.get("summary")}
+            for t in self.store.list_turns(session_key)
+            if t.get("status") == "interrupted"
+        ]
         with RunnerClient("127.0.0.1", host_port, bearer) as cli:
             cli.call(
                 "session.resume",
@@ -572,6 +577,7 @@ class SessionSupervisor:
                     },
                     "tokens": tokens,
                     "model_credentials": self._load_model_credentials(),
+                    "missed": {"retired_turns": retired[-10:]},
                 },
             )
             cli.call("health.ping")

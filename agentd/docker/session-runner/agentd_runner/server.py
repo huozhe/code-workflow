@@ -30,6 +30,7 @@ class RunnerState:
         self.project_key: str | None = None
         self.roles: dict[str, str] = {}  # role -> github login
         self.initialized = False
+        self.missed: dict[str, Any] = {}
         self._lock = threading.Lock()
         # One CLI conversation per role — serialize turns project-wide (#20).
         self._role_locks: dict[str, threading.Lock] = {
@@ -348,6 +349,9 @@ def handle_request(req: dict[str, Any], authed: bool) -> dict[str, Any]:
         STATE.initialized = True
         rehydrated = {}
         if method == "session.resume":
+            missed = params.get("missed")
+            if isinstance(missed, dict):
+                STATE.missed = missed
             # §6.3 continuity by persistence — load transcript/summary for both roles
             rehydrated = {
                 role: load_rehydration(role) for role in ROLE_UIDS

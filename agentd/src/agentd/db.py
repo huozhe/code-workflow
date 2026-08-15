@@ -15,7 +15,7 @@ log = logging.getLogger("agentd.db")
 
 # Bump when DDL changes require a rebuild. SQLite is a derived cache (ADR-2);
 # mismatch ⇒ wipe + recreate. GitHub remains source of truth (P1).
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 # Schema DDL only — connection pragmas are set separately (see Store.__init__).
 # v2 (#20): runners keyed by project (N sessions : 1 runner); sessions.project_key.
@@ -25,6 +25,7 @@ SCHEMA_VERSION = 8
 # v6 (#39): turns.public_actions JSON; sessions.silent_turns for dead-end stall.
 # v7 (M5-2): sessions.classification — VERIFIED/ABANDONED at issues.closed.
 # v8 (M6-1b / ADR-21): delivery_nodes + sessions.closed_issue_escalated_at.
+# v9 (M6-1c / ADR-22): turns.resume_attempts.
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS deliveries (
   delivery_id TEXT PRIMARY KEY,
@@ -107,6 +108,7 @@ CREATE TABLE IF NOT EXISTS turns (
   status TEXT,
   summary TEXT,
   public_actions TEXT,
+  resume_attempts INTEGER NOT NULL DEFAULT 0,
   FOREIGN KEY (session_key) REFERENCES sessions(session_key) ON DELETE CASCADE
 );
 
@@ -229,6 +231,9 @@ class Store:
         if ver == 7:
             self._migrate_v7_to_v8()
             ver = 8
+        if ver == 8:
+            self._migrate_v8_to_v9()
+            ver = 9
         if ver == SCHEMA_VERSION:
             return
         log.warning(
@@ -422,6 +427,19 @@ class Store:
         self._conn.execute("PRAGMA user_version = 8")
         self._conn.commit()
         log.info("schema migration v7 → v8 complete; user_version=8")
+
+    def _migrate_v8_to_v9(self) -> None:
+        """ADR-22: resume_attempts on turns. Preserve deliveries."""
+        log.info("migrating schema v8 → v9 (turns.resume_attempts)")
+        self._conn.executescript(SCHEMA)
+        tcols = self._table_columns("turns")
+        if tcols and "resume_attempts" not in tcols:
+            self._conn.execute(
+                "ALTER TABLE turns ADD COLUMN resume_attempts INTEGER NOT NULL DEFAULT 0"
+            )
+        self._conn.execute("PRAGMA user_version = 9")
+        self._conn.commit()
+        log.info("schema migration v8 → v9 complete; user_version=9")
 
     def _rebuild_schema(self) -> None:
         tables = self._conn.execute(
@@ -959,6 +977,37 @@ class Store:
             )
             self._conn.commit()
 
+    def mark_turn_resuming(self, turn_id: str) -> int:
+        """Set status=resuming and increment resume_attempts. Returns the new count."""
+        with self._lock:
+            self._conn.execute(
+                """
+                UPDATE turns
+                SET status = 'resuming',
+                    resume_attempts = COALESCE(resume_attempts, 0) + 1
+                WHERE turn_id = ? AND ended_at IS NULL
+                """,
+                (turn_id,),
+            )
+            row = self._conn.execute(
+                "SELECT resume_attempts FROM turns WHERE turn_id = ?",
+                (turn_id,),
+            ).fetchone()
+            self._conn.commit()
+            return int(row["resume_attempts"] if row else 0)
+
+    def clear_turn_resuming(self, turn_id: str) -> None:
+        """Clear in-flight mark after a failed resume so the next pass can retry."""
+        with self._lock:
+            self._conn.execute(
+                """
+                UPDATE turns SET status = NULL
+                WHERE turn_id = ? AND ended_at IS NULL AND status = 'resuming'
+                """,
+                (turn_id,),
+            )
+            self._conn.commit()
+
     def register_artifact(
         self,
         *,
@@ -1163,8 +1212,10 @@ class Store:
         with self._lock:
             rows = self._conn.execute(
                 """
-                SELECT t.turn_id, t.session_key, t.role, t.status, t.started_at
+                SELECT t.turn_id, t.session_key, t.role, t.status, t.started_at,
+                       t.resume_attempts, t.delivery_id, s.state AS session_state
                 FROM turns t
+                LEFT JOIN sessions s ON s.session_key = t.session_key
                 WHERE t.ended_at IS NULL
                 ORDER BY t.started_at ASC
                 """
