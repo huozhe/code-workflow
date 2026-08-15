@@ -462,6 +462,12 @@ class DesignLoop:
 
         # ADR-18: lift sits above the paused defer. Any sender.
         if event == "issues" and action == "reopened":
+            # ADR-21 / #118: every reopen re-arms the closed-issue marker.
+            # Must not nest inside the lift — hold may already be gone.
+            self.store.update_session_fields(
+                session_key, closed_issue_escalated_at=None
+            )
+            sess["closed_issue_escalated_at"] = None
             if self._lift_close_reconcile_hold(
                 session_key=session_key,
                 sess=sess,
