@@ -279,6 +279,41 @@ class DesignLoop:
         self._get_issue = get_issue_fn
         self._patch_issue_body = patch_issue_body_fn
 
+    def process_resuming_turns(self) -> int:
+        """Drain-thread half of ADR-22: run marked resumes with the role lock."""
+        n = 0
+        for turn in self.store.list_resuming_turns():
+            tid = str(turn.get("turn_id") or "")
+            state = str(turn.get("session_state") or "")
+            if not state or state in ("PAUSED_HUMAN", "TEARDOWN", "CLOSED"):
+                # Reconciler owns retire; just drop the handoff mark.
+                self.store.clear_turn_resuming(tid)
+                continue
+            try:
+                if self.resume_interrupted_turn(turn):
+                    n += 1
+            except Exception:
+                log.exception("turn.resume failed turn=%s", tid)
+                attempts = int(turn.get("resume_attempts") or 0)
+                if attempts >= 2:
+                    self.store.finish_turn(
+                        tid,
+                        ended_at=int(time.time()),
+                        status="interrupted",
+                        summary="resume failed twice",
+                    )
+                    sk = str(turn.get("session_key") or "")
+                    if sk:
+                        self._escalate(
+                            sk,
+                            str(turn.get("role") or "developer"),
+                            f"interrupted turn {tid} retired after failed resume",
+                            hold=False,
+                        )
+                else:
+                    self.store.clear_turn_resuming(tid)
+        return n
+
     def process_deferred_batch(self, limit: int = 20) -> int:
         n = 0
         for row in self.store.list_deferred(limit=limit):
@@ -1143,6 +1178,111 @@ class DesignLoop:
             self._gateway_github_token()
             or get_password("claude-bot")
             or get_password("grok-bot")
+        )
+
+    def resume_interrupted_turn(self, turn: dict[str, Any]) -> bool:
+        """ADR-22: re-send the on-disk digest via turn.resume. Raises on RPC fail."""
+        sk = str(turn.get("session_key") or "")
+        turn_id = str(turn.get("turn_id") or "")
+        role = str(turn.get("role") or "")
+        sess = self.store.get_session(sk) or {}
+        repo = str(sess.get("repo") or "")
+        issue_num = int(sess.get("issue_num") or 0)
+        project_key = str(sess.get("project_key") or repo)
+        rkey = _role_key(project_key, role)
+        busy_until = _role_busy_until.get(rkey, 0.0)
+        if busy_until > time.time():
+            return False
+        runner = self.store.get_runner(project_key)
+        if not runner:
+            raise RuntimeError(f"no runner for {project_key}")
+        endpoint = str(runner["endpoint"])
+        host, _, port_s = endpoint.partition(":")
+        bearer = str(runner["token"])
+        role_base = (
+            project_path(self.config.root, repo or project_key)
+            / "sessions"
+            / str(issue_num)
+            / role
+        )
+        digest_path = role_base / "context" / f"digest-{turn_id}.md"
+        if digest_path.is_file():
+            raw = digest_path.read_text(encoding="utf-8")
+            dig: dict[str, Any] = {"kind": "turn.resume", "text": raw[:4000]}
+        else:
+            dig = {"kind": "turn.resume", "note": "digest file missing"}
+            digest_path.parent.mkdir(parents=True, exist_ok=True)
+            digest_path.write_text(digest_to_markdown(dig), encoding="utf-8")
+        deadline_s = int(self.config.turn_deadline_s)
+        started = time.time()
+        call_started = False
+        lock = _lock_for_project_role(project_key, role)
+        try:
+            with lock:
+                with RunnerClient(
+                    host,
+                    int(port_s),
+                    bearer,
+                    timeout_s=float(self.config.rpc_timeout_s),
+                ) as cli:
+                    call_started = True
+                    result = cli.call(
+                        "turn.resume",
+                        {
+                            "turn_id": turn_id,
+                            "role": role,
+                            "session_state": str(sess.get("state") or ""),
+                            "deadline_s": deadline_s,
+                            "event": dig,
+                            "context": {
+                                "worktree": (
+                                    f"/srv/agentd/sessions/{issue_num}/"
+                                    f"{role}/worktrees/issue-{issue_num}"
+                                ),
+                                "digest": (
+                                    f"/srv/agentd/sessions/{issue_num}/"
+                                    f"{role}/context/digest-{turn_id}.md"
+                                ),
+                                "session_key": sk,
+                                "project_key": project_key,
+                                "issue_num": issue_num,
+                            },
+                            "budget": {},
+                        },
+                    )
+        except Exception as exc:
+            if call_started and _is_rpc_timeout(exc):
+                _role_busy_until[rkey] = started + float(deadline_s)
+            raise
+        ended = int(time.time())
+        status = str((result or {}).get("status") or "done")
+        summary = str((result or {}).get("summary") or "")[:2000]
+        self.store.finish_turn(
+            turn_id, ended_at=ended, status=status, summary=summary
+        )
+        if status not in ("gateway_timeout", "quota_exhausted", "role_busy"):
+            fresh = self.store.get_session(sk) or {}
+            budget = BudgetState(
+                turn_count=int(fresh.get("turn_count") or 0),
+                consec_agent_turns=int(fresh.get("consec_agent_turns") or 0),
+                review_rounds=int(fresh.get("review_rounds") or 0),
+            )
+            budget.after_agent_turn()
+            self.store.update_session_fields(
+                sk,
+                turn_count=budget.turn_count,
+                consec_agent_turns=budget.consec_agent_turns,
+            )
+        return True
+
+    def report_missed(
+        self, session_key: str, notices: list[dict[str, Any]]
+    ) -> None:
+        """Log retired-turn notices. session.resume carries them on next attach."""
+        log.warning(
+            "retired turns session=%s notices=%s",
+            session_key,
+            notices,
         )
 
     def _observe_stall_signals(

@@ -268,3 +268,52 @@ def test_insert_delivery_indexes_node_ids(tmp_path: Path) -> None:
     assert store.has_delivery_node("IC_new")
     assert store.has_delivery_node("I_new")
     store.close()
+
+
+def test_v8_to_v9_adds_resume_attempts(tmp_path: Path) -> None:
+    import sqlite3
+
+    path = tmp_path / "state.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE deliveries (
+          delivery_id TEXT PRIMARY KEY,
+          event TEXT NOT NULL,
+          action TEXT,
+          repo TEXT NOT NULL DEFAULT '',
+          issue_num INTEGER,
+          sender TEXT NOT NULL DEFAULT '',
+          received_at INTEGER NOT NULL,
+          payload BLOB NOT NULL,
+          status TEXT NOT NULL DEFAULT 'queued'
+        );
+        CREATE TABLE turns (
+          turn_id TEXT PRIMARY KEY,
+          session_key TEXT NOT NULL,
+          role TEXT NOT NULL,
+          delivery_id TEXT,
+          started_at INTEGER NOT NULL,
+          ended_at INTEGER,
+          status TEXT,
+          summary TEXT,
+          public_actions TEXT
+        );
+        CREATE TABLE circuit_breaker (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          disk_paused INTEGER NOT NULL DEFAULT 0,
+          reason TEXT,
+          updated_at INTEGER NOT NULL
+        );
+        INSERT INTO circuit_breaker(id, disk_paused, reason, updated_at)
+        VALUES (1, 0, NULL, 0);
+        PRAGMA user_version = 8;
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    store = Store(path)
+    assert store._schema_version() == SCHEMA_VERSION
+    assert "resume_attempts" in store._table_columns("turns")
+    store.close()

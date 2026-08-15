@@ -210,6 +210,27 @@ def build_prompt(params: dict[str, Any], rehydrate: dict[str, Any] | None) -> st
         "Invariant: no implementation code before DESIGN_APPROVED. "
         "Until then, design artifacts only (RFC / Design PR)."
     )
+    if params.get("resuming"):
+        parts.append(
+            "This is a turn.resume. The previous attempt was interrupted. "
+            "Establish actual state from git status, git log, the worktree, "
+            "and PR state on GitHub before deciding what remains. "
+            "Do not replay work that already landed."
+        )
+    missed = params.get("missed")
+    if not isinstance(missed, dict):
+        try:
+            from agentd_runner.server import STATE
+
+            missed = getattr(STATE, "missed", None) or {}
+        except Exception:
+            missed = {}
+    retired = missed.get("retired_turns") if isinstance(missed, dict) else None
+    if retired:
+        parts.append(
+            "Your previous turn was interrupted and was not resumed. "
+            f"Retired: {json.dumps(retired)[:2000]}"
+        )
     parts.append(f"Event: {json.dumps(digest, indent=2)[:4000]}")
     # Cwd decision (a) #25: CLI lives at project root; worktree is named per turn.
     worktree = (params.get("context") or {}).get("worktree")

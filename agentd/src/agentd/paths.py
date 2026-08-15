@@ -44,6 +44,7 @@ gateway:
   docker_wait_timeout_s: 300
   turn_deadline_s: 900          # per-turn deadline sent to the runner (§14.2)
   rpc_timeout_grace_s: 60       # RPC read = turn_deadline_s + grace (#34)
+  resume_max_age_s: 3600        # interrupted-turn resume window (ADR-22)
 
 ingress:
   backend: funnel   # funnel | cloudflared | ngrok | smee | none

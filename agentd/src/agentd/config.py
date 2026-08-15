@@ -58,6 +58,11 @@ class Config:
         return float(self.turn_deadline_s + self.rpc_timeout_grace_s)
 
     @property
+    def resume_max_age_s(self) -> int:
+        """Interrupted-turn resume window (ADR-22). Default 3600; not 4× live deadline."""
+        return int(self.raw.get("gateway", {}).get("resume_max_age_s", 3600))
+
+    @property
     def intake_mode(self) -> str:
         return str(self.raw.get("intake", {}).get("mode", "label"))
 
