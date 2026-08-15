@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 import sys
 from pathlib import Path
 
@@ -172,6 +171,242 @@ def test_retire_notifies_session_resume(tmp_path: Path) -> None:
     assert missed
     assert missed[0][0] == sk
     assert missed[0][1][0]["turn_id"] == "t-open"
+    store.close()
+
+
+def test_drain_skips_paused_session(tmp_path: Path) -> None:
+    from agentd.config import Config
+    from agentd.design_loop import DesignLoop
+
+    store = Store(tmp_path / "state.db")
+    sk = _sess(store, state="IMPLEMENTING")
+    store.upsert_runner(
+        "huozhe/code-workflow",
+        container_id="c",
+        endpoint="127.0.0.1:9",
+        token="t",
+        tier="hot",
+    )
+    now = 10_000
+    _turn(store, sk, started_at=now - 30)
+    _rec(store, now=now)
+    store.update_session_fields(sk, state="PAUSED_HUMAN")
+    loop = DesignLoop(store, Config(), dispatch_turns=False, gateway_token="")
+    seen: list = []
+    loop.resume_interrupted_turn = lambda t: seen.append(t)  # type: ignore[method-assign]
+    n = loop.process_resuming_turns()
+    assert n == 0
+    assert seen == []
+    row = next(t for t in store.list_turns(sk))
+    assert row["ended_at"] is None
+    assert row["status"] is None
+    store.close()
+
+
+def test_drain_runs_marked_resume(tmp_path: Path) -> None:
+    import agentd.design_loop as dl
+    from agentd.config import Config
+    from agentd.design_loop import DesignLoop
+
+    store = Store(tmp_path / "state.db")
+    sk = _sess(store, state="IMPLEMENTING")
+    store.upsert_runner(
+        "huozhe/code-workflow",
+        container_id="c",
+        endpoint="127.0.0.1:9",
+        token="t",
+        tier="hot",
+    )
+    now = 10_000
+    _turn(store, sk, started_at=now - 30)
+    store.mark_turn_resuming("t-open")
+    calls: list = []
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def call(self, method, params=None):
+            calls.append(method)
+            return {"status": "done", "summary": "ok"}
+
+    orig = dl.RunnerClient
+    dl.RunnerClient = FakeClient
+    try:
+        loop = DesignLoop(store, Config(), dispatch_turns=False, gateway_token="")
+        n = loop.process_resuming_turns()
+    finally:
+        dl.RunnerClient = orig
+    assert n == 1
+    assert calls == ["turn.resume"]
+    row = next(t for t in store.list_turns(sk))
+    assert row["status"] == "done"
+    store.close()
+
+
+def test_drain_once_runs_resuming_turns(tmp_path: Path) -> None:
+    import threading
+
+    from agentd.config import Config
+    from agentd.dispatcher import Dispatcher
+
+    store = Store(tmp_path / "state.db")
+    seen: list[int] = []
+
+    class _Loop:
+        def process_resuming_turns(self) -> int:
+            seen.append(1)
+            return 1
+
+        def process_deferred_batch(self, limit: int = 20) -> int:
+            return 0
+
+    d = Dispatcher(store, Config(), threading.Event(), design_loop=_Loop())
+    assert d.drain_once() == 1
+    assert seen == [1]
+    store.close()
+
+
+def test_resume_takes_role_lock_and_reads_budget_fresh(tmp_path: Path) -> None:
+    import agentd.design_loop as dl
+    from agentd.config import Config
+    from agentd.design_loop import DesignLoop, _lock_for_project_role
+
+    store = Store(tmp_path / "state.db")
+    sk = _sess(store, state="IMPLEMENTING")
+    store.update_session_fields(sk, turn_count=10)
+    store.upsert_runner(
+        "huozhe/code-workflow",
+        container_id="c",
+        endpoint="127.0.0.1:9",
+        token="t",
+        tier="hot",
+    )
+    now = 10_000
+    _turn(store, sk, started_at=now - 30)
+    store.mark_turn_resuming("t-open")
+    locks: list = []
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def call(self, method, params=None):
+            lock = _lock_for_project_role("huozhe/code-workflow", "developer")
+            locks.append(lock.locked())
+            store.update_session_fields(sk, turn_count=12)
+            return {"status": "done", "summary": "ok"}
+
+    orig = dl.RunnerClient
+    dl.RunnerClient = FakeClient
+    try:
+        loop = DesignLoop(store, Config(), dispatch_turns=False, gateway_token="")
+        loop.resume_interrupted_turn(
+            next(t for t in store.list_resuming_turns())
+        )
+    finally:
+        dl.RunnerClient = orig
+    assert locks == [True]
+    assert store.get_session(sk)["turn_count"] == 13
+    store.close()
+
+
+def test_resume_timeout_sets_busy_until(tmp_path: Path) -> None:
+    import time
+
+    import agentd.design_loop as dl
+    from agentd.config import Config
+    from agentd.design_loop import DesignLoop, _role_busy_until, _role_key
+
+    store = Store(tmp_path / "state.db")
+    sk = _sess(store, state="IMPLEMENTING")
+    store.upsert_runner(
+        "huozhe/code-workflow",
+        container_id="c",
+        endpoint="127.0.0.1:9",
+        token="t",
+        tier="hot",
+    )
+    _turn(store, sk, started_at=int(time.time()) - 30)
+    store.mark_turn_resuming("t-open")
+
+    class Boom:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def call(self, method, params=None):
+            raise TimeoutError("timed out")
+
+    orig = dl.RunnerClient
+    dl.RunnerClient = Boom
+    try:
+        loop = DesignLoop(
+            store,
+            Config(raw={"gateway": {"turn_deadline_s": 30}}),
+            dispatch_turns=False,
+            gateway_token="",
+        )
+        try:
+            loop.resume_interrupted_turn(next(t for t in store.list_resuming_turns()))
+        except TimeoutError:
+            pass
+        else:
+            raise AssertionError("expected timeout")
+    finally:
+        dl.RunnerClient = orig
+    rkey = _role_key("huozhe/code-workflow", "developer")
+    assert _role_busy_until.get(rkey, 0) > time.time()
+    _role_busy_until.clear()
+    store.close()
+
+
+def test_drain_busy_is_not_counted(tmp_path: Path) -> None:
+    import time
+
+    from agentd.config import Config
+    from agentd.design_loop import DesignLoop, _role_busy_until, _role_key
+
+    store = Store(tmp_path / "state.db")
+    sk = _sess(store, state="IMPLEMENTING")
+    store.upsert_runner(
+        "huozhe/code-workflow",
+        container_id="c",
+        endpoint="127.0.0.1:9",
+        token="t",
+        tier="hot",
+    )
+    now = 10_000
+    _turn(store, sk, started_at=now - 30)
+    store.mark_turn_resuming("t-open")
+    rkey = _role_key("huozhe/code-workflow", "developer")
+    _role_busy_until[rkey] = time.time() + 60
+    try:
+        loop = DesignLoop(store, Config(), dispatch_turns=False, gateway_token="")
+        n = loop.process_resuming_turns()
+    finally:
+        _role_busy_until.clear()
+    assert n == 0
+    row = next(t for t in store.list_turns(sk))
+    assert row["status"] == "resuming"
+    assert row["ended_at"] is None
     store.close()
 
 

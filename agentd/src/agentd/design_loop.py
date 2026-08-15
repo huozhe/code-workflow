@@ -284,9 +284,14 @@ class DesignLoop:
         n = 0
         for turn in self.store.list_resuming_turns():
             tid = str(turn.get("turn_id") or "")
+            state = str(turn.get("session_state") or "")
+            if not state or state in ("PAUSED_HUMAN", "TEARDOWN", "CLOSED"):
+                # Reconciler owns retire; just drop the handoff mark.
+                self.store.clear_turn_resuming(tid)
+                continue
             try:
-                self.resume_interrupted_turn(turn)
-                n += 1
+                if self.resume_interrupted_turn(turn):
+                    n += 1
             except Exception:
                 log.exception("turn.resume failed turn=%s", tid)
                 attempts = int(turn.get("resume_attempts") or 0)
@@ -1175,7 +1180,7 @@ class DesignLoop:
             or get_password("grok-bot")
         )
 
-    def resume_interrupted_turn(self, turn: dict[str, Any]) -> None:
+    def resume_interrupted_turn(self, turn: dict[str, Any]) -> bool:
         """ADR-22: re-send the on-disk digest via turn.resume. Raises on RPC fail."""
         sk = str(turn.get("session_key") or "")
         turn_id = str(turn.get("turn_id") or "")
@@ -1187,7 +1192,7 @@ class DesignLoop:
         rkey = _role_key(project_key, role)
         busy_until = _role_busy_until.get(rkey, 0.0)
         if busy_until > time.time():
-            return
+            return False
         runner = self.store.get_runner(project_key)
         if not runner:
             raise RuntimeError(f"no runner for {project_key}")
@@ -1268,6 +1273,7 @@ class DesignLoop:
                 turn_count=budget.turn_count,
                 consec_agent_turns=budget.consec_agent_turns,
             )
+        return True
 
     def report_missed(
         self, session_key: str, notices: list[dict[str, Any]]
