@@ -279,6 +279,36 @@ class DesignLoop:
         self._get_issue = get_issue_fn
         self._patch_issue_body = patch_issue_body_fn
 
+    def process_resuming_turns(self) -> int:
+        """Drain-thread half of ADR-22: run marked resumes with the role lock."""
+        n = 0
+        for turn in self.store.list_resuming_turns():
+            tid = str(turn.get("turn_id") or "")
+            try:
+                self.resume_interrupted_turn(turn)
+                n += 1
+            except Exception:
+                log.exception("turn.resume failed turn=%s", tid)
+                attempts = int(turn.get("resume_attempts") or 0)
+                if attempts >= 2:
+                    self.store.finish_turn(
+                        tid,
+                        ended_at=int(time.time()),
+                        status="interrupted",
+                        summary="resume failed twice",
+                    )
+                    sk = str(turn.get("session_key") or "")
+                    if sk:
+                        self._escalate(
+                            sk,
+                            str(turn.get("role") or "developer"),
+                            f"interrupted turn {tid} retired after failed resume",
+                            hold=False,
+                        )
+                else:
+                    self.store.clear_turn_resuming(tid)
+        return n
+
     def process_deferred_batch(self, limit: int = 20) -> int:
         n = 0
         for row in self.store.list_deferred(limit=limit):
@@ -1154,6 +1184,10 @@ class DesignLoop:
         repo = str(sess.get("repo") or "")
         issue_num = int(sess.get("issue_num") or 0)
         project_key = str(sess.get("project_key") or repo)
+        rkey = _role_key(project_key, role)
+        busy_until = _role_busy_until.get(rkey, 0.0)
+        if busy_until > time.time():
+            return
         runner = self.store.get_runner(project_key)
         if not runner:
             raise RuntimeError(f"no runner for {project_key}")
@@ -1175,33 +1209,46 @@ class DesignLoop:
             digest_path.parent.mkdir(parents=True, exist_ok=True)
             digest_path.write_text(digest_to_markdown(dig), encoding="utf-8")
         deadline_s = int(self.config.turn_deadline_s)
-        with RunnerClient(
-            host, int(port_s), bearer, timeout_s=float(self.config.rpc_timeout_s)
-        ) as cli:
-            result = cli.call(
-                "turn.resume",
-                {
-                    "turn_id": turn_id,
-                    "role": role,
-                    "session_state": str(sess.get("state") or ""),
-                    "deadline_s": deadline_s,
-                    "event": dig,
-                    "context": {
-                        "worktree": (
-                            f"/srv/agentd/sessions/{issue_num}/"
-                            f"{role}/worktrees/issue-{issue_num}"
-                        ),
-                        "digest": (
-                            f"/srv/agentd/sessions/{issue_num}/"
-                            f"{role}/context/digest-{turn_id}.md"
-                        ),
-                        "session_key": sk,
-                        "project_key": project_key,
-                        "issue_num": issue_num,
-                    },
-                    "budget": {},
-                },
-            )
+        started = time.time()
+        call_started = False
+        lock = _lock_for_project_role(project_key, role)
+        try:
+            with lock:
+                with RunnerClient(
+                    host,
+                    int(port_s),
+                    bearer,
+                    timeout_s=float(self.config.rpc_timeout_s),
+                ) as cli:
+                    call_started = True
+                    result = cli.call(
+                        "turn.resume",
+                        {
+                            "turn_id": turn_id,
+                            "role": role,
+                            "session_state": str(sess.get("state") or ""),
+                            "deadline_s": deadline_s,
+                            "event": dig,
+                            "context": {
+                                "worktree": (
+                                    f"/srv/agentd/sessions/{issue_num}/"
+                                    f"{role}/worktrees/issue-{issue_num}"
+                                ),
+                                "digest": (
+                                    f"/srv/agentd/sessions/{issue_num}/"
+                                    f"{role}/context/digest-{turn_id}.md"
+                                ),
+                                "session_key": sk,
+                                "project_key": project_key,
+                                "issue_num": issue_num,
+                            },
+                            "budget": {},
+                        },
+                    )
+        except Exception as exc:
+            if call_started and _is_rpc_timeout(exc):
+                _role_busy_until[rkey] = started + float(deadline_s)
+            raise
         ended = int(time.time())
         status = str((result or {}).get("status") or "done")
         summary = str((result or {}).get("summary") or "")[:2000]
@@ -1209,10 +1256,11 @@ class DesignLoop:
             turn_id, ended_at=ended, status=status, summary=summary
         )
         if status not in ("gateway_timeout", "quota_exhausted", "role_busy"):
+            fresh = self.store.get_session(sk) or {}
             budget = BudgetState(
-                turn_count=int(sess.get("turn_count") or 0),
-                consec_agent_turns=int(sess.get("consec_agent_turns") or 0),
-                review_rounds=int(sess.get("review_rounds") or 0),
+                turn_count=int(fresh.get("turn_count") or 0),
+                consec_agent_turns=int(fresh.get("consec_agent_turns") or 0),
+                review_rounds=int(fresh.get("review_rounds") or 0),
             )
             budget.after_agent_turn()
             self.store.update_session_fields(

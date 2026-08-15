@@ -1222,6 +1222,21 @@ class Store:
             ).fetchall()
             return [dict(r) for r in rows]
 
+    def list_resuming_turns(self) -> list[dict[str, Any]]:
+        """Open turns handed to the drain thread (status=resuming)."""
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT t.turn_id, t.session_key, t.role, t.status, t.started_at,
+                       t.resume_attempts, t.delivery_id, s.state AS session_state
+                FROM turns t
+                LEFT JOIN sessions s ON s.session_key = t.session_key
+                WHERE t.ended_at IS NULL AND t.status = 'resuming'
+                ORDER BY t.started_at ASC
+                """
+            ).fetchall()
+            return [dict(r) for r in rows]
+
     def list_live_sessions_with_closed_delivery(self) -> list[dict[str, Any]]:
         """Live sessions whose ledger has a routed issues.closed (local record)."""
         with self._lock:

@@ -62,25 +62,12 @@ def _rec(
     *,
     now: int,
     dry_run: bool = False,
-    resumes: list | None = None,
-    resume_err: Exception | None = None,
     missed: list | None = None,
 ) -> tuple[Reconciler, dict]:
-    calls: list = resumes if resumes is not None else []
-
-    def resume(turn: dict) -> None:
-        calls.append(dict(turn))
-        if resume_err is not None:
-            raise resume_err
-        store.finish_turn(
-            str(turn["turn_id"]), ended_at=now, status="done", summary="resumed"
-        )
-
     rec = Reconciler(
         store,
         list_containers=lambda: [],
         remove_container=lambda _c: None,
-        resume_turn=resume,
         notify_missed=lambda sk, n: missed.append((sk, n)) if missed is not None else None,
         now_fn=lambda: now,
         resume_max_age_s=RESUME_MAX_AGE_S,
@@ -92,9 +79,7 @@ def test_old_turn_retires_without_resume(tmp_path: Path) -> None:
     store = Store(tmp_path / "state.db")
     sk = _sess(store)
     _turn(store, sk, started_at=1)
-    resumes: list = []
-    _, report = _rec(store, now=1 + RESUME_MAX_AGE_S + 10, resumes=resumes)
-    assert resumes == []
+    _, report = _rec(store, now=1 + RESUME_MAX_AGE_S + 10)
     assert report["retired"] == 1
     assert report["resumed"] == 0
     row = next(t for t in store.list_turns(sk) if t["turn_id"] == "t-open")
@@ -110,53 +95,61 @@ def test_paused_session_retires_young_turn(tmp_path: Path) -> None:
     sk = _sess(store, state="PAUSED_HUMAN")
     now = 10_000
     _turn(store, sk, started_at=now - 30)
-    resumes: list = []
-    _rec(store, now=now, resumes=resumes)
-    assert resumes == []
+    _rec(store, now=now)
     row = next(t for t in store.list_turns(sk))
     assert row["status"] == "interrupted"
     store.close()
 
 
-def test_young_running_turn_resumes_once(tmp_path: Path) -> None:
+def test_young_running_turn_is_marked_not_dispatched(tmp_path: Path) -> None:
+    """Reconciler hands off; it does not run the RPC (ADR-20)."""
     store = Store(tmp_path / "state.db")
     sk = _sess(store, state="IMPLEMENTING")
     now = 10_000
     _turn(store, sk, started_at=now - 30)
-    resumes: list = []
-    rec, report = _rec(store, now=now, resumes=resumes)
+    rec, report = _rec(store, now=now)
     assert report["resumed"] == 1
     assert report["retired"] == 0
-    assert len(resumes) == 1
-    assert resumes[0]["turn_id"] == "t-open"
+    open_row = next(t for t in store.list_open_turns())
+    assert open_row["status"] == "resuming"
+    assert int(open_row["resume_attempts"] or 0) == 1
     rec.reconcile_once()
     rec.reconcile_once()
-    assert len(resumes) == 1
+    open_row = next(t for t in store.list_open_turns())
+    assert int(open_row["resume_attempts"] or 0) == 1
     store.close()
 
 
 def test_resume_fails_twice_then_retires(tmp_path: Path) -> None:
+    from agentd.config import Config
+    from agentd.design_loop import DesignLoop
+
     store = Store(tmp_path / "state.db")
     sk = _sess(store, state="IMPLEMENTING")
     now = 10_000
     _turn(store, sk, started_at=now - 30)
-    esc: list = []
     rec = Reconciler(
         store,
         list_containers=lambda: [],
         remove_container=lambda _c: None,
-        resume_turn=lambda _t: (_ for _ in ()).throw(RuntimeError("rpc down")),
-        escalate=lambda sk, reason, **kw: esc.append((sk, reason)),
         now_fn=lambda: now,
         resume_max_age_s=RESUME_MAX_AGE_S,
     )
+    loop = DesignLoop(store, Config(), dispatch_turns=False, gateway_token="")
+
+    def boom(_turn: dict) -> None:
+        raise RuntimeError("rpc down")
+
+    loop.resume_interrupted_turn = boom  # type: ignore[method-assign]
     rec.reconcile_once()
-    assert store.list_open_turns()
+    assert next(t for t in store.list_open_turns())["status"] == "resuming"
+    loop.process_resuming_turns()
     rec.reconcile_once()
+    loop.process_resuming_turns()
     row = next(t for t in store.list_turns(sk))
     assert row["status"] == "interrupted"
     assert row["ended_at"] is not None
-    assert esc
+    assert store.get_session(sk)["state"] == "PAUSED_HUMAN"
     store.close()
 
 
@@ -164,12 +157,8 @@ def test_dry_run_does_not_retire_or_resume(tmp_path: Path) -> None:
     store = Store(tmp_path / "state.db")
     sk = _sess(store)
     _turn(store, sk, started_at=1)
-    resumes: list = []
-    _, report = _rec(
-        store, now=1 + RESUME_MAX_AGE_S + 10, resumes=resumes, dry_run=True
-    )
+    _, report = _rec(store, now=1 + RESUME_MAX_AGE_S + 10, dry_run=True)
     assert report["retired"] == 1
-    assert resumes == []
     assert store.list_open_turns()
     store.close()
 

@@ -70,6 +70,7 @@ class Dispatcher:
         # M3: promote deferred deliveries into sessions / turns
         if self.design_loop is not None and not self.store.is_disk_paused():
             try:
+                n += self.design_loop.process_resuming_turns()
                 n += self.design_loop.process_deferred_batch(limit=20)
             except Exception:
                 log.exception("design_loop batch failed")

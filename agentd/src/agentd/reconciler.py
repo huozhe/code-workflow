@@ -158,7 +158,6 @@ class Reconciler:
         self._now = now_fn or (lambda: int(time.time()))
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
-        self._resuming: set[str] = set()
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -356,7 +355,7 @@ class Reconciler:
             self._retire_turn(turn, reason, escalate=False)
             return
 
-        if tid in self._resuming:
+        if str(turn.get("status") or "") == "resuming":
             return
         if attempts >= RESUME_MAX_ATTEMPTS:
             report["retired"] = int(report["retired"]) + 1
@@ -367,22 +366,11 @@ class Reconciler:
             )
             return
 
-        report["resumed"] = int(report["resumed"]) + 1
-        if dry_run or self.resume_turn is None:
+        if dry_run:
+            report["resumed"] = int(report["resumed"]) + 1
             return
-        self._resuming.add(tid)
-        n = self.store.mark_turn_resuming(tid)
-        try:
-            self.resume_turn(dict(turn))
-        except Exception:
-            log.exception("turn.resume failed turn=%s", tid)
-            self.store.clear_turn_resuming(tid)
-            if n >= RESUME_MAX_ATTEMPTS:
-                report["retired"] = int(report["retired"]) + 1
-                report["resumed"] = int(report["resumed"]) - 1
-                self._retire_turn(turn, "resume failed twice", escalate=True)
-        finally:
-            self._resuming.discard(tid)
+        self.store.mark_turn_resuming(tid)
+        report["resumed"] = int(report["resumed"]) + 1
 
     def _retire_turn(
         self, turn: dict[str, Any], reason: str, *, escalate: bool
