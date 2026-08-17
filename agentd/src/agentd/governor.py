@@ -67,6 +67,7 @@ class ResourceGovernor:
         interval_s: float = 30.0,
         notify: NotifyFn | None = macos_notify,
         free_gb_fn: Callable[[Path], float | None] | None = None,
+        on_trip: Callable[[], None] | None = None,
     ) -> None:
         self.store = store
         self.root = root
@@ -74,6 +75,7 @@ class ResourceGovernor:
         self.resume_gb = resume_gb
         self.interval_s = interval_s
         self.notify = notify
+        self.on_trip = on_trip
         self._free_gb = free_gb_fn or disk_free_gb
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -110,6 +112,8 @@ class ResourceGovernor:
                     f"Free disk {free:.1f} GB — agentd paused",
                     "agentd: storage circuit breaker",
                 )
+            if self.on_trip:
+                self.on_trip()
         elif free > self.resume_gb and paused:
             reason = f"disk {free:.1f} GB > resume {self.resume_gb:g} GB"
             self.store.set_disk_paused(False, reason=reason)
