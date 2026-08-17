@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from agentd.archive import archive_and_purge, format_completion_summary
+from agentd.closing_keywords import defuse_closing_keywords
 from agentd.config import Config
 from agentd.db import Store, decompress_payload
 from agentd.digest import build_digest, digest_to_markdown
@@ -591,6 +592,13 @@ class DesignLoop:
                 self.store.set_delivery_status(delivery_id, "done")
                 return
             _merge_auth_attempts.pop(delivery_id, None)
+            if not self._defuse_feature_pr_closing_keywords(
+                session_key=session_key,
+                repo=repo,
+                pr_num=int(pr_num or 0),
+                delivery_id=delivery_id,
+            ):
+                return
             kind = "merge_authorized"
             dig["kind"] = kind
             dig["merge_auth"] = check.reason
@@ -1170,6 +1178,70 @@ class DesignLoop:
         out = {"status": status, "summary": summary, **(result or {})}
         out["public_actions"] = raw_actions
         return out
+
+    def _session_issue_nums(self, repo: str) -> set[int]:
+        out: set[int] = set()
+        for row in self.store.list_sessions():
+            if str(row.get("repo") or "") != repo:
+                continue
+            try:
+                n = int(row.get("issue_num") or 0)
+            except (TypeError, ValueError):
+                continue
+            if n:
+                out.add(n)
+        return out
+
+    def _defuse_feature_pr_closing_keywords(
+        self,
+        *,
+        session_key: str,
+        repo: str,
+        pr_num: int,
+        delivery_id: str,
+    ) -> bool:
+        """ADR-24 §8.4 step 4. False means do not emit merge_authorized."""
+        token = self._gateway_token or self._github_api_token()
+        get_fn = self._get_issue_body or get_issue_body
+        try:
+            body = get_fn(repo=repo, issue_num=int(pr_num), token=token)
+        except Exception:
+            log.exception("feature PR body read failed pr=%s", pr_num)
+            self._escalate(
+                session_key,
+                "system",
+                f"could not read Feature PR #{pr_num} body to defuse closing keywords",
+            )
+            self.store.set_delivery_status(delivery_id, "done")
+            return False
+        rewritten = defuse_closing_keywords(
+            str(body or ""),
+            session_issues=self._session_issue_nums(repo),
+            repo=repo,
+        )
+        if rewritten is None:
+            return True
+        patch_fn = self._patch_issue_body or patch_issue_body
+        try:
+            patch_fn(
+                repo=repo, issue_num=int(pr_num), body=rewritten, token=token
+            )
+        except Exception:
+            log.exception("feature PR body patch failed pr=%s", pr_num)
+            self._escalate(
+                session_key,
+                "system",
+                f"failed to defuse closing keyword on Feature PR #{pr_num}; "
+                f"merge not authorised",
+            )
+            self.store.set_delivery_status(delivery_id, "done")
+            return False
+        log.info(
+            "defused closing keyword pr=%s session=%s",
+            pr_num,
+            session_key,
+        )
+        return True
 
     def _github_api_token(self) -> str | None:
         """Token for gateway-initiated GitHub *reads* (stall observation).
