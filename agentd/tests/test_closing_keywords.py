@@ -95,3 +95,33 @@ def test_other_repo_is_untouched() -> None:
         )
         is None
     )
+
+
+def test_colon_and_newline_separators() -> None:
+    assert (
+        defuse_closing_keywords(
+            "Closes: #32", session_issues={32}, repo="huozhe/code-workflow"
+        )
+        == "Refs: #32"
+    )
+    assert (
+        defuse_closing_keywords(
+            "Closes\n#32", session_issues={32}, repo="huozhe/code-workflow"
+        )
+        == "Refs\n#32"
+    )
+
+
+def test_separator_whitespace_is_preserved() -> None:
+    assert (
+        defuse_closing_keywords(
+            "Closes  #32", session_issues={32}, repo="huozhe/code-workflow"
+        )
+        == "Refs  #32"
+    )
+    assert (
+        defuse_closing_keywords(
+            "Closes\t#32", session_issues={32}, repo="huozhe/code-workflow"
+        )
+        == "Refs\t#32"
+    )

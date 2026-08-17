@@ -11,7 +11,7 @@ _REF = (
     r"|https://github.com/[\w.-]+/[\w.-]+/issues/\d+"
 )
 _PAT = re.compile(
-    rf"(?<![A-Za-z])({_KW})([ \t]+)({_REF})",
+    rf"(?<![A-Za-z])({_KW})(\s*:?\s*)({_REF})",
     re.IGNORECASE,
 )
 _HASH = re.compile(r"^#(\d+)$")
