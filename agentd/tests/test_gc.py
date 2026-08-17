@@ -313,6 +313,71 @@ def test_young_worktree_without_ledger_is_not_an_orphan(tmp_path: Path) -> None:
     store.close()
 
 
+def test_aged_shared_clone_is_not_an_orphan_worktree(tmp_path: Path) -> None:
+    """git lists the main clone first. Age it or the floor hides a missing skip."""
+    import os
+
+    store = Store(tmp_path / "state.db")
+    _sess(store, issue=77, state="IMPLEMENTING")
+    clone = project_path(tmp_path, "huozhe/code-workflow") / "repo"
+    clone.mkdir(parents=True)
+    old = time.time() - ARTIFACT_AGE_FLOOR_S - 10
+    os.utime(clone, (old, old))
+    now = int(time.time())
+    gc = GarbageCollector(
+        store,
+        _cfg(tmp_path),
+        list_containers=lambda: [],
+        list_worktrees=lambda p: [clone] if p == clone else [],
+        git_gc=lambda _p: None,
+        now_fn=lambda: now,
+    )
+    report = gc.collect_once()
+    refs = [o["ref"] for o in report["orphans"]]
+    assert str(clone) not in refs
+    assert str(clone.resolve()) not in refs
+    store.close()
+
+
+def test_registered_worktree_matches_git_resolved_path(tmp_path: Path) -> None:
+    """Ledger stores the raw ref; porcelain returns the resolved path."""
+    import os
+
+    store = Store(tmp_path / "state.db")
+    sk = _sess(store, issue=77, state="IMPLEMENTING")
+    actual = (
+        project_path(tmp_path, "huozhe/code-workflow")
+        / "sessions"
+        / "77"
+        / "developer"
+        / "worktrees"
+        / "issue-77"
+    )
+    actual.mkdir(parents=True)
+    raw = tmp_path / "wt-link"
+    raw.symlink_to(actual)
+    old = time.time() - ARTIFACT_AGE_FLOOR_S - 10
+    os.utime(actual, (old, old))
+    store.register_artifact(
+        session_key=sk, role="developer", kind="worktree", ref=str(raw)
+    )
+    clone = project_path(tmp_path, "huozhe/code-workflow") / "repo"
+    clone.mkdir(parents=True)
+    now = int(time.time())
+    gc = GarbageCollector(
+        store,
+        _cfg(tmp_path),
+        list_containers=lambda: [],
+        list_worktrees=lambda p: [raw.resolve()] if p == clone else [],
+        git_gc=lambda _p: None,
+        now_fn=lambda: now,
+    )
+    report = gc.collect_once()
+    wts = [o["ref"] for o in report["orphans"] if o.get("kind") == "worktree"]
+    assert wts == []
+    store.close()
+
+
 def test_gc_does_not_remove_cold_container_for_live_session(tmp_path: Path) -> None:
     store = Store(tmp_path / "state.db")
     _sess(store, issue=77, state="IMPLEMENTING")
