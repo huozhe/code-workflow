@@ -21,9 +21,7 @@ ARTIFACT_AGE_FLOOR_S = 10 * 60  # ADR-20
 TMP_MAX_AGE_S = 60 * 60
 
 ListContainers = Callable[[], list[dict[str, Any]]]
-ListImages = Callable[[], list[dict[str, Any]]]
-RemoveContainer = Callable[[str], None]
-PruneImage = Callable[[str], None]
+ListWorktrees = Callable[[Path], list[Path]]
 GitGc = Callable[[Path], None]
 
 
@@ -95,9 +93,7 @@ class GarbageCollector:
         supervisor: Any | None = None,
         *,
         list_containers: ListContainers | None = None,
-        list_images: ListImages | None = None,
-        remove_container: RemoveContainer | None = None,
-        prune_image: PruneImage | None = None,
+        list_worktrees: ListWorktrees | None = None,
         git_gc: GitGc | None = None,
         now_fn: Callable[[], int] | None = None,
         interval_s: float = GC_INTERVAL_S,
@@ -106,9 +102,7 @@ class GarbageCollector:
         self.config = config
         self.supervisor = supervisor
         self.list_containers = list_containers or list_managed_and_foreign_containers
-        self.list_images = list_images or (lambda: [])
-        self.remove_container = remove_container or _docker_rm
-        self.prune_image = prune_image or _docker_rmi
+        self.list_worktrees = list_worktrees or _git_worktree_list
         self.git_gc = git_gc or _run_git_gc
         self._now = now_fn or (lambda: int(time.time()))
         self.interval_s = interval_s
@@ -157,24 +151,23 @@ class GarbageCollector:
             "orphans": [],
             "ledger_stale": [],
             "containers": [],
-            "images": [],
             "git_gc": [],
         }
         self._sweep_archive(report, now=now, dry_run=dry_run)
         self._sweep_session_dirs(report, now=now)
+        self._sweep_worktrees(report, now=now)
         self._sweep_ledger(report, now=now, dry_run=dry_run)
-        self._sweep_containers(report, dry_run=dry_run)
+        self._sweep_containers(report)
         self._maybe_git_gc(report, dry_run=dry_run)
         ms = int((time.monotonic() - t0) * 1000)
         log.info(
             "gc pass residue=%d orphans=%d archives=%d tmps=%d "
-            "containers=%d images=%d ledger_stale=%d git_gc=%d dry_run=%s in %dms",
+            "containers=%d ledger_stale=%d git_gc=%d dry_run=%s in %dms",
             len(report["residue"]),
             len(report["orphans"]),
             len(report["archives_expired"]),
             len(report["tmps_expired"]),
             len(report["containers"]),
-            len(report["images"]),
             len(report["ledger_stale"]),
             len(report["git_gc"]),
             dry_run,
@@ -274,6 +267,60 @@ class GarbageCollector:
                     state or "absent",
                 )
 
+    def _sweep_worktrees(self, report: dict[str, Any], *, now: int) -> None:
+        """actual − ledger for worktrees. Report only. Live sessions included."""
+        ledger: set[str] = set()
+        for sess in self.store.list_sessions():
+            sk = str(sess.get("session_key") or "")
+            if not sk:
+                continue
+            for art in self.store.list_artifacts(sk, open_only=True):
+                if str(art.get("kind") or "") == "worktree":
+                    ref = str(art.get("ref") or "")
+                    if ref:
+                        ledger.add(ref)
+                        try:
+                            ledger.add(str(Path(ref).resolve()))
+                        except OSError:
+                            pass
+        seen_clones: set[Path] = set()
+        for sess in self.store.list_sessions():
+            repo = str(sess.get("repo") or "")
+            if not repo:
+                continue
+            clone = shared_clone_path(self.config.root, repo)
+            try:
+                key = clone.resolve()
+            except OSError:
+                key = clone
+            if key in seen_clones:
+                continue
+            seen_clones.add(key)
+            if not clone.exists():
+                continue
+            try:
+                trees = self.list_worktrees(clone)
+            except Exception:
+                log.exception("gc worktree list failed clone=%s", clone)
+                continue
+            for wt in trees:
+                try:
+                    resolved = wt.resolve()
+                except OSError:
+                    resolved = wt
+                if resolved == key:
+                    continue
+                if str(wt) in ledger or str(resolved) in ledger:
+                    continue
+                try:
+                    mtime = int(wt.stat().st_mtime)
+                except OSError:
+                    continue
+                if now - mtime < ARTIFACT_AGE_FLOOR_S:
+                    continue
+                report["orphans"].append({"ref": str(wt), "kind": "worktree"})
+                log.warning("gc orphan worktree path=%s", wt)
+
     def _sweep_ledger(
         self, report: dict[str, Any], *, now: int, dry_run: bool
     ) -> None:
@@ -298,7 +345,8 @@ class GarbageCollector:
                         session_key=sk, ref=ref, kind=kind, removed_at=now
                     )
 
-    def _sweep_containers(self, report: dict[str, Any], *, dry_run: bool) -> None:
+    def _sweep_containers(self, report: dict[str, Any]) -> None:
+        """Report managed containers only. Reconciler owns removal (ADR-20 / #116)."""
         try:
             raw = self.list_containers()
         except Exception:
@@ -309,18 +357,19 @@ class GarbageCollector:
                 continue
             name = str(c.get("name") or "")
             report["containers"].append(
-                {"name": name, "id": str(c.get("id") or ""), "running": bool(c.get("running"))}
+                {
+                    "name": name,
+                    "id": str(c.get("id") or ""),
+                    "running": bool(c.get("running")),
+                }
             )
-            if not c.get("running") and not dry_run:
-                cid = str(c.get("id") or name)
-                if cid:
-                    try:
-                        self.remove_container(cid)
-                    except Exception:
-                        log.exception("gc remove container failed id=%s", cid)
 
     def _maybe_git_gc(self, report: dict[str, Any], *, dry_run: bool) -> None:
-        live = self.store.live_project_keys()
+        lock = getattr(self.supervisor, "admit_lock", None) if self.supervisor else None
+        if lock is None:
+            log.warning("gc skip git gc: no admit_lock")
+            report["git_gc"].append({"skipped": True, "reason": "no_admit_lock"})
+            return
         seen: set[str] = set()
         for sess in self.store.list_sessions():
             repo = str(sess.get("repo") or "")
@@ -331,14 +380,6 @@ class GarbageCollector:
             clone = shared_clone_path(self.config.root, repo)
             if not (clone / ".git").exists() and not clone.is_dir():
                 continue
-            lock = getattr(self.supervisor, "admit_lock", None) if self.supervisor else None
-            if lock is None:
-                if pk in live:
-                    continue
-                report["git_gc"].append({"repo": repo, "skipped": False})
-                if not dry_run:
-                    self.git_gc(clone)
-                continue
             with lock:
                 live = self.store.live_project_keys()
                 if pk in live:
@@ -348,12 +389,20 @@ class GarbageCollector:
                     self.git_gc(clone)
 
 
-def _docker_rm(cid: str) -> None:
-    subprocess.run(["docker", "rm", "-f", cid], check=False, capture_output=True)
-
-
-def _docker_rmi(image: str) -> None:
-    subprocess.run(["docker", "rmi", image], check=False, capture_output=True)
+def _git_worktree_list(clone: Path) -> list[Path]:
+    r = subprocess.run(
+        ["git", "-C", str(clone), "worktree", "list", "--porcelain"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0:
+        return []
+    out: list[Path] = []
+    for line in (r.stdout or "").splitlines():
+        if line.startswith("worktree "):
+            out.append(Path(line[len("worktree ") :]))
+    return out
 
 
 def _run_git_gc(clone: Path) -> None:

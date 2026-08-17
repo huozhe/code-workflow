@@ -54,9 +54,6 @@ def _gc(
         _cfg(tmp, archive_days=archive_days),
         supervisor=supervisor,
         list_containers=lambda: list(containers or []),
-        list_images=lambda: [],
-        remove_container=lambda _c: None,
-        prune_image=lambda _i: None,
         git_gc=lambda _p: None,
         now_fn=lambda: now,
     )
@@ -211,6 +208,164 @@ def test_gc_pass_logs_counts(tmp_path: Path, caplog) -> None:
     with caplog.at_level(logging.INFO, logger="agentd.gc"):
         _gc(store, tmp_path, now=10_000).collect_once(dry_run=True)
     assert any("gc pass" in r.message for r in caplog.records)
+    store.close()
+
+
+def test_git_worktree_list_reads_porcelain(tmp_path: Path) -> None:
+    import subprocess
+
+    from agentd.gc import _git_worktree_list
+
+    clone = tmp_path / "repo"
+    clone.mkdir()
+    extra = tmp_path / "extra-wt"
+    subprocess.run(["git", "init", str(clone)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(clone), "config", "user.email", "t@t"],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(clone), "config", "user.name", "t"],
+        check=True,
+        capture_output=True,
+    )
+    (clone / "f").write_text("x", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(clone), "add", "f"], check=True, capture_output=True
+    )
+    subprocess.run(
+        ["git", "-C", str(clone), "commit", "-m", "i"],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(clone), "worktree", "add", str(extra), "-b", "b"],
+        check=True,
+        capture_output=True,
+    )
+    trees = {p.resolve() for p in _git_worktree_list(clone)}
+    assert clone.resolve() in trees
+    assert extra.resolve() in trees
+
+
+def test_worktree_on_live_session_without_ledger_is_reported(tmp_path: Path) -> None:
+    """Crash between worktree add and register — live session, no ledger row."""
+    import os
+
+    store = Store(tmp_path / "state.db")
+    _sess(store, issue=77, state="IMPLEMENTING")
+    wt = (
+        project_path(tmp_path, "huozhe/code-workflow")
+        / "sessions"
+        / "77"
+        / "developer"
+        / "worktrees"
+        / "issue-77"
+    )
+    wt.mkdir(parents=True)
+    old = time.time() - ARTIFACT_AGE_FLOOR_S - 10
+    os.utime(wt, (old, old))
+    clone = project_path(tmp_path, "huozhe/code-workflow") / "repo"
+    clone.mkdir(parents=True)
+    now = int(time.time())
+    gc = GarbageCollector(
+        store,
+        _cfg(tmp_path),
+        list_containers=lambda: [],
+        list_worktrees=lambda p: [wt] if p == clone else [],
+        git_gc=lambda _p: None,
+        now_fn=lambda: now,
+    )
+    report = gc.collect_once()
+    assert wt.is_dir()
+    refs = [o["ref"] for o in report["orphans"]]
+    assert any(str(wt) == r or "issue-77" in r for r in refs)
+    store.close()
+
+
+def test_young_worktree_without_ledger_is_not_an_orphan(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.db")
+    _sess(store, issue=77, state="IMPLEMENTING")
+    wt = (
+        project_path(tmp_path, "huozhe/code-workflow")
+        / "sessions"
+        / "77"
+        / "developer"
+        / "worktrees"
+        / "issue-77"
+    )
+    wt.mkdir(parents=True)
+    clone = project_path(tmp_path, "huozhe/code-workflow") / "repo"
+    clone.mkdir(parents=True)
+    now = int(time.time())
+    gc = GarbageCollector(
+        store,
+        _cfg(tmp_path),
+        list_containers=lambda: [],
+        list_worktrees=lambda p: [wt] if p == clone else [],
+        git_gc=lambda _p: None,
+        now_fn=lambda: now,
+    )
+    report = gc.collect_once()
+    refs = [o["ref"] for o in report["orphans"]]
+    assert not any("issue-77" in r for r in refs)
+    store.close()
+
+
+def test_gc_does_not_remove_cold_container_for_live_session(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.db")
+    _sess(store, issue=77, state="IMPLEMENTING")
+    store.upsert_runner(
+        "huozhe/code-workflow",
+        container_id="cold123",
+        endpoint="127.0.0.1:9",
+        token="t",
+        tier="cold",
+    )
+    containers = [
+        {
+            "id": "cold123",
+            "name": "agentd-huozhe-code-workflow",
+            "labels": {"agentd.managed": "true"},
+            "running": False,
+        }
+    ]
+    gc = GarbageCollector(
+        store,
+        _cfg(tmp_path),
+        list_containers=lambda: containers,
+        git_gc=lambda _p: None,
+        now_fn=lambda: 10_000,
+    )
+    report = gc.collect_once()
+    names = [c["name"] for c in report["containers"]]
+    assert "agentd-huozhe-code-workflow" in names
+    src = __import__("inspect").getsource(GarbageCollector._sweep_containers)
+    assert "remove_container" not in src
+    assert "docker" not in src
+    store.close()
+
+
+def test_git_gc_skipped_without_supervisor(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.db")
+    _sess(store, issue=32, state="CLOSED")
+    clone = project_path(tmp_path, "huozhe/code-workflow") / "repo"
+    clone.mkdir(parents=True)
+    (clone / ".git").mkdir()
+    called: list[Path] = []
+    gc = GarbageCollector(
+        store,
+        _cfg(tmp_path),
+        supervisor=None,
+        list_containers=lambda: [],
+        git_gc=lambda p: called.append(p),
+        now_fn=lambda: 10_000,
+    )
+    report = gc.collect_once()
+    assert called == []
+    assert report["git_gc"]
+    assert all(g.get("skipped") for g in report["git_gc"])
     store.close()
 
 
