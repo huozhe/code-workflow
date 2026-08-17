@@ -9,6 +9,7 @@ import secrets
 import stat
 import subprocess
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -271,6 +272,8 @@ class SessionSupervisor:
     def __init__(self, store: Store, config: Config) -> None:
         self.store = store
         self.config = config
+        # ADR-23 / #123: one lock for admission and git gc. Created by M6-2.
+        self.admit_lock = threading.Lock()
 
     def ensure_session(
         self,
@@ -303,6 +306,32 @@ class SessionSupervisor:
 
         existing_runner = self.store.get_runner(project_key)
 
+        with self.admit_lock:
+            return self._ensure_session_locked(
+                session_key=session_key,
+                repo=repo,
+                issue_num=issue_num,
+                project_key=project_key,
+                architect=architect,
+                developer=developer,
+                clone_url=clone_url,
+                github_api_base=github_api_base,
+                existing_runner=existing_runner,
+            )
+
+    def _ensure_session_locked(
+        self,
+        *,
+        session_key: str,
+        repo: str,
+        issue_num: int,
+        project_key: str,
+        architect: str,
+        developer: str,
+        clone_url: str | None,
+        github_api_base: str | None,
+        existing_runner: dict[str, Any] | None,
+    ) -> SessionHandle:
         if existing_runner and existing_runner.get("container_id"):
             try:
                 # Ensure worktrees exist on host before ping/assert.

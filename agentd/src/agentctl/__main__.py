@@ -79,6 +79,15 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="Read-only inventory: orphans, runners, open turns, closed-live",
     )
+    p_gc = sub.add_parser(
+        "gc",
+        help="M6-2 GC report (ADR-23). Read-only; the daemon applies deletes.",
+    )
+    p_gc.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the report without deleting (the only CLI mode)",
+    )
     args = parser.parse_args(argv)
 
     # ADR-13: version needs no host config — dispatch before load_config().
@@ -222,6 +231,15 @@ def main(argv: list[str] | None = None) -> None:
             dry_run=True
         )
         report["integrity"] = integrity
+        print(json.dumps(report, indent=2, default=str))
+        store.close()
+        return
+
+    if args.cmd == "gc":
+        from agentd.gc import GarbageCollector
+
+        store = Store(config.state_db)
+        report = GarbageCollector(store, config).collect_once(dry_run=True)
         print(json.dumps(report, indent=2, default=str))
         store.close()
         return

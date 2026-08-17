@@ -36,6 +36,7 @@ class AppState:
         self.governor: ResourceGovernor | None = None
         self.dispatcher: Dispatcher | None = None
         self.reconciler = None
+        self.gc = None
 
 
 def create_app(
@@ -73,6 +74,7 @@ def create_app(
             # Design loop: session/turn orchestration (M3). Supervisor is
             # optional at process start — attach when docker image is ready.
             design_loop = None
+            sup = None
             try:
                 from agentd.design_loop import DesignLoop
                 from agentd.supervisor import SessionSupervisor, image_present
@@ -132,10 +134,21 @@ def create_app(
                 state.reconciler.start()
             except Exception:
                 log.exception("reconciler init failed")
-            log.info("governor + dispatcher + reconciler started")
+            try:
+                from agentd.gc import GarbageCollector
+
+                state.gc = GarbageCollector(store, config, supervisor=sup)
+                if state.governor is not None:
+                    state.governor.on_trip = state.gc.signal
+                state.gc.start()
+            except Exception:
+                log.exception("gc init failed")
+            log.info("governor + dispatcher + reconciler + gc started")
         try:
             yield
         finally:
+            if state.gc:
+                state.gc.stop()
             if state.reconciler:
                 state.reconciler.stop()
             if state.dispatcher:
