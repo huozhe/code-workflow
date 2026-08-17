@@ -153,6 +153,8 @@ def test_architect_approve_emits_merge_authorized(tmp_path: Path) -> None:
             dispatch_turns=False,
             post_comment=lambda **k: posts.append(k.get("body", "")) or 1,
             gateway_token="gw",
+            get_issue_body_fn=lambda **k: "",
+            patch_issue_body_fn=lambda **k: None,
         )
         _insert(
             store,
