@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import socket
-from typing import Any, Self
+from typing import IO, Any, Self
 
 log = logging.getLogger("agentd.rpc_client")
 
@@ -34,8 +34,8 @@ class RunnerClient:
         # Runner → gateway notifications (notify.progress, artifact.register).
         self.on_notification = on_notification
         self._sock: socket.socket | None = None
-        self._rfile = None
-        self._wfile = None
+        self._rfile: IO[bytes] | None = None
+        self._wfile: IO[bytes] | None = None
         self._id = 0
 
     def connect(self) -> None:

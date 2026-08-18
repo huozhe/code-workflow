@@ -13,6 +13,7 @@ import zlib
 from typing import Any
 
 from agentd.db import Store, decompress_payload
+from agentd.digest import json_obj
 
 
 def session_issue_nums(sess: dict[str, Any]) -> list[int]:
@@ -82,12 +83,8 @@ def collect_session_review_stats(store: Store, sess: dict[str, Any]) -> dict[str
         action = row.get("action")
         if event == "pull_request_review" and action == "submitted":
             payload = _payload_dict(row.get("payload"))
-            review = payload.get("review") if isinstance(payload.get("review"), dict) else {}
-            pr_obj = (
-                payload.get("pull_request")
-                if isinstance(payload.get("pull_request"), dict)
-                else {}
-            )
+            review = json_obj(payload.get("review"))
+            pr_obj = json_obj(payload.get("pull_request"))
             rid = _as_int(review.get("id"))
             pr = _as_int(pr_obj.get("number"))
             if pr is None:
@@ -105,9 +102,7 @@ def collect_session_review_stats(store: Store, sess: dict[str, Any]) -> dict[str
             )
         elif event == "pull_request_review_comment" and action == "created":
             payload = _payload_dict(row.get("payload"))
-            comment = (
-                payload.get("comment") if isinstance(payload.get("comment"), dict) else {}
-            )
+            comment = json_obj(payload.get("comment"))
             comment_review_ids.append(_as_int(comment.get("pull_request_review_id")))
         elif event == "pull_request_review_thread":
             thread_events += 1

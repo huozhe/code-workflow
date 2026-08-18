@@ -743,6 +743,7 @@ class SessionSupervisor:
                 + ", ".join(missing)
                 + "; refusing session start (ADR-11 fail-closed)"
             )
+        assert claude and grok
         return {"architect": claude, "developer": grok}
 
     def _load_model_credentials(self) -> dict[str, str]:

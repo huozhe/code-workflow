@@ -15,7 +15,7 @@ from agentd.archive import archive_and_purge, format_completion_summary
 from agentd.closing_keywords import defuse_closing_keywords
 from agentd.config import Config
 from agentd.db import Store, decompress_payload
-from agentd.digest import build_digest, digest_to_markdown
+from agentd.digest import build_digest, digest_to_markdown, json_obj, json_str
 from agentd.fsm import TERMINAL_STATES, transition
 from agentd.github_fetch import (
     fetch_diff_stat,
@@ -196,7 +196,12 @@ def _hold_role_for_quota(
 ) -> None:
     now = time.time()
     try:
-        until = float(retry_after) if retry_after is not None else 0.0
+        if retry_after is None:
+            until = 0.0
+        elif isinstance(retry_after, (int, float, str)):
+            until = float(retry_after)
+        else:
+            raise TypeError(retry_after)
     except (TypeError, ValueError):
         until = 0.0
     parsed = until
@@ -1672,14 +1677,14 @@ class DesignLoop:
         Gateway body edits are ignored (#64 Architect note): the gateway is a
         bot but not an agent, and it authors the verification scaffold.
         """
-        changes = data.get("changes") if isinstance(data.get("changes"), dict) else {}
+        changes = json_obj(data.get("changes"))
         if "body" not in changes:
             # Title/label/etc. — not a checkbox concern.
             self.store.set_delivery_status(delivery_id, "done")
             return
 
-        issue = data.get("issue") if isinstance(data.get("issue"), dict) else {}
-        body = issue.get("body") if isinstance(issue.get("body"), str) else ""
+        issue = json_obj(data.get("issue"))
+        body = json_str(issue.get("body"))
         state = str(sess.get("state") or "")
         owner = str(self.config.owner or "")
         sender_l = (sender or "").lower()
@@ -2170,8 +2175,8 @@ class DesignLoop:
             classification = existing
         else:
             sess = self.store.get_session(session_key) or sess
-            issue = data.get("issue") if isinstance(data.get("issue"), dict) else {}
-            body = issue.get("body") if isinstance(issue.get("body"), str) else ""
+            issue = json_obj(data.get("issue"))
+            body = json_str(issue.get("body"))
             checked = checkbox_is_checked(body, strict=True)
             has_tick = bool(sess.get("verified_at"))
             # ADR-17: ticked + no stamp. ADR-19: not ticked + stamp.
@@ -3035,8 +3040,8 @@ class DesignLoop:
         2. ``sessions.design_pr == PR number`` for PR-keyed comments/reviews
         3. Fallback: treat issue_num as the issue session key
         """
-        pr = data.get("pull_request") if isinstance(data.get("pull_request"), dict) else {}
-        head = pr.get("head") if isinstance(pr.get("head"), dict) else {}
+        pr = json_obj(data.get("pull_request"))
+        head = json_obj(pr.get("head"))
         head_ref = head.get("ref") if head else None
 
         # PR-keyed events nest pull_request (incl. review threads, #49).
@@ -3056,11 +3061,11 @@ class DesignLoop:
         # issue.number is the PR number (not the agentd issue).
         pr_number: int | None = None
         if event == "issue_comment":
-            issue = data.get("issue") if isinstance(data.get("issue"), dict) else {}
+            issue = json_obj(data.get("issue"))
             if isinstance(issue.get("pull_request"), dict):
                 try:
-                    pr_number = int(issue.get("number"))
-                except (TypeError, ValueError):
+                    pr_number = int(issue["number"])
+                except (KeyError, TypeError, ValueError):
                     pr_number = None
         elif event in (
             "pull_request",
@@ -3116,7 +3121,7 @@ class DesignLoop:
         ``agentd/<owner__repo>/<issue>/architect``. Title heuristic is fallback
         only — model-written titles are not a control plane signal (§9.1).
         """
-        head = pr.get("head") if isinstance(pr.get("head"), dict) else {}
+        head = json_obj(pr.get("head"))
         head_ref = str(head.get("ref") or "")
         title = str(pr.get("title") or "")
         title_hit = "design" in title.lower() or "rfc" in title.lower()
@@ -3160,7 +3165,7 @@ class DesignLoop:
 
         No title heuristic: model-written titles are not a control-plane signal.
         """
-        head = pr.get("head") if isinstance(pr.get("head"), dict) else {}
+        head = json_obj(pr.get("head"))
         head_ref = str(head.get("ref") or "")
         return is_feature_head_ref(head_ref, repo)
 

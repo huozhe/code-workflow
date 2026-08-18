@@ -60,5 +60,7 @@ extend-select = [
 [tool.ruff.lint.per-file-ignores]
 # #134: a test fake takes arguments it does not use and does not annotate.
 # That is what a fake is. Scoped to tests/, not a blanket. src still
-# enforces ANN/ARG. Argue with this list if that judgement is wrong.
+# enforces ANN/ARG. Cost: ARG001 will not flag a fake that stops using a
+# parameter it should still assert on. Argue with this list if that
+# judgement is wrong.
 "tests/*" = ["ANN001", "ANN002", "ANN003", "ARG001", "ARG005"]

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from agentd.config import Config
+from agentd.digest import json_obj
 
 log = logging.getLogger("agentd.intake")
 
@@ -43,7 +44,7 @@ def evaluate_intake(
     except json.JSONDecodeError:
         return IntakeResult(False, "unparseable payload")
 
-    issue = data.get("issue") if isinstance(data.get("issue"), dict) else {}
+    issue = json_obj(data.get("issue"))
     assoc = str(issue.get("author_association") or data.get("author_association") or "")
 
     if (
