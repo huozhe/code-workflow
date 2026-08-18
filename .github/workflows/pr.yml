@@ -55,7 +55,6 @@ jobs:
 
   lint:
     runs-on: ubuntu-latest
-    continue-on-error: true
     defaults:
       run:
         working-directory: agentd
@@ -65,12 +64,15 @@ jobs:
         with:
           enable-cache: true
           python-version: "3.12"
-      - name: ruff (non-blocking)
-        run: uvx ruff check src tests
+      - name: ruff (advisory)
+        run: |
+          set +e
+          uvx ruff check src tests
+          echo "ruff exit=$?" >> "$GITHUB_STEP_SUMMARY"
+          exit 0
 
   types:
     runs-on: ubuntu-latest
-    continue-on-error: true
     defaults:
       run:
         working-directory: agentd
@@ -80,5 +82,9 @@ jobs:
         with:
           enable-cache: true
           python-version: "3.12"
-      - name: mypy (non-blocking)
-        run: uvx mypy src
+      - name: mypy (advisory)
+        run: |
+          set +e
+          uvx mypy src
+          echo "mypy exit=$?" >> "$GITHUB_STEP_SUMMARY"
+          exit 0

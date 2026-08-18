@@ -10,7 +10,6 @@ import yaml
 _REPO = Path(__file__).resolve().parents[2]
 _PR = _REPO / ".github" / "workflows" / "pr.yml"
 _IMAGE = _REPO / ".github" / "workflows" / "image.yml"
-_USES = re.compile(r"^\s+- uses:\s+(\S+)\s*$", re.MULTILINE)
 _PINNED = re.compile(r".+@((v\d+\.\d+\.\d+)|[0-9a-f]{40})$")
 
 
@@ -52,11 +51,21 @@ def test_image_workflow_path_filter_covers_pins() -> None:
         assert "agentd/src/agentd/supervisor.py" in paths, paths
 
 
+def _uses_refs(data: dict) -> list[str]:
+    refs: list[str] = []
+    for job in (data.get("jobs") or {}).values():
+        if not isinstance(job, dict):
+            continue
+        for step in job.get("steps") or []:
+            if isinstance(step, dict) and step.get("uses"):
+                refs.append(str(step["uses"]))
+    return refs
+
+
 def test_workflow_uses_are_fully_pinned() -> None:
     """@v10 is not a real tag on setup-uv after v7. Pin vX.Y.Z or a SHA."""
     for path in (_PR, _IMAGE):
-        text = path.read_text(encoding="utf-8")
-        uses = _USES.findall(text)
-        assert uses, path
-        for ref in uses:
+        refs = _uses_refs(_load(path))
+        assert refs, path
+        for ref in refs:
             assert _PINNED.match(ref), f"{path.name}: unpinned uses: {ref}"
