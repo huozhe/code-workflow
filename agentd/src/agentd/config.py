@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -14,7 +16,21 @@ from agentd.paths import agentd_root, ensure_layout
 @dataclass
 class Config:
     raw: dict[str, Any] = field(default_factory=dict)
-    root: Path = field(default_factory=agentd_root)
+    root: Path | None = None
+
+    def __post_init__(self) -> None:
+        explicit = self.root is not None
+        if self.root is None:
+            self.root = agentd_root()
+        if (
+            "pytest" in sys.modules
+            and not explicit
+            and not os.environ.get("AGENTD_ROOT")
+        ):
+            raise RuntimeError(
+                "Config() under pytest needs root= or AGENTD_ROOT "
+                "(#121: bare Config() writes to ~/.agentd)"
+            )
 
     @property
     def owner(self) -> str:

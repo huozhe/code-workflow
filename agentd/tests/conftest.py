@@ -2,12 +2,26 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
 import pytest
 
 from agentd.supervisor import IMAGE
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _isolate_agentd_root(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """#121: point AGENTD_ROOT at a throwaway dir for the whole suite."""
+    root = tmp_path_factory.mktemp("agentd-root")
+    prev = os.environ.get("AGENTD_ROOT")
+    os.environ["AGENTD_ROOT"] = str(root)
+    yield root
+    if prev is None:
+        os.environ.pop("AGENTD_ROOT", None)
+    else:
+        os.environ["AGENTD_ROOT"] = prev
 
 _RUNNER_ROOT = Path(__file__).resolve().parents[1] / "docker" / "session-runner"
 
