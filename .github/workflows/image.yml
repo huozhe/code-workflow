@@ -1,0 +1,42 @@
+# #131: image check. Path-filtered, not schedule, not label.
+#
+# Fires when the session-runner image or its pin test changes — the pair
+# that must move together (#130). A schedule runs on days nothing changed;
+# a label relies on someone remembering. A path filter cannot be forgotten.
+#
+# This job builds the image (git from source + two agent CLIs). That is
+# why it is not on the PR path.
+
+name: image
+
+on:
+  pull_request:
+    paths:
+      - "agentd/docker/session-runner/**"
+      - "agentd/tests/test_image_agent_clis.py"
+      - ".github/workflows/image.yml"
+  push:
+    branches: [main]
+    paths:
+      - "agentd/docker/session-runner/**"
+      - "agentd/tests/test_image_agent_clis.py"
+      - ".github/workflows/image.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: agentd
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v10
+        with:
+          enable-cache: true
+          python-version: "3.12"
+      - run: uv sync --all-extras
+      - run: uv run pytest -q tests/test_image_agent_clis.py

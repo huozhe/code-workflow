@@ -1,0 +1,75 @@
+# #131 / §8.4: the PR check. No Docker.
+#
+# Decision (measured on this host): Docker costs 6 tests and ~3× wall clock
+# (452/1 in ~28s vs 446/7 in 8.5s). GHA runners have Docker, so we put a
+# failing `docker` stub first on PATH. The six image/supervisor tests then
+# take the existing skip path (`docker info` non-zero). The seventh skip is
+# test_m4a_branch_protection_live.py (AGENTD_LIVE_M4A) — do not set that.
+#
+# Image regressions (#130 CLI pins) are covered by image.yml, path-filtered
+# on docker/session-runner/** and tests/test_image_agent_clis.py.
+#
+# Do not add this check to config.yaml required_checks or the main ruleset
+# until it has been green and stable. Wiring it earlier blocks every merge.
+
+name: pr
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: agentd
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v10
+        with:
+          enable-cache: true
+          python-version: "3.12"
+      - name: Hide docker
+        run: |
+          mkdir -p "$HOME/bin-nodocker"
+          printf '#!/bin/sh\nexit 1\n' > "$HOME/bin-nodocker/docker"
+          chmod +x "$HOME/bin-nodocker/docker"
+          echo "$HOME/bin-nodocker" >> "$GITHUB_PATH"
+      - run: uv sync --all-extras
+      - run: uv run pytest -q
+
+  lint:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: agentd
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v10
+        with:
+          enable-cache: true
+          python-version: "3.12"
+      - name: ruff (non-blocking)
+        run: uvx ruff check src tests
+
+  types:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: agentd
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v10
+        with:
+          enable-cache: true
+          python-version: "3.12"
+      - run: uv sync --all-extras
+      - name: mypy (non-blocking)
+        run: uvx mypy src
