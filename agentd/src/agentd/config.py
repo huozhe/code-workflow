@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -22,7 +23,7 @@ class Config:
         if self.root is None:
             self.root = agentd_root()
         if (
-            os.environ.get("PYTEST_CURRENT_TEST")
+            "pytest" in sys.modules
             and not explicit
             and not os.environ.get("AGENTD_ROOT")
         ):
