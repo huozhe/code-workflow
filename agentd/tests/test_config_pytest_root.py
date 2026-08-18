@@ -54,6 +54,8 @@ def test_guard_fires_in_subprocess_that_only_imports_pytest() -> None:
 def test_explicit_root_is_allowed_under_pytest(tmp_path: Path) -> None:
     cfg = Config(raw={}, root=tmp_path)
     assert cfg.root == tmp_path
+    assert isinstance(cfg.root, Path)
+    assert (cfg.root / "state.db").parent == tmp_path
 
 
 def test_guard_does_not_fire_outside_pytest() -> None:

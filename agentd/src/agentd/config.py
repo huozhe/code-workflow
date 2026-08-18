@@ -16,12 +16,19 @@ from agentd.paths import agentd_root, ensure_layout
 @dataclass
 class Config:
     raw: dict[str, Any] = field(default_factory=dict)
-    root: Path | None = None
+    root: Path = field(init=False)
 
-    def __post_init__(self) -> None:
-        explicit = self.root is not None
-        if self.root is None:
+    def __init__(
+        self,
+        raw: dict[str, Any] | None = None,
+        root: Path | None = None,
+    ) -> None:
+        self.raw = raw if raw is not None else {}
+        explicit = root is not None
+        if root is None:
             self.root = agentd_root()
+        else:
+            self.root = root
         if (
             "pytest" in sys.modules
             and not explicit

@@ -80,6 +80,7 @@ def test_ruff_ignores_ann_arg_on_test_fakes() -> None:
     tests = ignores["tests/*"]
     for code in ("ANN001", "ANN002", "ANN003", "ARG001", "ARG005"):
         assert code in tests, code
+    assert list(ignores) == ["tests/*"]
 
 
 def test_workflow_uses_are_fully_pinned() -> None:
