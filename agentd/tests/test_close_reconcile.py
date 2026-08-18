@@ -17,7 +17,6 @@ from agentd.design_loop import (
 from agentd.verification import (
     checkbox_is_checked,
     render_verification_block,
-    set_checkbox_in_body,
 )
 
 

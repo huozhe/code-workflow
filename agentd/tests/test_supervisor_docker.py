@@ -13,7 +13,6 @@ import pytest
 from agentd.config import Config
 from agentd.db import Store
 from agentd.supervisor import (
-    IMAGE,
     SessionSupervisor,
     assert_bearer_not_in_inspect_env,
     assert_bearer_not_readable_by_roles,
@@ -156,7 +155,7 @@ def test_session_health_ping_and_token_boundary(
 
         # W1: role can run git in its worktree (topology preserved)
         wt = (
-            f"/srv/agentd/sessions/1/architect/worktrees/issue-1"
+            "/srv/agentd/sessions/1/architect/worktrees/issue-1"
         )
         git_st = subprocess.run(
             [

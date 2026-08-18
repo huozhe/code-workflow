@@ -14,7 +14,6 @@ from agentd.verification import (
     CHECKBOX_UNCHECKED,
     checkbox_is_checked,
     extract_verification_block,
-    neutralize_bare_verification_ticks,
     reinsert_verification_block,
     render_verification_block,
     set_checkbox_in_body,

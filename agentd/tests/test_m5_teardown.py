@@ -11,9 +11,9 @@ from pathlib import Path
 from agentd.config import Config
 from agentd.db import Store
 from agentd.design_loop import DesignLoop
-from agentd.refusals import CapacityRefusal
 from agentd.fsm import SESSION_STATES, TERMINAL_STATES, transition
 from agentd.gitops import ensure_shared_clone, role_branch_name, shared_clone_path
+from agentd.refusals import CapacityRefusal
 from agentd.verification import (
     classify_at_close,
     render_verification_block,

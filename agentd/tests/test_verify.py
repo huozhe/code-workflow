@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from agentd.verify import ApprovalCheck, verify_design_approval
+from agentd.verify import verify_design_approval
 
 
 def test_approval_ok_on_head() -> None:

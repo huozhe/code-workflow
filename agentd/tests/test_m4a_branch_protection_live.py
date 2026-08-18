@@ -21,7 +21,7 @@ import json
 import os
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import httpx
 import pytest
@@ -94,7 +94,7 @@ def test_m4a_assert_rules_then_observe_refuse_and_merge() -> None:
         main_ref.raise_for_status()
         main_sha = main_ref.json()["object"]["sha"]
 
-        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        stamp = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
         suffix = uuid.uuid4().hex[:8]
         head = f"agentd/m4a-live-{suffix}"
         path = "docs/ops/m4-a-live-stamp.txt"

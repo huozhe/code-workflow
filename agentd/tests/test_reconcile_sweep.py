@@ -50,7 +50,7 @@ def _sweep_rec(
 
     rec = Reconciler(
         store,
-        list_containers=lambda: [],
+        list_containers=list,
         remove_container=lambda _c: None,
         fetch_snapshot=fetch,
         escalate=lambda sk, reason, **kw: esc.append((sk, reason, kw)),
@@ -217,7 +217,7 @@ def test_closed_issue_escalates_only_once(tmp_path: Path) -> None:
 
     rec = Reconciler(
         store,
-        list_containers=lambda: [],
+        list_containers=list,
         remove_container=lambda _c: None,
         fetch_snapshot=lambda _s: dict(snap),
         escalate=escalate,
@@ -250,7 +250,7 @@ def test_closed_issue_escalate_survives_resume(tmp_path: Path) -> None:
 
     rec = Reconciler(
         store,
-        list_containers=lambda: [],
+        list_containers=list,
         remove_container=lambda _c: None,
         fetch_snapshot=lambda _s: dict(snap_closed),
         escalate=escalate,

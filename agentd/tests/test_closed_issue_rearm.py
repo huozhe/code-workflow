@@ -98,7 +98,7 @@ def _rec(store: Store, snap: dict, esc: list) -> Reconciler:
 
     return Reconciler(
         store,
-        list_containers=lambda: [],
+        list_containers=list,
         remove_container=lambda _c: None,
         fetch_snapshot=lambda _s: dict(snap),
         escalate=escalate,

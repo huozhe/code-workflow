@@ -272,7 +272,7 @@ def test_worktree_on_live_session_without_ledger_is_reported(tmp_path: Path) -> 
     gc = GarbageCollector(
         store,
         _cfg(tmp_path),
-        list_containers=lambda: [],
+        list_containers=list,
         list_worktrees=lambda p: [wt] if p == clone else [],
         git_gc=lambda _p: None,
         now_fn=lambda: now,
@@ -302,7 +302,7 @@ def test_young_worktree_without_ledger_is_not_an_orphan(tmp_path: Path) -> None:
     gc = GarbageCollector(
         store,
         _cfg(tmp_path),
-        list_containers=lambda: [],
+        list_containers=list,
         list_worktrees=lambda p: [wt] if p == clone else [],
         git_gc=lambda _p: None,
         now_fn=lambda: now,
@@ -327,7 +327,7 @@ def test_aged_shared_clone_is_not_an_orphan_worktree(tmp_path: Path) -> None:
     gc = GarbageCollector(
         store,
         _cfg(tmp_path),
-        list_containers=lambda: [],
+        list_containers=list,
         list_worktrees=lambda p: [clone] if p == clone else [],
         git_gc=lambda _p: None,
         now_fn=lambda: now,
@@ -367,7 +367,7 @@ def test_registered_worktree_matches_git_resolved_path(tmp_path: Path) -> None:
     gc = GarbageCollector(
         store,
         _cfg(tmp_path),
-        list_containers=lambda: [],
+        list_containers=list,
         list_worktrees=lambda p: [raw.resolve()] if p == clone else [],
         git_gc=lambda _p: None,
         now_fn=lambda: now,
@@ -423,7 +423,7 @@ def test_git_gc_skipped_without_supervisor(tmp_path: Path) -> None:
         store,
         _cfg(tmp_path),
         supervisor=None,
-        list_containers=lambda: [],
+        list_containers=list,
         git_gc=lambda p: called.append(p),
         now_fn=lambda: 10_000,
     )

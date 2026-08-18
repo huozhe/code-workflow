@@ -5,14 +5,14 @@ from __future__ import annotations
 import json
 import os
 import socket
-import threading
-import time
-
-import pytest
 
 # Import runner package from docker tree
 import sys
+import threading
+import time
 from pathlib import Path
+
+import pytest
 
 _RUNNER_ROOT = Path(__file__).resolve().parents[1] / "docker" / "session-runner"
 sys.path.insert(0, str(_RUNNER_ROOT))
