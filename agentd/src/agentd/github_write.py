@@ -76,7 +76,7 @@ def get_issue(
     get = http_get or _gh_get
     data = get(url, token=token)
     if not isinstance(data, dict):
-        raise TypeError(f"GitHub issue response not an object: {data!r}")
+        raise RuntimeError(f"GitHub issue response not an object: {data!r}")  # noqa: TRY004
     body = data.get("body")
     return {
         "body": body if isinstance(body, str) else "",

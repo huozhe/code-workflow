@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 import threading
 import time
 import uuid
@@ -322,7 +323,7 @@ class DesignLoop:
                 log.exception("design_loop failed delivery=%s", row["delivery_id"])
         return n
 
-    def _process_one(self, row: dict[str, Any]) -> None:
+    def _process_one(self, row: sqlite3.Row) -> None:
         delivery_id = str(row["delivery_id"])
         event = str(row["event"])
         action = str(row["action"]) if row["action"] is not None else None

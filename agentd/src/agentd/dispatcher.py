@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 import threading
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from agentd.config import Config
 from agentd.db import Store, decompress_payload
@@ -85,7 +86,7 @@ class Dispatcher:
             self.nudge.wait(timeout=self.idle_wait_s)
             self.nudge.clear()
 
-    def _handle(self, row: dict[str, Any]) -> None:
+    def _handle(self, row: sqlite3.Row) -> None:
         delivery_id = str(row["delivery_id"])
         event = str(row["event"])
         action = row["action"]
