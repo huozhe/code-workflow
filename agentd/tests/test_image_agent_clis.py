@@ -13,8 +13,8 @@ from agentd.supervisor import IMAGE
 _RUNNER_ROOT = Path(__file__).resolve().parents[1] / "docker" / "session-runner"
 
 # Expected pins — must match Dockerfile ARG / LABEL (single source in image).
-_EXPECTED_CLAUDE = "2.1.224"
-_EXPECTED_GROK = "1.0.0"
+_EXPECTED_CLAUDE = "2.1.234"
+_EXPECTED_GROK = "1.0.5"
 
 
 def _docker_ok() -> bool:
