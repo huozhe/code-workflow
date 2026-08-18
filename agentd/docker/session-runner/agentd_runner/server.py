@@ -71,6 +71,11 @@ def write_role_secret(role: str, name: str, value: str) -> Path:
     except OSError:
         pass
     path = role_dir / name
+    if path.exists():
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
     path.write_text(value, encoding="utf-8")
     try:
         os.chown(path, uid, uid)

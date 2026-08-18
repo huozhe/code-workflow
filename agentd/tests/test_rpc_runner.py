@@ -103,3 +103,14 @@ def test_bad_bearer_rejected(runner_port: int) -> None:
         ],
     )
     assert "error" in resp[0]
+
+
+def test_write_role_secret_rewrites_after_0400(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """session.resume writes the token twice. euid==role-uid leaves 0400."""
+    monkeypatch.setattr(runner_server, "TOKEN_ROOT", tmp_path / "run-agent")
+    first = runner_server.write_role_secret("architect", "token", "first")
+    os.chmod(first, 0o400)
+    second = runner_server.write_role_secret("architect", "token", "second")
+    assert second.read_text(encoding="utf-8") == "second"
