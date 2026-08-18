@@ -90,3 +90,28 @@ def test_workflow_uses_are_fully_pinned() -> None:
         assert refs, path
         for ref in refs:
             assert _PINNED.match(ref), f"{path.name}: unpinned uses: {ref}"
+
+
+def _job_run(data: dict, job: str, needle: str) -> str:
+    steps = data["jobs"][job]["steps"]
+    hits = [
+        s["run"]
+        for s in steps
+        if isinstance(s, dict) and needle in str(s.get("run", ""))
+    ]
+    assert len(hits) == 1, hits
+    return hits[0]
+
+
+def test_types_job_is_blocking() -> None:
+    """mypy src is 0. A regression must fail the job (#134)."""
+    run = _job_run(_load(_PR), "types", "mypy")
+    assert "uv run mypy src" in run
+    assert "set +e" not in run
+    assert "exit 0" not in run
+
+
+def test_lint_job_stays_advisory() -> None:
+    """ruff tests still 58. Do not fail the job on that yet (#134)."""
+    run = _job_run(_load(_PR), "lint", "ruff")
+    assert "exit 0" in run
