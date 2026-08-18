@@ -196,11 +196,12 @@ def _hold_role_for_quota(
 ) -> None:
     now = time.time()
     try:
-        until = (
-            float(retry_after)
-            if isinstance(retry_after, (int, float, str))
-            else 0.0
-        )
+        if retry_after is None:
+            until = 0.0
+        elif isinstance(retry_after, (int, float, str)):
+            until = float(retry_after)
+        else:
+            raise TypeError(retry_after)
     except (TypeError, ValueError):
         until = 0.0
     parsed = until

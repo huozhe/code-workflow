@@ -15,6 +15,12 @@ from agentd.paths import agentd_root, ensure_layout
 
 @dataclass
 class Config:
+    """root is set in __init__, not a dataclass init field.
+
+    dataclasses.replace(cfg, raw=...) drops an explicit root and
+    recomputes agentd_root(). Nothing in src/tests calls replace today.
+    """
+
     raw: dict[str, Any] = field(default_factory=dict)
     root: Path = field(init=False)
 

@@ -743,7 +743,8 @@ class SessionSupervisor:
                 + ", ".join(missing)
                 + "; refusing session start (ADR-11 fail-closed)"
             )
-        return {"architect": str(claude), "developer": str(grok)}
+        assert claude and grok
+        return {"architect": claude, "developer": grok}
 
     def _load_model_credentials(self) -> dict[str, str]:
         """Subscription model credentials (optional at create; empty if unset).
