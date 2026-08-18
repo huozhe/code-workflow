@@ -65,7 +65,7 @@ def _rec(
 ) -> tuple[Reconciler, dict]:
     rec = Reconciler(
         store,
-        list_containers=lambda: [],
+        list_containers=list,
         remove_container=lambda _c: None,
         notify_missed=lambda sk, n: missed.append((sk, n)) if missed is not None else None,
         now_fn=lambda: now,
@@ -129,7 +129,7 @@ def test_resume_fails_twice_then_retires(tmp_path: Path) -> None:
     _turn(store, sk, started_at=now - 30)
     rec = Reconciler(
         store,
-        list_containers=lambda: [],
+        list_containers=list,
         remove_container=lambda _c: None,
         now_fn=lambda: now,
         resume_max_age_s=RESUME_MAX_AGE_S,

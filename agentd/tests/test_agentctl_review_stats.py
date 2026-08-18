@@ -11,7 +11,6 @@ from agentctl.__main__ import main
 from agentd.db import Store
 from agentd.review_stats import collect_review_stats, session_issue_nums
 
-
 REPO = "huozhe/code-workflow"
 
 

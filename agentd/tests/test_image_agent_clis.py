@@ -8,8 +8,6 @@ from pathlib import Path
 
 import pytest
 
-from agentd.supervisor import IMAGE
-
 _RUNNER_ROOT = Path(__file__).resolve().parents[1] / "docker" / "session-runner"
 
 # Expected pins — must match Dockerfile ARG / LABEL (single source in image).

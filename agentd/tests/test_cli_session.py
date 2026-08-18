@@ -10,6 +10,7 @@ import os
 import sys
 import threading
 import time
+from datetime import UTC
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -718,7 +719,7 @@ def test_grok_empty_end_turn_is_failed(tmp_path: Path) -> None:
 
 def test_claude_session_limit_is_quota_exhausted(tmp_path: Path) -> None:
     """#86: recorded Claude session-limit envelope is not a failed turn."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     lines = [
         json.dumps(
@@ -740,7 +741,7 @@ def test_claude_session_limit_is_quota_exhausted(tmp_path: Path) -> None:
         spawn_cwd=tmp_path,
     )
     _wire_stdout_queue(sess, lines)
-    now = datetime(2026, 8, 13, 1, 43, tzinfo=timezone.utc).timestamp()
+    now = datetime(2026, 8, 13, 1, 43, tzinfo=UTC).timestamp()
     with (
         patch.object(cli_session.LiveCliSession, "_sample_rss"),
         patch("agentd_runner.quota.time.time", return_value=now),
@@ -748,7 +749,7 @@ def test_claude_session_limit_is_quota_exhausted(tmp_path: Path) -> None:
         result = sess.turn("continue", deadline_s=5)
     assert result["status"] == "quota_exhausted"
     assert result["status"] != "failed"
-    want = int(datetime(2026, 8, 13, 9, 30, tzinfo=timezone.utc).timestamp())
+    want = int(datetime(2026, 8, 13, 9, 30, tzinfo=UTC).timestamp())
     assert result["retry_after"] == want
     assert "session limit" in result["summary"].lower()
 
@@ -820,7 +821,7 @@ def test_grok_rate_limit_stop_reason_is_quota_exhausted(tmp_path: Path) -> None:
 
 def test_grok_error_session_limit_is_quota_exhausted(tmp_path: Path) -> None:
     import queue as qmod
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     q: qmod.Queue[str | None] = qmod.Queue()
     q.put(
@@ -850,25 +851,25 @@ def test_grok_error_session_limit_is_quota_exhausted(tmp_path: Path) -> None:
     sess.proc = MagicMock()
     sess.proc.poll.return_value = None
     sess.proc.stdin = MagicMock()
-    now = datetime(2026, 8, 13, 1, 43, tzinfo=timezone.utc).timestamp()
+    now = datetime(2026, 8, 13, 1, 43, tzinfo=UTC).timestamp()
     with (
         patch.object(cli_session.LiveCliSession, "_sample_rss"),
         patch("agentd_runner.quota.time.time", return_value=now),
     ):
         result = sess.turn("go", deadline_s=5)
     assert result["status"] == "quota_exhausted"
-    want = int(datetime(2026, 8, 13, 9, 30, tzinfo=timezone.utc).timestamp())
+    want = int(datetime(2026, 8, 13, 9, 30, tzinfo=UTC).timestamp())
     assert result["retry_after"] == want
 
 
 def test_parse_reset_epoch_past_clock_rolls_to_next_day() -> None:
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from agentd_runner.quota import parse_reset_epoch
 
-    now = datetime(2026, 8, 13, 10, 0, tzinfo=timezone.utc).timestamp()
+    now = datetime(2026, 8, 13, 10, 0, tzinfo=UTC).timestamp()
     got = parse_reset_epoch("resets 9:30am (UTC)", now=now)
-    want = int(datetime(2026, 8, 14, 9, 30, tzinfo=timezone.utc).timestamp())
+    want = int(datetime(2026, 8, 14, 9, 30, tzinfo=UTC).timestamp())
     assert got == want
 
 
