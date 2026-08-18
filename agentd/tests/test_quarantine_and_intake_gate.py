@@ -124,7 +124,7 @@ def test_deferred_backlog_creates_zero_sessions_without_intake_issues(
 
     # Fake supervisor that would create sessions if asked — must never be called
     class BoomSupervisor:
-        def ensure_session(self, **kwargs):  # noqa: ANN003
+        def ensure_session(self, **kwargs):
             raise AssertionError(f"ensure_session must not run: {kwargs}")
 
     loop = DesignLoop(store, cfg, supervisor=BoomSupervisor(), dispatch_turns=False)
@@ -143,7 +143,7 @@ def test_intake_passing_issues_may_create_session(tmp_path: Path) -> None:
     created: list[str] = []
 
     class FakeSupervisor:
-        def ensure_session(self, **kwargs):  # noqa: ANN003
+        def ensure_session(self, **kwargs):
             created.append(kwargs["session_key"])
             store.upsert_session(
                 session_key=kwargs["session_key"],

@@ -86,10 +86,10 @@ class _StatusClient:
     def __enter__(self):
         return self
 
-    def __exit__(self, *a):  # noqa: ANN002
+    def __exit__(self, *a):
         return False
 
-    def call(self, method, params=None):  # noqa: ANN001
+    def call(self, method, params=None):
         self._calls.append(method)
         if method != "turn.dispatch":
             return {"ok": True}
@@ -120,7 +120,7 @@ def test_quota_exhausted_defers_and_does_not_charge_budget(tmp_path: Path) -> No
     calls: list[str] = []
 
     class C(_StatusClient):
-        def __init__(self, *a, **k):  # noqa: ANN002, ANN003
+        def __init__(self, *a, **k):
             super().__init__(
                 {
                     "status": "quota_exhausted",
@@ -166,16 +166,16 @@ def test_quota_exhausted_redrains_after_retry_after(tmp_path: Path) -> None:
     ]
 
     class C:
-        def __init__(self, *a, **k):  # noqa: ANN002, ANN003
+        def __init__(self, *a, **k):
             pass
 
         def __enter__(self):
             return self
 
-        def __exit__(self, *a):  # noqa: ANN002
+        def __exit__(self, *a):
             return False
 
-        def call(self, method, params=None):  # noqa: ANN001
+        def call(self, method, params=None):
             calls.append(method)
             if method != "turn.dispatch":
                 return {"ok": True}
@@ -200,7 +200,7 @@ def test_genuine_failed_still_consumes(tmp_path: Path) -> None:
     calls: list[str] = []
 
     class C(_StatusClient):
-        def __init__(self, *a, **k):  # noqa: ANN002, ANN003
+        def __init__(self, *a, **k):
             super().__init__(
                 {"status": "failed", "summary": "API Error: 500", "public_actions": []},
                 calls,
@@ -222,7 +222,7 @@ def test_unknown_status_degrades_to_failed(tmp_path: Path) -> None:
     calls: list[str] = []
 
     class C(_StatusClient):
-        def __init__(self, *a, **k):  # noqa: ANN002, ANN003
+        def __init__(self, *a, **k):
             super().__init__(
                 {"status": "brand_new_thing", "summary": "future runner", "public_actions": []},
                 calls,

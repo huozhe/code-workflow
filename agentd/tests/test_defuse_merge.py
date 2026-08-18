@@ -75,7 +75,7 @@ def _approve_and_drain(
     feat_ref = role_branch_name("huozhe/code-workflow", issue, "developer")
     head = "abc123def456"
 
-    def fake_get(url: str, *, token: str):  # noqa: ARG001
+    def fake_get(url: str, *, token: str):
         if url.endswith("/reviews"):
             return [
                 {

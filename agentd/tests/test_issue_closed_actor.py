@@ -64,13 +64,13 @@ def test_agent_close_session_reopens_and_escalates(tmp_path: Path) -> None:
     posts: list[dict] = []
     reopens: list[dict] = []
 
-    def fake_post(*, repo, issue_num, body, token):  # noqa: ANN001
+    def fake_post(*, repo, issue_num, body, token):
         posts.append(
             {"repo": repo, "issue_num": issue_num, "body": body, "token": token}
         )
         return 7001
 
-    def fake_reopen(*, repo, issue_num, token):  # noqa: ANN001
+    def fake_reopen(*, repo, issue_num, token):
         reopens.append({"repo": repo, "issue_num": issue_num, "token": token})
 
     loop = DesignLoop(

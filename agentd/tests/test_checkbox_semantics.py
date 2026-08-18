@@ -265,10 +265,10 @@ def test_agent_tick_restores_and_warns(tmp_path: Path) -> None:
     patches: list[dict] = []
     comments: list[dict] = []
 
-    def fake_patch(*, repo, issue_num, body, token):  # noqa: ANN001
+    def fake_patch(*, repo, issue_num, body, token):
         patches.append({"body": body, "token": token})
 
-    def fake_comment(*, repo, issue_num, body, token):  # noqa: ANN001
+    def fake_comment(*, repo, issue_num, body, token):
         comments.append({"body": body})
         return 1
 
@@ -312,10 +312,10 @@ def test_agent_untick_restores_checked_from_prev(tmp_path: Path) -> None:
     body = _body(checked=False)
     patches: list[str] = []
 
-    def fake_patch(*, repo, issue_num, body, token):  # noqa: ANN001
+    def fake_patch(*, repo, issue_num, body, token):
         patches.append(body)
 
-    def fake_comment(*, repo, issue_num, body, token):  # noqa: ANN001
+    def fake_comment(*, repo, issue_num, body, token):
         return 1
 
     loop = DesignLoop(
@@ -405,10 +405,10 @@ def test_agent_deletes_block_restored_from_prev(tmp_path: Path) -> None:
     patches: list[str] = []
     comments: list[str] = []
 
-    def fake_patch(*, repo, issue_num, body, token):  # noqa: ANN001
+    def fake_patch(*, repo, issue_num, body, token):
         patches.append(body)
 
-    def fake_comment(*, repo, issue_num, body, token):  # noqa: ANN001
+    def fake_comment(*, repo, issue_num, body, token):
         comments.append(body)
         return 1
 
@@ -484,10 +484,10 @@ def test_agent_adds_preticked_block_where_none_existed(tmp_path: Path) -> None:
     patches: list[str] = []
     comments: list[str] = []
 
-    def fake_patch(*, repo, issue_num, body, token):  # noqa: ANN001
+    def fake_patch(*, repo, issue_num, body, token):
         patches.append(body)
 
-    def fake_comment(*, repo, issue_num, body, token):  # noqa: ANN001
+    def fake_comment(*, repo, issue_num, body, token):
         comments.append(body)
         return 1
 
@@ -672,7 +672,7 @@ def test_failed_patch_does_not_claim_restored(tmp_path: Path) -> None:
     body = _body(checked=True)
     comments: list = []
 
-    def boom(**kw):  # noqa: ARG001
+    def boom(**kw):
         raise RuntimeError("github down")
 
     loop = DesignLoop(
@@ -871,7 +871,7 @@ def test_adr15_corrected_body_survives_stale_corrupting_delivery(
         gateway_token="gw",
         get_issue_body_fn=lambda **_: fetches.append(1) or corrected,
         patch_issue_body_fn=lambda **kw: patches.append(kw),
-        post_comment=lambda **kw: 1,  # noqa: ARG005
+        post_comment=lambda **kw: 1,
     )
     _insert(
         store,
@@ -909,7 +909,7 @@ def test_adr15_owner_tick_in_window_skips_patch(tmp_path: Path) -> None:
         gateway_token="gw",
         get_issue_body_fn=lambda **_: current,
         patch_issue_body_fn=lambda **kw: patches.append(kw),
-        post_comment=lambda **kw: 1,  # noqa: ARG005
+        post_comment=lambda **kw: 1,
     )
     _insert(
         store,
@@ -935,10 +935,10 @@ def test_adr15_redelivery_patches_at_most_once(tmp_path: Path) -> None:
     live = {"body": body}
     patches: list[str] = []
 
-    def fake_get(**_):  # noqa: ANN003
+    def fake_get(**_):
         return live["body"]
 
-    def fake_patch(*, repo, issue_num, body, token):  # noqa: ANN001
+    def fake_patch(*, repo, issue_num, body, token):
         patches.append(body)
         live["body"] = body
 
@@ -950,7 +950,7 @@ def test_adr15_redelivery_patches_at_most_once(tmp_path: Path) -> None:
         gateway_token="gw",
         get_issue_body_fn=fake_get,
         patch_issue_body_fn=fake_patch,
-        post_comment=lambda **kw: 1,  # noqa: ARG005
+        post_comment=lambda **kw: 1,
     )
     payload = _edited_payload(
         issue=58, sender="huozheclaude", body=body, body_from=prev
@@ -1060,10 +1060,10 @@ def test_agent_tick_then_untick_queued_does_not_restore_up(tmp_path: Path) -> No
     live = {"body": unchecked}
     patches: list[str] = []
 
-    def fake_get(**_):  # noqa: ANN003
+    def fake_get(**_):
         return live["body"]
 
-    def fake_patch(*, repo, issue_num, body, token):  # noqa: ANN001
+    def fake_patch(*, repo, issue_num, body, token):
         patches.append(body)
         live["body"] = body
 
@@ -1075,7 +1075,7 @@ def test_agent_tick_then_untick_queued_does_not_restore_up(tmp_path: Path) -> No
         gateway_token="gw",
         get_issue_body_fn=fake_get,
         patch_issue_body_fn=fake_patch,
-        post_comment=lambda **kw: 1,  # noqa: ARG005
+        post_comment=lambda **kw: 1,
     )
     _insert(
         store,
@@ -1116,10 +1116,10 @@ def test_agent_tick_then_delete_line_queued_does_not_restore_up(
     live = {"body": s2}
     patches: list[str] = []
 
-    def fake_get(**_):  # noqa: ANN003
+    def fake_get(**_):
         return live["body"]
 
-    def fake_patch(*, repo, issue_num, body, token):  # noqa: ANN001
+    def fake_patch(*, repo, issue_num, body, token):
         patches.append(body)
         live["body"] = body
 
@@ -1131,7 +1131,7 @@ def test_agent_tick_then_delete_line_queued_does_not_restore_up(
         gateway_token="gw",
         get_issue_body_fn=fake_get,
         patch_issue_body_fn=fake_patch,
-        post_comment=lambda **kw: 1,  # noqa: ARG005
+        post_comment=lambda **kw: 1,
     )
     _insert(
         store,
@@ -1175,10 +1175,10 @@ def test_agent_tick_then_delete_block_queued_does_not_restore_up(
     live = {"body": s2}
     patches: list[str] = []
 
-    def fake_get(**_):  # noqa: ANN003
+    def fake_get(**_):
         return live["body"]
 
-    def fake_patch(*, repo, issue_num, body, token):  # noqa: ANN001
+    def fake_patch(*, repo, issue_num, body, token):
         patches.append(body)
         live["body"] = body
 
@@ -1190,7 +1190,7 @@ def test_agent_tick_then_delete_block_queued_does_not_restore_up(
         gateway_token="gw",
         get_issue_body_fn=fake_get,
         patch_issue_body_fn=fake_patch,
-        post_comment=lambda **kw: 1,  # noqa: ARG005
+        post_comment=lambda **kw: 1,
     )
     _insert(
         store,
@@ -1235,7 +1235,7 @@ def test_agent_deletes_ticked_line_with_verified_at_restores_up(
         gateway_token="gw",
         get_issue_body_fn=lambda **_: body,
         patch_issue_body_fn=lambda **kw: patches.append(kw["body"]),
-        post_comment=lambda **kw: 1,  # noqa: ARG005
+        post_comment=lambda **kw: 1,
     )
     _insert(
         store,
@@ -1261,7 +1261,7 @@ def test_adr15_get_failure_skips_restore(tmp_path: Path) -> None:
     body = _body(checked=True)
     patches: list = []
 
-    def boom(**_):  # noqa: ANN003
+    def boom(**_):
         raise RuntimeError("github down")
 
     loop = DesignLoop(

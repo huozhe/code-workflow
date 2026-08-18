@@ -149,12 +149,12 @@ def test_feature_merged_writes_verification_block(tmp_path: Path) -> None:
     bodies: dict[int, str] = {issue: "## Session goal\n\nShip M5-0.\n"}
     patches: list[dict] = []
 
-    def fake_get(*, repo, issue_num, token):  # noqa: ANN001
+    def fake_get(*, repo, issue_num, token):
         assert token == "gw-tok"
         assert repo == "huozhe/code-workflow"
         return bodies[int(issue_num)]
 
-    def fake_patch(*, repo, issue_num, body, token):  # noqa: ANN001
+    def fake_patch(*, repo, issue_num, body, token):
         assert token == "gw-tok"
         patches.append({"repo": repo, "issue_num": issue_num, "body": body})
         bodies[int(issue_num)] = body
@@ -242,10 +242,10 @@ def test_feature_merged_idempotent_when_block_unchanged(tmp_path: Path) -> None:
     bodies = {issue: scaffold}
     patches: list = []
 
-    def fake_get(*, repo, issue_num, token):  # noqa: ANN001, ARG001
+    def fake_get(*, repo, issue_num, token):
         return bodies[int(issue_num)]
 
-    def fake_patch(*, repo, issue_num, body, token):  # noqa: ANN001, ARG001
+    def fake_patch(*, repo, issue_num, body, token):
         patches.append(body)
         bodies[int(issue_num)] = body
 
