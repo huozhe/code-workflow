@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import httpx
 
@@ -75,7 +76,7 @@ def get_issue(
     get = http_get or _gh_get
     data = get(url, token=token)
     if not isinstance(data, dict):
-        raise RuntimeError(f"GitHub issue response not an object: {data!r}")
+        raise TypeError(f"GitHub issue response not an object: {data!r}")
     body = data.get("body")
     return {
         "body": body if isinstance(body, str) else "",

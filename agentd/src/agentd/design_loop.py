@@ -16,19 +16,7 @@ from agentd.config import Config
 from agentd.db import Store, decompress_payload
 from agentd.digest import build_digest, digest_to_markdown
 from agentd.fsm import TERMINAL_STATES, transition
-from agentd.gitops import (
-    is_design_head_ref,
-    is_feature_head_ref,
-    local_branch_gone,
-    parse_role_branch,
-    project_dir_name,
-    project_key_from_repo,
-    project_path,
-    role_branch_name,
-    shared_clone_path,
-)
 from agentd.github_fetch import (
-    PrReviewThreadSnapshot,
     fetch_diff_stat,
     fetch_pr_review_threads,
 )
@@ -40,6 +28,34 @@ from agentd.github_write import (
     post_issue_comment,
     reopen_issue,
 )
+from agentd.gitops import (
+    is_design_head_ref,
+    is_feature_head_ref,
+    local_branch_gone,
+    parse_role_branch,
+    project_dir_name,
+    project_key_from_repo,
+    project_path,
+    role_branch_name,
+    shared_clone_path,
+)
+from agentd.intake import evaluate_intake
+from agentd.keychain import get_password
+from agentd.loop_safety import (
+    BudgetState,
+    SilentTurnTracker,
+    StallTracker,
+    progress_fingerprint,
+)
+from agentd.refusals import CapacityRefusal, StructuralRefusal
+from agentd.routing import (
+    RouteAction,
+    gateway_footer,
+    provenance_footer,
+    route_for_recipient,
+)
+from agentd.rpc_client import RunnerClient
+from agentd.supervisor import SessionSupervisor
 from agentd.verification import (
     checkbox_is_checked,
     classify_at_close,
@@ -49,14 +65,6 @@ from agentd.verification import (
     reinsert_verification_block,
     set_checkbox_in_body,
     upsert_verification_block,
-)
-from agentd.intake import evaluate_intake
-from agentd.keychain import get_password
-from agentd.loop_safety import (
-    BudgetState,
-    SilentTurnTracker,
-    StallTracker,
-    progress_fingerprint,
 )
 
 # Review webhook *parts* — not turn drivers (#49). Verdict lives on
@@ -115,15 +123,6 @@ _OBSERVED_PROGRESS_KINDS = frozenset(
         "owner_reply",
     }
 )
-from agentd.refusals import CapacityRefusal, StructuralRefusal
-from agentd.routing import (
-    RouteAction,
-    gateway_footer,
-    provenance_footer,
-    route_for_recipient,
-)
-from agentd.rpc_client import RunnerClient
-from agentd.supervisor import SessionSupervisor
 
 log = logging.getLogger("agentd.design_loop")
 
@@ -165,9 +164,7 @@ def _scratch_dir_cleared(ref: str) -> bool:
     path = Path(ref)
     if not path.exists():
         return True
-    if path.is_dir() and not any(path.iterdir()):
-        return True
-    return False
+    return bool(path.is_dir() and not any(path.iterdir()))
 
 
 def _lock_for_project_role(project_key: str, role: str) -> threading.Lock:
@@ -325,7 +322,7 @@ class DesignLoop:
                 log.exception("design_loop failed delivery=%s", row["delivery_id"])
         return n
 
-    def _process_one(self, row) -> None:
+    def _process_one(self, row: dict[str, Any]) -> None:
         delivery_id = str(row["delivery_id"])
         event = str(row["event"])
         action = str(row["action"]) if row["action"] is not None else None
@@ -907,7 +904,7 @@ class DesignLoop:
             with RunnerClient(host, port, token, timeout_s=2.0) as cli:
                 cli.call("health.ping")
             return True
-        except Exception:
+        except Exception:  # noqa: BLE001 — ping probe
             return False
 
     def _dispatch_turn(
@@ -1041,41 +1038,40 @@ class DesignLoop:
         # mid-turn, so they must not mark the role busy (#34).
         call_started = False
         try:
-            with lock:
-                with RunnerClient(
-                    host,
-                    int(port_s),
-                    bearer,
-                    timeout_s=rpc_timeout_s,
-                    on_notification=_on_runner_notify,
-                ) as cli:
-                    call_started = True
-                    # #45: FSM state must reach the runner prompt (role obligations).
-                    session_state = str(sess.get("state") or "PLANNING")
-                    result = cli.call(
-                        "turn.dispatch",
-                        {
-                            "turn_id": turn_id,
-                            "role": role,
-                            "session_state": session_state,
-                            "deadline_s": deadline_s,
-                            "event": dig,
-                            "context": {
-                                "worktree": (
-                                    f"/srv/agentd/sessions/{int(issue_num)}/"
-                                    f"{role}/worktrees/issue-{int(issue_num)}"
-                                ),
-                                "digest": (
-                                    f"/srv/agentd/sessions/{int(issue_num)}/"
-                                    f"{role}/context/digest-{turn_id}.md"
-                                ),
-                                "session_key": session_key,
-                                "project_key": project_key,
-                                "issue_num": int(issue_num),
-                            },
-                            "budget": {},
+            with lock, RunnerClient(
+                host,
+                int(port_s),
+                bearer,
+                timeout_s=rpc_timeout_s,
+                on_notification=_on_runner_notify,
+            ) as cli:
+                call_started = True
+                # #45: FSM state must reach the runner prompt (role obligations).
+                session_state = str(sess.get("state") or "PLANNING")
+                result = cli.call(
+                    "turn.dispatch",
+                    {
+                        "turn_id": turn_id,
+                        "role": role,
+                        "session_state": session_state,
+                        "deadline_s": deadline_s,
+                        "event": dig,
+                        "context": {
+                            "worktree": (
+                                f"/srv/agentd/sessions/{int(issue_num)}/"
+                                f"{role}/worktrees/issue-{int(issue_num)}"
+                            ),
+                            "digest": (
+                                f"/srv/agentd/sessions/{int(issue_num)}/"
+                                f"{role}/context/digest-{turn_id}.md"
+                            ),
+                            "session_key": session_key,
+                            "project_key": project_key,
+                            "issue_num": int(issue_num),
                         },
-                    )
+                        "budget": {},
+                    },
+                )
         except Exception as exc:
             ended = int(time.time())
             mid_turn_timeout = call_started and _is_rpc_timeout(exc)
@@ -1095,7 +1091,7 @@ class DesignLoop:
                 # the deadline the runner was given (not cancel — out of scope).
                 _role_busy_until[rkey] = started + float(deadline_s)
             else:
-                log.exception("turn.dispatch failed: %s", exc)
+                log.exception("turn.dispatch failed")
             self.store.finish_turn(
                 turn_id,
                 ended_at=ended,
@@ -1296,38 +1292,37 @@ class DesignLoop:
         call_started = False
         lock = _lock_for_project_role(project_key, role)
         try:
-            with lock:
-                with RunnerClient(
-                    host,
-                    int(port_s),
-                    bearer,
-                    timeout_s=float(self.config.rpc_timeout_s),
-                ) as cli:
-                    call_started = True
-                    result = cli.call(
-                        "turn.resume",
-                        {
-                            "turn_id": turn_id,
-                            "role": role,
-                            "session_state": str(sess.get("state") or ""),
-                            "deadline_s": deadline_s,
-                            "event": dig,
-                            "context": {
-                                "worktree": (
-                                    f"/srv/agentd/sessions/{issue_num}/"
-                                    f"{role}/worktrees/issue-{issue_num}"
-                                ),
-                                "digest": (
-                                    f"/srv/agentd/sessions/{issue_num}/"
-                                    f"{role}/context/digest-{turn_id}.md"
-                                ),
-                                "session_key": sk,
-                                "project_key": project_key,
-                                "issue_num": issue_num,
-                            },
-                            "budget": {},
+            with lock, RunnerClient(
+                host,
+                int(port_s),
+                bearer,
+                timeout_s=float(self.config.rpc_timeout_s),
+            ) as cli:
+                call_started = True
+                result = cli.call(
+                    "turn.resume",
+                    {
+                        "turn_id": turn_id,
+                        "role": role,
+                        "session_state": str(sess.get("state") or ""),
+                        "deadline_s": deadline_s,
+                        "event": dig,
+                        "context": {
+                            "worktree": (
+                                f"/srv/agentd/sessions/{issue_num}/"
+                                f"{role}/worktrees/issue-{issue_num}"
+                            ),
+                            "digest": (
+                                f"/srv/agentd/sessions/{issue_num}/"
+                                f"{role}/context/digest-{turn_id}.md"
+                            ),
+                            "session_key": sk,
+                            "project_key": project_key,
+                            "issue_num": issue_num,
                         },
-                    )
+                        "budget": {},
+                    },
+                )
         except Exception as exc:
             if call_started and _is_rpc_timeout(exc):
                 _role_busy_until[rkey] = started + float(deadline_s)
@@ -2128,9 +2123,8 @@ class DesignLoop:
                 )
         except Exception as exc:
             log.exception(
-                "reopen failed session=%s: %s — still escalating",
+                "reopen failed session=%s — still escalating",
                 session_key,
-                exc,
             )
             reason = f"{reason} [reopen_failed: {exc}]"
 
@@ -2533,11 +2527,10 @@ class DesignLoop:
                     body=body,
                     token=self._gateway_github_token(),
                 )
-        except Exception as exc:
+        except Exception:
             log.exception(
-                "completion summary failed session=%s: %s — already CLOSED",
+                "completion summary failed session=%s — already CLOSED",
                 session_key,
-                exc,
             )
         return dest
 
@@ -2808,9 +2801,8 @@ class DesignLoop:
         except Exception as exc:
             # Still pause — never silent about the failure (P5).
             log.exception(
-                "escalation comment failed session=%s: %s — session still paused",
+                "escalation comment failed session=%s — session still paused",
                 session_key,
-                exc,
             )
             reason = f"{reason} [comment_post_failed: {exc}]"
 
@@ -3217,9 +3209,12 @@ class DesignLoop:
                 if is_design:
                     # Unverified until §8.4 check runs (design path)
                     return "design_approved_unverified"
-        if event == "issue_comment" and action == "created":
-            if sender.lower() == self.config.owner.lower():
-                return "owner_reply"
+        if (
+            event == "issue_comment"
+            and action == "created"
+            and sender.lower() == self.config.owner.lower()
+        ):
+            return "owner_reply"
         return f"{event}.{action or 'none'}"
 
     def _may_create_session(

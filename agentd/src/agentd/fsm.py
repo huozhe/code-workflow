@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-
 # Design half (M3) + code half (M4-1). TEARDOWN/CLOSED are M5.
 # VERIFIED/ABANDONED are close *classifications* (sessions.classification),
 # not FSM states.

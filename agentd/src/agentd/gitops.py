@@ -111,12 +111,15 @@ def ensure_shared_clone(
     """
     path = shared_clone_path(root, repo_full)
     legacy = legacy_shared_clone_path(root, repo_full)
-    if not (path / ".git").exists() and not (path / "HEAD").exists():
-        if (legacy / ".git").exists() or (legacy / "HEAD").exists():
-            path.parent.mkdir(parents=True, exist_ok=True)
-            if not path.exists():
-                log.info("migrating legacy clone %s → %s", legacy, path)
-                legacy.rename(path)
+    if (
+        not (path / ".git").exists()
+        and not (path / "HEAD").exists()
+        and ((legacy / ".git").exists() or (legacy / "HEAD").exists())
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists():
+            log.info("migrating legacy clone %s → %s", legacy, path)
+            legacy.rename(path)
 
     with _lock_for(path):
         if not (path / ".git").exists() and not (path / "HEAD").exists():

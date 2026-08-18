@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import socket
-from typing import Any
+from typing import Any, Self
 
 log = logging.getLogger("agentd.rpc_client")
 
@@ -69,7 +69,7 @@ class RunnerClient:
                 pass
         self._sock = self._rfile = self._wfile = None
 
-    def __enter__(self) -> RunnerClient:
+    def __enter__(self) -> Self:
         self.connect()
         return self
 
@@ -111,7 +111,7 @@ class RunnerClient:
                     "rpc unexpected id %s (want %s); discarding", resp.get("id"), req_id
                 )
                 continue
-            if "error" in resp and resp["error"]:
+            if resp.get("error"):
                 err = resp["error"]
                 raise RpcError(int(err.get("code", -1)), str(err.get("message", "")))
             return resp.get("result")

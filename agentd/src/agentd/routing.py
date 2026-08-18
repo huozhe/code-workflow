@@ -94,7 +94,7 @@ def route_for_recipient(
     recipient = recipient_login.lower()
     owner_s = owner.lower()
     other = (other_bot_login or "").lower()
-    roles = {k: v.lower() for k, v in (role_logins or {}).items()}
+    {k: v.lower() for k, v in (role_logins or {}).items()}
     bots = {b.lower() for b in (bot_logins or set())} | {
         recipient,
         other,

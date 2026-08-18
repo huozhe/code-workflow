@@ -29,8 +29,8 @@ def macos_notify(message: str, title: str = "agentd: storage circuit breaker") -
             [
                 "osascript",
                 "-e",
-                f'display notification "{_escape_applescript(message)}" '
-                f'with title "{_escape_applescript(title)}" sound name "Basso"',
+                (f'display notification "{_escape_applescript(message)}" '
+                f'with title "{_escape_applescript(title)}" sound name "Basso"'),
             ],
             check=False,
             capture_output=True,

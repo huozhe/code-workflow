@@ -46,12 +46,14 @@ def evaluate_intake(
     issue = data.get("issue") if isinstance(data.get("issue"), dict) else {}
     assoc = str(issue.get("author_association") or data.get("author_association") or "")
 
-    if config.intake_actors == "collaborators":
-        if assoc.upper() not in _COLLAB_ASSOC:
-            return IntakeResult(
-                False,
-                f"actors:collaborators rejected author_association={assoc or 'missing'}",
-            )
+    if (
+        config.intake_actors == "collaborators"
+        and assoc.upper() not in _COLLAB_ASSOC
+    ):
+        return IntakeResult(
+            False,
+            f"actors:collaborators rejected author_association={assoc or 'missing'}",
+        )
 
     if config.intake_mode == "label":
         want = config.intake_label
