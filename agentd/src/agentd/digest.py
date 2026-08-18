@@ -6,6 +6,15 @@ import json
 from typing import Any
 
 
+def json_obj(value: object) -> dict[str, Any]:
+    """GitHub JSON object field, or empty. One boundary for union-attr."""
+    return value if isinstance(value, dict) else {}
+
+
+def json_str(value: object) -> str:
+    return value if isinstance(value, str) else ""
+
+
 def build_digest(
     *,
     event: str,
@@ -27,7 +36,7 @@ def build_digest(
         pr = data["pull_request"]
         d["pr"] = pr.get("number")
         d["pr_url"] = pr.get("html_url")
-        head = pr.get("head") if isinstance(pr.get("head"), dict) else {}
+        head = json_obj(pr.get("head"))
         d["head_sha"] = head.get("sha")
         # Mechanical Design/Feature PR signal (M3-D B1) — not the title.
         d["head_ref"] = head.get("ref")

@@ -250,9 +250,9 @@ class GarbageCollector:
                     continue
                 issue = int(child.name)
                 key = (proj.name, issue)
-                sess = sessions_by_issue.get(key)
-                state = str((sess or {}).get("state") or "")
-                if sess is not None and state != "CLOSED":
+                found = sessions_by_issue.get(key)
+                state = str((found or {}).get("state") or "")
+                if found is not None and state != "CLOSED":
                     continue
                 try:
                     mtime = int(child.stat().st_mtime)

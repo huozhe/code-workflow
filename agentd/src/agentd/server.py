@@ -8,7 +8,7 @@ import threading
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI, Header, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
@@ -22,6 +22,10 @@ from agentd.dispatcher import Dispatcher
 from agentd.docker_wait import docker_socket_ready
 from agentd.governor import ResourceGovernor
 from agentd.hmac_verify import verify_signature
+
+if TYPE_CHECKING:
+    from agentd.gc import GarbageCollector
+    from agentd.reconciler import Reconciler
 
 log = logging.getLogger("agentd.server")
 
@@ -37,8 +41,8 @@ class AppState:
         self.nudge = threading.Event()
         self.governor: ResourceGovernor | None = None
         self.dispatcher: Dispatcher | None = None
-        self.reconciler = None
-        self.gc = None
+        self.reconciler: Reconciler | None = None
+        self.gc: GarbageCollector | None = None
 
 
 def create_app(

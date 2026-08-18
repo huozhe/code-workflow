@@ -9,6 +9,8 @@ from typing import Any
 
 import httpx
 
+from agentd.digest import json_obj
+
 log = logging.getLogger("agentd.github_fetch")
 
 _THREADS_QUERY = """
@@ -224,7 +226,7 @@ def fetch_session_snapshot(
             return False
         if not isinstance(pr, dict) or not pr.get("node_id"):
             return bool(isinstance(pr, dict) and pr.get("merged"))
-        head = pr.get("head") if isinstance(pr.get("head"), dict) else {}
+        head = json_obj(pr.get("head"))
         head_ref = str(head.get("ref") or "")
         pr_title = str(pr.get("title") or "")
         nodes.append(
