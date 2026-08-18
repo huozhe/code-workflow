@@ -42,9 +42,10 @@ testpaths = ["tests"]
 target-version = "py312"
 
 [tool.ruff.lint]
-# #134: select is the codes the tree already noqas. Do not auto-fix RUF100
-# until this set is stable — live and dead directives are interleaved.
-select = [
+# #134: extend the default set with the codes the tree already noqas.
+# `select` would drop F821/E9. Do not auto-fix RUF100 until this set
+# is stable — live and dead directives are interleaved.
+extend-select = [
     "ANN001",
     "ANN002",
     "ANN003",
@@ -53,5 +54,4 @@ select = [
     "BLE001",
     "E402",
     "N802",
-    "SIM115",
 ]
