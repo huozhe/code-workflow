@@ -68,7 +68,7 @@ def test_capacity_refusal_leaves_deferred(tmp_path: Path) -> None:
     posts: list[dict] = []
 
     class CapSup:
-        def ensure_session(self, **kwargs):  # noqa: ANN003
+        def ensure_session(self, **kwargs):
             raise CapacityRefusal("max_hot_containers=2 reached (hot=2)")
 
     loop = DesignLoop(
@@ -97,13 +97,13 @@ def test_structural_refusal_escalates_once_and_blocks_project(tmp_path: Path) ->
     ensure_calls = {"n": 0}
 
     class StructSup:
-        def ensure_session(self, **kwargs):  # noqa: ANN003
+        def ensure_session(self, **kwargs):
             ensure_calls["n"] += 1
             raise StructuralRefusal(
                 "FORBIDDEN: unexpected path under /srv/agentd: 'work'"
             )
 
-    def fake_post(*, repo, issue_num, body, token):  # noqa: ANN001
+    def fake_post(*, repo, issue_num, body, token):
         posts.append(
             {"repo": repo, "issue_num": issue_num, "body": body, "token": token}
         )
@@ -176,7 +176,7 @@ def test_open_project_block_skips_worktree_prepare(tmp_path: Path, monkeypatch) 
     sup = SessionSupervisor(store, cfg)
     called = {"n": 0}
 
-    def boom(*a, **k):  # noqa: ANN002, ANN003
+    def boom(*a, **k):
         called["n"] += 1
         raise AssertionError("must not prepare layout while blocked")
 
@@ -255,7 +255,7 @@ def test_resume_clears_project_block(tmp_path: Path) -> None:
     )
 
     class NoRunner:
-        def ensure_session(self, **kwargs):  # noqa: ANN003
+        def ensure_session(self, **kwargs):
             # Still structural if owner did not fix — test success path: clear only.
             raise CapacityRefusal("max_hot_containers=1 reached")
 

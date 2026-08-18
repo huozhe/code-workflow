@@ -73,6 +73,15 @@ def test_ruff_extends_defaults_not_replaces_them() -> None:
     assert "RUF100" in lint["extend-select"]
 
 
+def test_ruff_ignores_ann_arg_on_test_fakes() -> None:
+    """A fake is unused args without types. Scoped ignore, not a blanket (#134)."""
+    data = tomllib.loads(_PYPROJECT.read_text(encoding="utf-8"))
+    ignores = data["tool"]["ruff"]["lint"]["per-file-ignores"]
+    tests = ignores["tests/*"]
+    for code in ("ANN001", "ANN002", "ANN003", "ARG001", "ARG005"):
+        assert code in tests, code
+
+
 def test_workflow_uses_are_fully_pinned() -> None:
     """@v10 is not a real tag on setup-uv after v7. Pin vX.Y.Z or a SHA."""
     for path in (_PR, _IMAGE):

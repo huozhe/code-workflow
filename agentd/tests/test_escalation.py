@@ -84,7 +84,7 @@ def test_escalate_posts_comment_and_records_id(tmp_path: Path) -> None:
     )
     posts: list[dict] = []
 
-    def fake_post(*, repo, issue_num, body, token):  # noqa: ANN001
+    def fake_post(*, repo, issue_num, body, token):
         posts.append(
             {"repo": repo, "issue_num": issue_num, "body": body, "token": token}
         )
@@ -136,7 +136,7 @@ def test_escalation_echo_dropped_not_dispatched_after_unpause(tmp_path: Path) ->
     )
     posts: list[str] = []
 
-    def fake_post(*, repo, issue_num, body, token):  # noqa: ANN001
+    def fake_post(*, repo, issue_num, body, token):
         posts.append(body)
         return 42
 
@@ -221,7 +221,7 @@ def test_owner_reply_resumes_pre_pause_state(tmp_path: Path) -> None:
         cfg,
         supervisor=None,
         dispatch_turns=False,
-        post_comment=lambda **k: 55,  # noqa: ARG005
+        post_comment=lambda **k: 55,
         gateway_token="t",
     )
     loop._escalate(sk, "architect", "needs human on API shape")

@@ -281,7 +281,7 @@ def test_issue_comment_on_design_pr_resolves_session(tmp_path: Path) -> None:
         cfg,
         supervisor=None,
         dispatch_turns=False,
-        post_comment=lambda **k: 1,  # noqa: ARG005
+        post_comment=lambda **k: 1,
         gateway_token="gw",
     )
     # Owner comments *on the Design PR* (webhook issue_num = 50 = PR number)

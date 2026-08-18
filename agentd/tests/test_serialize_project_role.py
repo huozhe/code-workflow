@@ -68,16 +68,16 @@ def test_two_issues_same_role_serialize(tmp_path: Path) -> None:
     lock = threading.Lock()
 
     class FakeClient:
-        def __init__(self, *a, **k):  # noqa: ANN002, ANN003
+        def __init__(self, *a, **k):
             pass
 
         def __enter__(self):
             return self
 
-        def __exit__(self, *a):  # noqa: ANN002
+        def __exit__(self, *a):
             return False
 
-        def call(self, method, params=None):  # noqa: ANN001
+        def call(self, method, params=None):
             if method != "turn.dispatch":
                 return {"ok": True}
             sk = (params or {}).get("context", {}).get("session_key", "?")

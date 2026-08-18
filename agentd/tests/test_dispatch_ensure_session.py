@@ -66,16 +66,16 @@ def _owner_comment(store: Store, *, did: str) -> None:
 class _RecordingClient:
     calls: list[tuple[str, dict]] = []
 
-    def __init__(self, *a, **k):  # noqa: ANN002, ANN003
+    def __init__(self, *a, **k):
         pass
 
     def __enter__(self):
         return self
 
-    def __exit__(self, *a):  # noqa: ANN002
+    def __exit__(self, *a):
         return False
 
-    def call(self, method, params=None):  # noqa: ANN001
+    def call(self, method, params=None):
         self.calls.append((method, dict(params or {})))
         return {"status": "done", "summary": "ok", "public_actions": []}
 
@@ -83,7 +83,7 @@ class _RecordingClient:
 class _UnreachablePing(_RecordingClient):
     """health.ping fails (dead endpoint); turn.dispatch still works after ensure."""
 
-    def call(self, method, params=None):  # noqa: ANN001
+    def call(self, method, params=None):
         if method == "health.ping":
             raise OSError("Connection refused")
         return super().call(method, params)
@@ -95,7 +95,7 @@ class _EnsureSupervisor:
         self.calls = 0
         self.clobber_intake = clobber_intake
 
-    def ensure_session(self, **k):  # noqa: ANN003
+    def ensure_session(self, **k):
         self.calls += 1
         if self.clobber_intake:
             self.store.upsert_session(
@@ -128,7 +128,7 @@ def _run(
 ) -> DesignLoop:
     import agentd.design_loop as dl
 
-    def _post(**k):  # noqa: ANN003
+    def _post(**k):
         if posts is not None:
             posts.append(k)
         return 1
@@ -216,7 +216,7 @@ def test_ensure_failure_leaves_deferred_not_routed(tmp_path: Path) -> None:
     _seed_session(store)
 
     class Boom:
-        def ensure_session(self, **k):  # noqa: ANN003
+        def ensure_session(self, **k):
             raise RuntimeError("docker daemon down")
 
     _owner_comment(store, did="d-boom")
@@ -238,7 +238,7 @@ def test_capacity_refusal_stays_typed_and_deferred(tmp_path: Path) -> None:
     _seed_session(store)
 
     class Cap:
-        def ensure_session(self, **k):  # noqa: ANN003
+        def ensure_session(self, **k):
             raise CapacityRefusal("max_hot_containers=2 reached (hot=2)")
 
     _owner_comment(store, did="d-cap")
@@ -276,7 +276,7 @@ def test_ensure_failure_exhausts_and_escalates(tmp_path: Path) -> None:
     posts: list = []
 
     class Boom:
-        def ensure_session(self, **k):  # noqa: ANN003
+        def ensure_session(self, **k):
             raise RuntimeError("still down")
 
     import agentd.design_loop as dl

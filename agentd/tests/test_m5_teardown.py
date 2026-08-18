@@ -151,12 +151,12 @@ def _loop(
     live_body: str | None = None,
     live_state: str = "closed",
 ) -> DesignLoop:
-    def _post(**k):  # noqa: ANN003
+    def _post(**k):
         if posts is not None:
             posts.append(k)
         return 1
 
-    def _get_issue(**k):  # noqa: ANN003
+    def _get_issue(**k):
         return {
             "body": live_body if live_body is not None else _block(checked=True),
             "state": live_state,
@@ -379,16 +379,16 @@ def test_reclose_after_closed_is_noop(tmp_path: Path) -> None:
 class _RecordingClient:
     calls: list[tuple[str, dict]] = []
 
-    def __init__(self, *a, **k):  # noqa: ANN002, ANN003
+    def __init__(self, *a, **k):
         pass
 
     def __enter__(self):
         return self
 
-    def __exit__(self, *a):  # noqa: ANN002
+    def __exit__(self, *a):
         return False
 
-    def call(self, method, params=None):  # noqa: ANN001
+    def call(self, method, params=None):
         self.__class__.calls.append((method, dict(params or {})))
         return {"status": "done", "summary": "cleaned", "public_actions": []}
 
@@ -572,7 +572,7 @@ def test_gateway_marks_removed_when_path_gone(tmp_path: Path) -> None:
     )
 
     class RemoveOnTurn(_RecordingClient):
-        def call(self, method, params=None):  # noqa: ANN001
+        def call(self, method, params=None):
             role = (params or {}).get("role")
             if role == "developer" and wt.exists():
                 wt.rmdir()
@@ -633,7 +633,7 @@ def test_branch_marked_removed_only_when_git_list_empty(tmp_path: Path) -> None:
     )
 
     class DeleteBranch(_RecordingClient):
-        def call(self, method, params=None):  # noqa: ANN001
+        def call(self, method, params=None):
             role = (params or {}).get("role")
             if role == "developer":
                 subprocess.run(
@@ -672,7 +672,7 @@ class _IntakeClobberSupervisor:
         self.store = store
         self.calls = 0
 
-    def ensure_session(self, **k):  # noqa: ANN003
+    def ensure_session(self, **k):
         self.calls += 1
         now = 9
         self.store.upsert_session(
@@ -795,7 +795,7 @@ def test_redelivery_retries_only_when_ledger_still_open(tmp_path: Path) -> None:
 
 
 class _NeedsHumanClient(_RecordingClient):
-    def call(self, method, params=None):  # noqa: ANN001
+    def call(self, method, params=None):
         super().call(method, params)
         return {"status": "needs_human", "summary": "cleanup", "public_actions": []}
 
@@ -872,7 +872,7 @@ def test_stale_runner_row_still_calls_ensure_session(tmp_path: Path) -> None:
 
 
 class _FailedClient(_RecordingClient):
-    def call(self, method, params=None):  # noqa: ANN001
+    def call(self, method, params=None):
         super().call(method, params)
         return {
             "status": "failed",
@@ -959,7 +959,7 @@ class _CapacitySupervisor:
     def __init__(self) -> None:
         self.calls = 0
 
-    def ensure_session(self, **k):  # noqa: ANN003
+    def ensure_session(self, **k):
         self.calls += 1
         raise CapacityRefusal("hot slots full")
 
@@ -1029,7 +1029,7 @@ def test_teardown_second_role_does_not_resurrect_branch(tmp_path: Path) -> None:
         def __init__(self) -> None:
             self.calls = 0
 
-        def ensure_session(self, **k):  # noqa: ANN003
+        def ensure_session(self, **k):
             self.calls += 1
             listed = subprocess.run(
                 ["git", "branch", "--list", branch],
@@ -1054,7 +1054,7 @@ def test_teardown_second_role_does_not_resurrect_branch(tmp_path: Path) -> None:
             )
 
     class _DeleteOwnBranch(_RecordingClient):
-        def call(self, method, params=None):  # noqa: ANN001
+        def call(self, method, params=None):
             if (params or {}).get("role") == "developer":
                 subprocess.run(
                     ["git", "branch", "-D", branch],

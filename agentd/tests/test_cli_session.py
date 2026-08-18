@@ -78,7 +78,7 @@ def test_claude_turn_ends_on_type_result(tmp_path: Path) -> None:
 def test_claude_spawn_uses_continue_flag(tmp_path: Path) -> None:
     captured: list[list[str]] = []
 
-    def fake_popen(**kwargs):  # noqa: ANN003
+    def fake_popen(**kwargs):
         cmd = kwargs.get("args") or kwargs.get("args")
         if "args" in kwargs:
             cmd = kwargs["args"]
@@ -391,7 +391,7 @@ def test_stderr_redirected_to_role_log_not_pipe(tmp_path: Path) -> None:
     """B3: stderr must not be subprocess.PIPE (buffer fill wedge)."""
     seen: dict[str, Any] = {}
 
-    def fake_popen(**kwargs):  # noqa: ANN003
+    def fake_popen(**kwargs):
         seen.update(kwargs)
         proc = MagicMock()
         proc.poll.return_value = None
@@ -492,7 +492,7 @@ def test_role_lock_serializes_pipe_writes(tmp_path: Path) -> None:
         sess.proc = MagicMock()
         sess.proc.poll.return_value = None
 
-        def slow_turn(prompt: str, deadline_s: int, progress=None) -> dict:  # noqa: ANN001
+        def slow_turn(prompt: str, deadline_s: int, progress=None) -> dict:
             order.append(f"start:{prompt}")
             time.sleep(0.08)
             order.append(f"end:{prompt}")
@@ -518,7 +518,7 @@ def test_role_lock_serializes_pipe_writes(tmp_path: Path) -> None:
 def test_ensure_role_dirs_chowns_when_root(tmp_path: Path) -> None:
     chowns: list[tuple] = []
 
-    def fake_chown(path, uid, gid):  # noqa: ANN001
+    def fake_chown(path, uid, gid):
         chowns.append((str(path), uid, gid))
 
     sess = cli_session.LiveCliSession(

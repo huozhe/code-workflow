@@ -105,7 +105,7 @@ def test_architect_approve_emits_merge_authorized(tmp_path: Path) -> None:
     head = "abc123def456"
     posts: list[str] = []
 
-    def fake_get(url: str, *, token: str):  # noqa: ARG001
+    def fake_get(url: str, *, token: str):
         if url.endswith("/reviews"):
             return [
                 {
@@ -198,7 +198,7 @@ def test_failed_check_escalates_permanent(tmp_path: Path) -> None:
     head = "abc123"
     posts: list[str] = []
 
-    def fake_get(url: str, *, token: str):  # noqa: ARG001
+    def fake_get(url: str, *, token: str):
         if url.endswith("/reviews"):
             return [
                 {
@@ -290,7 +290,7 @@ def test_unknown_mergeable_leaves_deferred(tmp_path: Path) -> None:
     posts: list[str] = []
     dl._merge_auth_attempts.clear()
 
-    def fake_get(url: str, *, token: str):  # noqa: ARG001
+    def fake_get(url: str, *, token: str):
         if url.endswith("/reviews"):
             return [
                 {
@@ -372,7 +372,7 @@ def test_transient_exhausted_retries_escalate(tmp_path: Path) -> None:
     posts: list[str] = []
     dl._merge_auth_attempts.clear()
 
-    def fake_get(url: str, *, token: str):  # noqa: ARG001
+    def fake_get(url: str, *, token: str):
         if url.endswith("/reviews"):
             return [
                 {

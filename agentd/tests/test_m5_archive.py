@@ -119,7 +119,7 @@ def _insert_close(
 
 
 def _loop(store: Store, tmp: Path, *, posts: list | None = None) -> DesignLoop:
-    def _post(**k):  # noqa: ANN003
+    def _post(**k):
         if posts is not None:
             posts.append(k)
         return 1
@@ -433,7 +433,7 @@ def test_archive_failure_exhausts_and_escalates(tmp_path: Path, monkeypatch) -> 
 
     dl._delivery_attempts.clear()
 
-    def boom(**k):  # noqa: ANN003
+    def boom(**k):
         raise OSError("disk full")
 
     monkeypatch.setattr(dl, "archive_and_purge", boom)

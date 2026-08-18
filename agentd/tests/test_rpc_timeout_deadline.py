@@ -73,16 +73,16 @@ def test_dispatch_sends_config_deadline_and_derived_timeout(tmp_path: Path) -> N
     seen: dict[str, object] = {}
 
     class FakeClient:
-        def __init__(self, *a, **k):  # noqa: ANN002, ANN003
+        def __init__(self, *a, **k):
             seen["timeout_s"] = k.get("timeout_s")
 
         def __enter__(self):
             return self
 
-        def __exit__(self, *a):  # noqa: ANN002
+        def __exit__(self, *a):
             return False
 
-        def call(self, method, params=None):  # noqa: ANN001
+        def call(self, method, params=None):
             seen["method"] = method
             seen["deadline_s"] = (params or {}).get("deadline_s")
             return {"status": "done", "summary": "ok"}
@@ -123,16 +123,16 @@ def test_gateway_timeout_records_turn_and_transcript(tmp_path: Path) -> None:
     _role_busy_until.clear()
 
     class TimeoutClient:
-        def __init__(self, *a, **k):  # noqa: ANN002, ANN003
+        def __init__(self, *a, **k):
             pass
 
         def __enter__(self):
             return self
 
-        def __exit__(self, *a):  # noqa: ANN002
+        def __exit__(self, *a):
             return False
 
-        def call(self, method, params=None):  # noqa: ANN001
+        def call(self, method, params=None):
             raise TimeoutError("timed out")
 
     import agentd.design_loop as dl
@@ -196,16 +196,16 @@ def test_gateway_timeout_role_busy_returns_immediately(tmp_path: Path) -> None:
     calls = {"n": 0}
 
     class FlakyClient:
-        def __init__(self, *a, **k):  # noqa: ANN002, ANN003
+        def __init__(self, *a, **k):
             pass
 
         def __enter__(self):
             return self
 
-        def __exit__(self, *a):  # noqa: ANN002
+        def __exit__(self, *a):
             return False
 
-        def call(self, method, params=None):  # noqa: ANN001
+        def call(self, method, params=None):
             if method != "turn.dispatch":
                 return {"ok": True}
             calls["n"] += 1
@@ -267,13 +267,13 @@ def test_connect_failure_does_not_mark_busy(tmp_path: Path) -> None:
     _role_busy_until.clear()
 
     class BoomClient:
-        def __init__(self, *a, **k):  # noqa: ANN002, ANN003
+        def __init__(self, *a, **k):
             pass
 
         def __enter__(self):
             raise ConnectionRefusedError("refused")
 
-        def __exit__(self, *a):  # noqa: ANN002
+        def __exit__(self, *a):
             return False
 
     import agentd.design_loop as dl

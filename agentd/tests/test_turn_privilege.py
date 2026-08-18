@@ -262,7 +262,7 @@ def test_ensure_role_cli_spawned_tmp_xdg_ignore_env_pin(
 
     captured: dict[str, Path] = {}
 
-    def fake_get_or_create(**kwargs):  # noqa: ANN003
+    def fake_get_or_create(**kwargs):
         captured.update(kwargs)
         fake = MagicMock()
         fake.proc = MagicMock()
@@ -327,7 +327,7 @@ def test_live_spawn_drops_privs_once_via_popen_user(
 
     spawn_kwargs: list[dict] = []
 
-    def fake_popen(**kwargs):  # noqa: ANN003
+    def fake_popen(**kwargs):
         spawn_kwargs.append(dict(kwargs))
         fake = MagicMock()
         fake.poll.return_value = None
@@ -384,13 +384,13 @@ def test_drop_privs_clears_groups_and_rejects_root() -> None:
     """_drop_privs: setgroups([]) → setgid → setuid; fails closed if still euid 0."""
     calls: list[tuple] = []
 
-    def setgroups(g):  # noqa: ANN001
+    def setgroups(g):
         calls.append(("setgroups", list(g)))
 
-    def setgid(g):  # noqa: ANN001
+    def setgid(g):
         calls.append(("setgid", g))
 
-    def setuid(u):  # noqa: ANN001
+    def setuid(u):
         calls.append(("setuid", u))
 
     with patch("agentd_runner.cli_session.os.setgroups", side_effect=setgroups), patch(

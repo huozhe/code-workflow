@@ -175,16 +175,16 @@ def test_dispatch_passes_session_state(tmp_path: Path) -> None:
     seen: dict[str, object] = {}
 
     class FakeClient:
-        def __init__(self, *a, **k):  # noqa: ANN002, ANN003
+        def __init__(self, *a, **k):
             pass
 
         def __enter__(self):
             return self
 
-        def __exit__(self, *a):  # noqa: ANN002
+        def __exit__(self, *a):
             return False
 
-        def call(self, method, params=None):  # noqa: ANN001
+        def call(self, method, params=None):
             seen["method"] = method
             seen["params"] = dict(params or {})
             return {"status": "done", "summary": "ok"}

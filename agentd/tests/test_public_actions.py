@@ -410,16 +410,16 @@ def test_design_loop_escalates_after_silent_run(tmp_path: Path) -> None:
     import agentd.design_loop as dl
 
     class FakeClient:
-        def __init__(self, *a, **k):  # noqa: ANN002, ANN003
+        def __init__(self, *a, **k):
             pass
 
         def __enter__(self):
             return self
 
-        def __exit__(self, *a):  # noqa: ANN002
+        def __exit__(self, *a):
             return False
 
-        def call(self, method, params=None):  # noqa: ANN001
+        def call(self, method, params=None):
             return {
                 "status": "done",
                 "summary": "nothing needed",
@@ -525,16 +525,16 @@ def test_design_loop_claimed_action_without_observation_still_counts(
     import agentd.design_loop as dl
 
     class FakeClient:
-        def __init__(self, *a, **k):  # noqa: ANN002, ANN003
+        def __init__(self, *a, **k):
             pass
 
         def __enter__(self):
             return self
 
-        def __exit__(self, *a):  # noqa: ANN002
+        def __exit__(self, *a):
             return False
 
-        def call(self, method, params=None):  # noqa: ANN001
+        def call(self, method, params=None):
             return {
                 "status": "done",
                 "summary": "opened pr",

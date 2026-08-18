@@ -201,16 +201,16 @@ def _status(store: Store, did: str) -> str:
 class _RecordingClient:
     calls: list[tuple[str, dict]] = []
 
-    def __init__(self, *a, **k):  # noqa: ANN002, ANN003
+    def __init__(self, *a, **k):
         pass
 
     def __enter__(self):
         return self
 
-    def __exit__(self, *a):  # noqa: ANN002
+    def __exit__(self, *a):
         return False
 
-    def call(self, method, params=None):  # noqa: ANN001
+    def call(self, method, params=None):
         self.calls.append((method, dict(params or {})))
         return {"status": "done", "summary": "ok", "public_actions": []}
 
@@ -227,23 +227,23 @@ def _loop(
     live_state: str = "closed",
     get_issue_fn=None,
 ) -> DesignLoop:
-    def _post(**k):  # noqa: ANN003
+    def _post(**k):
         if posts is not None:
             posts.append(k)
         return 1
 
-    def _patch(**k):  # noqa: ANN003
+    def _patch(**k):
         if patches is not None:
             patches.append(k)
         if live_body is not None:
             pass
 
-    def _get(**k):  # noqa: ANN003
+    def _get(**k):
         if gets is not None:
             gets.append(k)
         return live_body if live_body is not None else _body(checked=True)
 
-    def _get_issue(**k):  # noqa: ANN003
+    def _get_issue(**k):
         if gets is not None:
             gets.append(k)
         return {
@@ -380,7 +380,7 @@ def test_failed_read_skips_patch_still_escalates(tmp_path: Path) -> None:
     )
     patches: list = []
 
-    def boom(**_):  # noqa: ANN003
+    def boom(**_):
         raise RuntimeError("github down")
 
     DesignLoop(
@@ -654,7 +654,7 @@ def test_mirror_fetch_fail_classifies_from_payload(tmp_path: Path) -> None:
         received_at=now - CLOSE_RECONCILE_GRACE_S - 5,
     )
 
-    def boom(**_):  # noqa: ANN003
+    def boom(**_):
         raise RuntimeError("github down")
 
     DesignLoop(

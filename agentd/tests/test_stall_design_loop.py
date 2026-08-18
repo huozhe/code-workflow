@@ -81,13 +81,13 @@ def test_zero_thread_escalates_via_fetch_boundary_fp_disarmed(tmp_path: Path) ->
     open_ids = ["PRRT_thread_a", "PRRT_thread_b"]
     static_head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
-    def fake_threads(*, repo, pr_number, token):  # noqa: ANN001
+    def fake_threads(*, repo, pr_number, token):
         assert repo == "huozhe/code-workflow"
         assert pr_number == 9
         assert token == "tok"
         return _snap(open_ids, head=static_head)
 
-    def fake_diff(*, repo, base, head, token):  # noqa: ANN001
+    def fake_diff(*, repo, base, head, token):
         assert base == "main"
         return "file.py|modified|1+0-"
 
@@ -153,7 +153,7 @@ def test_thread_resolution_prevents_zero_thread_escalate(tmp_path: Path) -> None
     ]
     idx = {"i": 0}
 
-    def fake_threads(**k):  # noqa: ANN003
+    def fake_threads(**k):
         s = snaps[min(idx["i"], len(snaps) - 1)]
         idx["i"] += 1
         return s
@@ -164,10 +164,10 @@ def test_thread_resolution_prevents_zero_thread_escalate(tmp_path: Path) -> None
         cfg,
         supervisor=None,
         dispatch_turns=False,
-        post_comment=lambda **k: posts.append(1) or 1,  # noqa: ARG005
+        post_comment=lambda **k: posts.append(1) or 1,
         gateway_token="gw",
         fetch_threads=fake_threads,
-        fetch_diff=lambda **k: "frozen",  # noqa: ARG005
+        fetch_diff=lambda **k: "frozen",
         github_token="tok",
     )
     head = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -215,10 +215,10 @@ def test_missing_fetch_skips_signals_no_countdown(tmp_path: Path) -> None:
         cfg,
         supervisor=None,
         dispatch_turns=False,
-        post_comment=lambda **k: posts.append(1) or 1,  # noqa: ARG005
+        post_comment=lambda **k: posts.append(1) or 1,
         gateway_token="gw",
-        fetch_threads=lambda **k: None,  # noqa: ARG005
-        fetch_diff=lambda **k: None,  # noqa: ARG005
+        fetch_threads=lambda **k: None,
+        fetch_diff=lambda **k: None,
         github_token="tok",
     )
     head = "cccccccccccccccccccccccccccccccccccccccc"
