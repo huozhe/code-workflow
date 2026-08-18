@@ -43,8 +43,8 @@ target-version = "py312"
 
 [tool.ruff.lint]
 # #134: extend the default set with the codes the tree already noqas.
-# `select` would drop F821/E9. Do not auto-fix RUF100 until this set
-# is stable — live and dead directives are interleaved.
+# `select` would drop F821/E9. RUF100 is now load-bearing: every
+# leftover unused-noqa names a code this list enables.
 extend-select = [
     "ANN001",
     "ANN002",
@@ -54,4 +54,5 @@ extend-select = [
     "BLE001",
     "E402",
     "N802",
+    "RUF100",
 ]

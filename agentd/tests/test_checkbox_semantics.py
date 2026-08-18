@@ -367,8 +367,8 @@ def test_lost_owner_tick_is_not_reverted_by_agent_step_refinement(
         supervisor=None,
         dispatch_turns=False,
         gateway_token="gw",
-        patch_issue_body_fn=lambda **kw: patches.append(kw),  # noqa: ARG005
-        post_comment=lambda **kw: comments.append(kw) or 1,  # noqa: ARG005
+        patch_issue_body_fn=lambda **kw: patches.append(kw),
+        post_comment=lambda **kw: comments.append(kw) or 1,
     )
     _insert(
         store,
@@ -456,8 +456,8 @@ def test_agent_refines_steps_no_patch_when_checkbox_ok(tmp_path: Path) -> None:
         supervisor=None,
         dispatch_turns=False,
         gateway_token="gw",
-        patch_issue_body_fn=lambda **kw: patches.append(kw),  # noqa: ARG005
-        post_comment=lambda **kw: comments.append(kw) or 1,  # noqa: ARG005
+        patch_issue_body_fn=lambda **kw: patches.append(kw),
+        post_comment=lambda **kw: comments.append(kw) or 1,
     )
     _insert(
         store,
@@ -544,8 +544,8 @@ def test_agent_inserts_tick_into_block_without_line(tmp_path: Path) -> None:
         dispatch_turns=False,
         gateway_token="gw",
         get_issue_body_fn=lambda **_: body,
-        patch_issue_body_fn=lambda **kw: patches.append(kw["body"]),  # noqa: ARG005
-        post_comment=lambda **kw: comments.append(kw) or 1,  # noqa: ARG005
+        patch_issue_body_fn=lambda **kw: patches.append(kw["body"]),
+        post_comment=lambda **kw: comments.append(kw) or 1,
     )
     _insert(
         store,
@@ -592,8 +592,8 @@ def test_agent_removes_unticked_line_restored(tmp_path: Path) -> None:
         dispatch_turns=False,
         gateway_token="gw",
         get_issue_body_fn=lambda **_: body,
-        patch_issue_body_fn=lambda **kw: patches.append(kw["body"]),  # noqa: ARG005
-        post_comment=lambda **kw: comments.append(kw["body"]) or 1,  # noqa: ARG005
+        patch_issue_body_fn=lambda **kw: patches.append(kw["body"]),
+        post_comment=lambda **kw: comments.append(kw["body"]) or 1,
     )
     _insert(
         store,
@@ -633,8 +633,8 @@ def test_agent_bare_tick_outside_sentinels_neutralized(tmp_path: Path) -> None:
         dispatch_turns=False,
         gateway_token="gw",
         get_issue_body_fn=lambda **_: body,
-        patch_issue_body_fn=lambda **kw: patches.append(kw["body"]),  # noqa: ARG005
-        post_comment=lambda **kw: comments.append(kw["body"]) or 1,  # noqa: ARG005
+        patch_issue_body_fn=lambda **kw: patches.append(kw["body"]),
+        post_comment=lambda **kw: comments.append(kw["body"]) or 1,
     )
     _insert(
         store,
@@ -672,7 +672,7 @@ def test_failed_patch_does_not_claim_restored(tmp_path: Path) -> None:
     body = _body(checked=True)
     comments: list = []
 
-    def boom(**kw):  # noqa: ANN001, ARG001
+    def boom(**kw):  # noqa: ARG001
         raise RuntimeError("github down")
 
     loop = DesignLoop(
@@ -683,7 +683,7 @@ def test_failed_patch_does_not_claim_restored(tmp_path: Path) -> None:
         gateway_token="gw",
         get_issue_body_fn=lambda **_: body,
         patch_issue_body_fn=boom,
-        post_comment=lambda **kw: comments.append(kw) or 1,  # noqa: ARG005
+        post_comment=lambda **kw: comments.append(kw) or 1,
     )
     _insert(
         store,
@@ -711,7 +711,7 @@ def test_missing_body_from_skips_restore(tmp_path: Path) -> None:
         supervisor=None,
         dispatch_turns=False,
         gateway_token="gw",
-        patch_issue_body_fn=lambda **kw: patches.append(kw),  # noqa: ARG005
+        patch_issue_body_fn=lambda **kw: patches.append(kw),
     )
     _insert(
         store,
@@ -739,7 +739,7 @@ def test_gateway_edit_ignored(tmp_path: Path) -> None:
         supervisor=None,
         dispatch_turns=False,
         gateway_token="gw",
-        patch_issue_body_fn=lambda **kw: patches.append(kw),  # noqa: ARG005
+        patch_issue_body_fn=lambda **kw: patches.append(kw),
     )
     _insert(
         store,
@@ -770,8 +770,8 @@ def test_owner_who_is_agent_not_recorded(tmp_path: Path) -> None:
         dispatch_turns=False,
         gateway_token="gw",
         get_issue_body_fn=lambda **_: body,
-        patch_issue_body_fn=lambda **kw: patches.append(kw.get("body")),  # noqa: ARG005
-        post_comment=lambda **kw: comments.append(kw) or 1,  # noqa: ARG005
+        patch_issue_body_fn=lambda **kw: patches.append(kw.get("body")),
+        post_comment=lambda **kw: comments.append(kw) or 1,
     )
     _insert(
         store,
@@ -824,7 +824,7 @@ def test_agent_edit_outside_awaiting_no_restore(tmp_path: Path) -> None:
         supervisor=None,
         dispatch_turns=False,
         gateway_token="gw",
-        patch_issue_body_fn=lambda **kw: patches.append(kw),  # noqa: ARG005
+        patch_issue_body_fn=lambda **kw: patches.append(kw),
     )
     _insert(
         store,
@@ -870,7 +870,7 @@ def test_adr15_corrected_body_survives_stale_corrupting_delivery(
         dispatch_turns=False,
         gateway_token="gw",
         get_issue_body_fn=lambda **_: fetches.append(1) or corrected,
-        patch_issue_body_fn=lambda **kw: patches.append(kw),  # noqa: ARG005
+        patch_issue_body_fn=lambda **kw: patches.append(kw),
         post_comment=lambda **kw: 1,  # noqa: ARG005
     )
     _insert(
@@ -908,7 +908,7 @@ def test_adr15_owner_tick_in_window_skips_patch(tmp_path: Path) -> None:
         dispatch_turns=False,
         gateway_token="gw",
         get_issue_body_fn=lambda **_: current,
-        patch_issue_body_fn=lambda **kw: patches.append(kw),  # noqa: ARG005
+        patch_issue_body_fn=lambda **kw: patches.append(kw),
         post_comment=lambda **kw: 1,  # noqa: ARG005
     )
     _insert(
@@ -981,8 +981,8 @@ def test_adr15_collapsed_current_escalates_no_patch(tmp_path: Path) -> None:
         dispatch_turns=False,
         gateway_token="gw",
         get_issue_body_fn=lambda **_: wreck,
-        patch_issue_body_fn=lambda **kw: patches.append(kw),  # noqa: ARG005
-        post_comment=lambda **kw: comments.append(kw["body"]) or 1,  # noqa: ARG005
+        patch_issue_body_fn=lambda **kw: patches.append(kw),
+        post_comment=lambda **kw: comments.append(kw["body"]) or 1,
     )
     _insert(
         store,
@@ -1023,8 +1023,8 @@ def test_agent_untick_without_verified_at_does_not_restore_up(
         dispatch_turns=False,
         gateway_token="gw",
         get_issue_body_fn=lambda **_: body,
-        patch_issue_body_fn=lambda **kw: patches.append(kw),  # noqa: ARG005
-        post_comment=lambda **kw: comments.append(kw) or 1,  # noqa: ARG005
+        patch_issue_body_fn=lambda **kw: patches.append(kw),
+        post_comment=lambda **kw: comments.append(kw) or 1,
     )
     _insert(
         store,
@@ -1234,7 +1234,7 @@ def test_agent_deletes_ticked_line_with_verified_at_restores_up(
         dispatch_turns=False,
         gateway_token="gw",
         get_issue_body_fn=lambda **_: body,
-        patch_issue_body_fn=lambda **kw: patches.append(kw["body"]),  # noqa: ARG005
+        patch_issue_body_fn=lambda **kw: patches.append(kw["body"]),
         post_comment=lambda **kw: 1,  # noqa: ARG005
     )
     _insert(
@@ -1271,7 +1271,7 @@ def test_adr15_get_failure_skips_restore(tmp_path: Path) -> None:
         dispatch_turns=False,
         gateway_token="gw",
         get_issue_body_fn=boom,
-        patch_issue_body_fn=lambda **kw: patches.append(kw),  # noqa: ARG005
+        patch_issue_body_fn=lambda **kw: patches.append(kw),
     )
     _insert(
         store,

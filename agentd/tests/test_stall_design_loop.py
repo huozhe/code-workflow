@@ -96,7 +96,7 @@ def test_zero_thread_escalates_via_fetch_boundary_fp_disarmed(tmp_path: Path) ->
         cfg,
         supervisor=None,
         dispatch_turns=False,
-        post_comment=lambda **k: posts.append(k["body"]) or 8001,  # noqa: ARG005
+        post_comment=lambda **k: posts.append(k["body"]) or 8001,
         gateway_token="gw",
         fetch_threads=fake_threads,
         fetch_diff=fake_diff,
@@ -153,7 +153,7 @@ def test_thread_resolution_prevents_zero_thread_escalate(tmp_path: Path) -> None
     ]
     idx = {"i": 0}
 
-    def fake_threads(**k):  # noqa: ANN001, ANN003
+    def fake_threads(**k):  # noqa: ANN003
         s = snaps[min(idx["i"], len(snaps) - 1)]
         idx["i"] += 1
         return s

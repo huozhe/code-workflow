@@ -15,7 +15,7 @@ def _fake_docker(env_list: list[str]):
         stdout = json.dumps(env_list)
         returncode = 0
 
-    def _docker(*args, check=True):  # noqa: ANN002, ANN003
+    def _docker(*args, check=True):  # noqa: ANN002
         return R()
 
     return _docker

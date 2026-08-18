@@ -264,7 +264,7 @@ def test_build_prompt_forbids_issue_close() -> None:
 
     runner_root = Path(__file__).resolve().parents[1] / "docker" / "session-runner"
     sys.path.insert(0, str(runner_root))
-    from agentd_runner.turn import build_prompt  # noqa: E402
+    from agentd_runner.turn import build_prompt
 
     text = build_prompt(
         {"role": "architect", "turn_id": "t-1", "event": {"kind": "x"}},

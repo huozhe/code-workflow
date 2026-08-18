@@ -290,7 +290,7 @@ def test_architect_obligation_mentions_verification_block() -> None:
 
     runner = Path(__file__).resolve().parents[1] / "docker" / "session-runner"
     sys.path.insert(0, str(runner))
-    from agentd_runner.turn import role_obligation  # noqa: E402
+    from agentd_runner.turn import role_obligation
 
     text = role_obligation("architect", "AWAITING_VERIFICATION")
     assert "verification" in text.lower()

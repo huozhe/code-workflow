@@ -70,6 +70,7 @@ def test_ruff_extends_defaults_not_replaces_them() -> None:
     lint = data["tool"]["ruff"]["lint"]
     assert "extend-select" in lint
     assert "select" not in lint
+    assert "RUF100" in lint["extend-select"]
 
 
 def test_workflow_uses_are_fully_pinned() -> None:
