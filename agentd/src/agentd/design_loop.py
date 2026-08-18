@@ -2126,7 +2126,7 @@ class DesignLoop:
                     issue_num=int(issue_num),
                     token=self._gateway_github_token(),
                 )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.exception(
                 "reopen failed session=%s: %s — still escalating",
                 session_key,
@@ -2252,7 +2252,7 @@ class DesignLoop:
                 raise RuntimeError(
                     "no session directory and no tarball; cannot mark CLOSED"
                 )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.exception("archive failed session=%s", session_key)
             if self._teardown_retry_or_give_up(
                 delivery_id=delivery_id,
@@ -2533,7 +2533,7 @@ class DesignLoop:
                     body=body,
                     token=self._gateway_github_token(),
                 )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.exception(
                 "completion summary failed session=%s: %s — already CLOSED",
                 session_key,
@@ -2580,7 +2580,7 @@ class DesignLoop:
                     session_key=session_key,
                     reason=f"ensure_session capacity: {exc}",
                 )
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 log.exception("teardown ensure_session failed %s", session_key)
                 return self._teardown_retry_or_give_up(
                     delivery_id=delivery_id,
@@ -2805,7 +2805,7 @@ class DesignLoop:
                     body=body,
                     token=self._gateway_github_token(),
                 )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             # Still pause — never silent about the failure (P5).
             log.exception(
                 "escalation comment failed session=%s: %s — session still paused",

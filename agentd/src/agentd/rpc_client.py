@@ -103,7 +103,7 @@ class RunnerClient:
                 if self.on_notification is not None:
                     try:
                         self.on_notification(method_n, params_n)
-                    except Exception:  # noqa: BLE001
+                    except Exception:
                         log.exception("on_notification failed method=%s", method_n)
                 continue
             if resp.get("id") != req_id and resp.get("id") is not None:

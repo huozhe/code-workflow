@@ -38,7 +38,7 @@ class _GitHubStub(BaseHTTPRequestHandler):
 
     tokens: dict[str, str] = {}
 
-    def do_GET(self) -> None:  # noqa: N802
+    def do_GET(self) -> None:
         if self.path.rstrip("/") != "/user":
             self.send_response(404)
             self.end_headers()
