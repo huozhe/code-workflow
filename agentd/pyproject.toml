@@ -16,8 +16,11 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+    "mypy==2.3.1",
     "pytest>=8.3.0",
     "pytest-asyncio>=0.24.0",
+    "ruff==0.16.3",
+    "types-pyyaml==6.0.12.20260815",
 ]
 
 [project.scripts]
@@ -34,3 +37,21 @@ packages = ["src/agentd", "src/agentctl"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+
+[tool.ruff.lint]
+# #134: extend the default set with the codes the tree already noqas.
+# `select` would drop F821/E9. Do not auto-fix RUF100 until this set
+# is stable — live and dead directives are interleaved.
+extend-select = [
+    "ANN001",
+    "ANN002",
+    "ANN003",
+    "ARG001",
+    "ARG005",
+    "BLE001",
+    "E402",
+    "N802",
+]

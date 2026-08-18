@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import re
+import tomllib
 from pathlib import Path
 
 import yaml
 
 _REPO = Path(__file__).resolve().parents[2]
+_PYPROJECT = Path(__file__).resolve().parents[1] / "pyproject.toml"
 _PR = _REPO / ".github" / "workflows" / "pr.yml"
 _IMAGE = _REPO / ".github" / "workflows" / "image.yml"
 _PINNED = re.compile(r".+@((v\d+\.\d+\.\d+)|[0-9a-f]{40})$")
@@ -60,6 +62,14 @@ def _uses_refs(data: dict) -> list[str]:
             if isinstance(step, dict) and step.get("uses"):
                 refs.append(str(step["uses"]))
     return refs
+
+
+def test_ruff_extends_defaults_not_replaces_them() -> None:
+    """select discards F821/E9. extend-select keeps them (#134 / #135)."""
+    data = tomllib.loads(_PYPROJECT.read_text(encoding="utf-8"))
+    lint = data["tool"]["ruff"]["lint"]
+    assert "extend-select" in lint
+    assert "select" not in lint
 
 
 def test_workflow_uses_are_fully_pinned() -> None:
