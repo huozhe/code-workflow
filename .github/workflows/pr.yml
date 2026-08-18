@@ -6,8 +6,13 @@
 # take the existing skip path (`docker info` non-zero). The seventh skip is
 # test_m4a_branch_protection_live.py (AGENTD_LIVE_M4A) — do not set that.
 #
+# The stub only covers PATH. docker_wait.docker_socket_ready talks to
+# /var/run/docker.sock directly and ignores PATH. Nothing under tests/
+# calls it today. A future test that does will not skip on GHA.
+#
 # Image regressions (#130 CLI pins) are covered by image.yml, path-filtered
-# on docker/session-runner/** and tests/test_image_agent_clis.py.
+# on docker/session-runner/**, the pin test, conftest.py (the build), and
+# supervisor.py (the IMAGE tag).
 #
 # Do not add this check to config.yaml required_checks or the main ruleset
 # until it has been green and stable. Wiring it earlier blocks every merge.
@@ -19,18 +24,23 @@ on:
   push:
     branches: [main]
 
+concurrency:
+  group: pr-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
 jobs:
   pytest:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     defaults:
       run:
         working-directory: agentd
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v10
+      - uses: actions/checkout@v4.4.0
+      - uses: astral-sh/setup-uv@v10.0.1
         with:
           enable-cache: true
           python-version: "3.12"
@@ -50,8 +60,8 @@ jobs:
       run:
         working-directory: agentd
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v10
+      - uses: actions/checkout@v4.4.0
+      - uses: astral-sh/setup-uv@v10.0.1
         with:
           enable-cache: true
           python-version: "3.12"
@@ -65,11 +75,10 @@ jobs:
       run:
         working-directory: agentd
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v10
+      - uses: actions/checkout@v4.4.0
+      - uses: astral-sh/setup-uv@v10.0.1
         with:
           enable-cache: true
           python-version: "3.12"
-      - run: uv sync --all-extras
       - name: mypy (non-blocking)
         run: uvx mypy src
