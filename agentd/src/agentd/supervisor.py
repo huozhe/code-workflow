@@ -378,7 +378,7 @@ class SessionSupervisor:
                     tier="hot",
                 )
                 return handle
-            except Exception:
+            except Exception:  # noqa: BLE001 — adopt-or-recreate
                 log.warning(
                     "existing project runner unreachable; recreating project=%s", project_key
                 )

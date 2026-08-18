@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import logging
 import threading
+from collections.abc import Callable
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Header, Request, Response
@@ -46,15 +48,15 @@ def create_app(
     *,
     start_workers: bool = True,
     governor_interval_s: float | None = None,
-    free_gb_fn=None,
-    notify=None,
+    free_gb_fn: Callable[[Path], float | None] | None = None,
+    notify: Callable[..., Any] | None = None,
 ) -> FastAPI:
     if not webhook_secret:
         raise ValueError("webhook_secret must be non-empty at startup")
     state = AppState(config, store, webhook_secret)
 
     @asynccontextmanager
-    async def lifespan(app: FastAPI):
+    async def lifespan(_app: FastAPI):
         if start_workers:
             interval = (
                 governor_interval_s
@@ -170,7 +172,7 @@ def create_app(
         try:
             store.status_snapshot()
             db_ok = True
-        except Exception:
+        except Exception:  # noqa: BLE001 — readiness probe
             db_ok = False
         disk = disk_free_gb(config.root)
         disk_ok = disk is None or disk >= config.disk_floor_gb

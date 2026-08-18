@@ -8,7 +8,7 @@ between the sentinels only; prose outside is never touched.
 from __future__ import annotations
 
 import re
-from typing import Sequence
+from collections.abc import Sequence
 
 SENTINEL_OPEN = "<!-- agentd:verification v1 -->"
 SENTINEL_CLOSE = "<!-- /agentd:verification -->"
@@ -143,9 +143,12 @@ def checkbox_is_checked(
             return None
         # Bare fragment fallback (tests / restore detection of B5 bare ticks).
         text = block_or_body or ""
-        if SENTINEL_OPEN not in text and CHECKBOX_UNCHECKED[:10] not in text:
-            if not _CHECKBOX_RE.search(text):
-                return None
+        if (
+            SENTINEL_OPEN not in text
+            and CHECKBOX_UNCHECKED[:10] not in text
+            and not _CHECKBOX_RE.search(text)
+        ):
+            return None
         m = _CHECKBOX_RE.search(text)
     else:
         m = _CHECKBOX_RE.search(block)

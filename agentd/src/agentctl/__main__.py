@@ -9,6 +9,7 @@ import sys
 import time
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as pkg_version
+from typing import Any
 
 from agentd.config import load_config
 from agentd.db import Store
@@ -215,7 +216,7 @@ def main(argv: list[str] | None = None) -> None:
         from agentd.github_fetch import fetch_session_snapshot
         from agentd.keychain import get_password
 
-        def _fetch(sess):
+        def _fetch(sess: dict[str, Any]) -> dict[str, Any] | None:
             try:
                 return fetch_session_snapshot(
                     repo=str(sess.get("repo") or ""),
@@ -224,7 +225,7 @@ def main(argv: list[str] | None = None) -> None:
                     design_pr=sess.get("design_pr"),
                     token=get_password("gateway"),
                 )
-            except Exception:
+            except Exception:  # noqa: BLE001 — dry-run snapshot
                 return None
 
         report = Reconciler(store, fetch_snapshot=_fetch).reconcile_once(

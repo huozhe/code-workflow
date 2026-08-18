@@ -16,7 +16,7 @@ _PAT = re.compile(
 )
 _HASH = re.compile(r"^#(\d+)$")
 _QUAL = re.compile(r"^([\w.-]+/[\w.-]+)#(\d+)$")
-_URL = re.compile(r"^https://github.com/([\w.-]+/[\w.-]+)/issues/(\d+)$", re.I)
+_URL = re.compile(r"^https://github.com/([\w.-]+/[\w.-]+)/issues/(\d+)$", re.IGNORECASE)
 
 
 def _issue_num(ref: str, repo: str) -> int | None:

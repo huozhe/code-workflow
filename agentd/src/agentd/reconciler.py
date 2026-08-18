@@ -336,7 +336,7 @@ class Reconciler:
         dry_run: bool,
     ) -> None:
         tid = str(turn["turn_id"])
-        sk = str(turn.get("session_key") or "")
+        str(turn.get("session_key") or "")
         state = str(turn.get("session_state") or "")
         started = int(turn.get("started_at") or 0)
         age = now - started if started > 0 else self.resume_max_age_s + 1
@@ -445,12 +445,11 @@ class Reconciler:
         held = _close_reconcile_held(str(sess.get("state") or ""), sess)
 
         if issue_state == "open":
-            if sess.get("closed_issue_escalated_at"):
-                if not dry_run:
-                    self.store.update_session_fields(
-                        sk, closed_issue_escalated_at=None
-                    )
-                    sess["closed_issue_escalated_at"] = None
+            if sess.get("closed_issue_escalated_at") and not dry_run:
+                self.store.update_session_fields(
+                    sk, closed_issue_escalated_at=None
+                )
+                sess["closed_issue_escalated_at"] = None
             if held:
                 report["holds_lifted"] = int(report["holds_lifted"]) + 1
                 if not dry_run:
