@@ -14,8 +14,11 @@
 # on docker/session-runner/**, the pin test, conftest.py (the build), and
 # supervisor.py (the IMAGE tag).
 #
-# Do not add this check to config.yaml required_checks or the main ruleset
-# until it has been green and stable. Wiring it earlier blocks every merge.
+# Check-run names are the job ids: pytest, lint, types. Those are the
+# §8.4 required_checks to set on huozhe/code-workflow in host config.
+# Do not require `image` — image.yml is path-filtered and would stall
+# every PR that does not touch the runner. The GitHub ruleset
+# required_status_checks rule is owner-only; keep it aligned.
 
 name: pr
 
