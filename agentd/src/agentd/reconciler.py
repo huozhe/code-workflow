@@ -14,7 +14,11 @@ from pathlib import Path
 from typing import Any
 
 from agentd.db import Store
-from agentd.design_loop import CLOSE_RECONCILE_PREFIX, _close_reconcile_held
+from agentd.design_loop import (
+    CLOSE_RECONCILE_PREFIX,
+    _close_reconcile_held,
+    _inflight_turn_ids,
+)
 from agentd.fsm import transition
 from agentd.verification import checkbox_is_checked
 
@@ -25,6 +29,9 @@ INFLIGHT_TURN_MAX_AGE_S = 900  # matches gateway turn_deadline_s default
 RECONCILE_INTERVAL_S = 5 * 60
 SYNTHESIS_CAP = 50
 RESUME_MAX_AGE_S = 3600
+# Matched pair with process_resuming_turns (design_loop.py): states that
+# dispatch no turns. Reconciler retires open turns here; drain refuses
+# resume and defers back. Keep both lists in lockstep (ADR-27).
 NON_RUNNING_STATES = frozenset({"PAUSED_HUMAN", "TEARDOWN", "CLOSED"})
 RESUME_MAX_ATTEMPTS = 2
 
@@ -336,6 +343,8 @@ class Reconciler:
         dry_run: bool,
     ) -> None:
         tid = str(turn["turn_id"])
+        if tid in _inflight_turn_ids:
+            return
         str(turn.get("session_key") or "")
         state = str(turn.get("session_state") or "")
         started = int(turn.get("started_at") or 0)

@@ -134,6 +134,9 @@ _role_locks_guard = threading.Lock()
 # Hold the role busy until started_at + deadline_s so a second dispatch
 # does not interleave (#34). Cleared when the wait elapses.
 _role_busy_until: dict[str, float] = {}
+# ADR-27: process-local ids of turns this process is currently dispatching.
+# Empty after a restart, which is when a genuine orphan must still be caught.
+_inflight_turn_ids: set[str] = set()
 
 # ADR-9 / #86: statuses the gateway understands. Anything else degrades
 # to failed so a newer runner against an older gateway does not crash.
@@ -289,6 +292,8 @@ class DesignLoop:
         for turn in self.store.list_resuming_turns():
             tid = str(turn.get("turn_id") or "")
             state = str(turn.get("session_state") or "")
+            # Matched pair with NON_RUNNING_STATES (reconciler.py): drain
+            # refuses resume here and defers retire to the reconciler.
             if not state or state in ("PAUSED_HUMAN", "TEARDOWN", "CLOSED"):
                 # Reconciler owns retire; just drop the handoff mark.
                 self.store.clear_turn_resuming(tid)
@@ -1016,170 +1021,174 @@ class DesignLoop:
             status=None,
             summary=None,
         )
-        def _on_runner_notify(method: str, params: dict[str, Any]) -> None:
-            # Runner → gateway: artifact.register (M3-C / §14.2).
-            if method != "artifact.register":
-                return
-            ref = str(params.get("ref") or "").strip()
-            if not ref:
-                return
-            art_role = str(params.get("role") or role)
-            kind = str(params.get("kind") or "scratch")
-            self.store.register_artifact(
-                session_key=session_key,
-                role=art_role,
-                kind=kind,
-                ref=ref,
-            )
-            log.info(
-                "artifact.register notify session=%s role=%s kind=%s ref=%s",
-                session_key,
-                art_role,
-                kind,
-                ref,
-            )
-
-        lock = _lock_for_project_role(project_key, role)
-        # True only after turn.dispatch is in flight — connect failures are not
-        # mid-turn, so they must not mark the role busy (#34).
-        call_started = False
+        _inflight_turn_ids.add(turn_id)
         try:
-            with lock, RunnerClient(
-                host,
-                int(port_s),
-                bearer,
-                timeout_s=rpc_timeout_s,
-                on_notification=_on_runner_notify,
-            ) as cli:
-                call_started = True
-                # #45: FSM state must reach the runner prompt (role obligations).
-                session_state = str(sess.get("state") or "PLANNING")
-                result = cli.call(
-                    "turn.dispatch",
-                    {
-                        "turn_id": turn_id,
-                        "role": role,
-                        "session_state": session_state,
-                        "deadline_s": deadline_s,
-                        "event": dig,
-                        "context": {
-                            "worktree": (
-                                f"/srv/agentd/sessions/{int(issue_num)}/"
-                                f"{role}/worktrees/issue-{int(issue_num)}"
-                            ),
-                            "digest": (
-                                f"/srv/agentd/sessions/{int(issue_num)}/"
-                                f"{role}/context/digest-{turn_id}.md"
-                            ),
-                            "session_key": session_key,
-                            "project_key": project_key,
-                            "issue_num": int(issue_num),
+            def _on_runner_notify(method: str, params: dict[str, Any]) -> None:
+                # Runner → gateway: artifact.register (M3-C / §14.2).
+                if method != "artifact.register":
+                    return
+                ref = str(params.get("ref") or "").strip()
+                if not ref:
+                    return
+                art_role = str(params.get("role") or role)
+                kind = str(params.get("kind") or "scratch")
+                self.store.register_artifact(
+                    session_key=session_key,
+                    role=art_role,
+                    kind=kind,
+                    ref=ref,
+                )
+                log.info(
+                    "artifact.register notify session=%s role=%s kind=%s ref=%s",
+                    session_key,
+                    art_role,
+                    kind,
+                    ref,
+                )
+
+            lock = _lock_for_project_role(project_key, role)
+            # True only after turn.dispatch is in flight — connect failures are not
+            # mid-turn, so they must not mark the role busy (#34).
+            call_started = False
+            try:
+                with lock, RunnerClient(
+                    host,
+                    int(port_s),
+                    bearer,
+                    timeout_s=rpc_timeout_s,
+                    on_notification=_on_runner_notify,
+                ) as cli:
+                    call_started = True
+                    # #45: FSM state must reach the runner prompt (role obligations).
+                    session_state = str(sess.get("state") or "PLANNING")
+                    result = cli.call(
+                        "turn.dispatch",
+                        {
+                            "turn_id": turn_id,
+                            "role": role,
+                            "session_state": session_state,
+                            "deadline_s": deadline_s,
+                            "event": dig,
+                            "context": {
+                                "worktree": (
+                                    f"/srv/agentd/sessions/{int(issue_num)}/"
+                                    f"{role}/worktrees/issue-{int(issue_num)}"
+                                ),
+                                "digest": (
+                                    f"/srv/agentd/sessions/{int(issue_num)}/"
+                                    f"{role}/context/digest-{turn_id}.md"
+                                ),
+                                "session_key": session_key,
+                                "project_key": project_key,
+                                "issue_num": int(issue_num),
+                            },
+                            "budget": {},
                         },
-                        "budget": {},
-                    },
-                )
-        except Exception as exc:
-            ended = int(time.time())
-            mid_turn_timeout = call_started and _is_rpc_timeout(exc)
-            status = "gateway_timeout" if mid_turn_timeout else "failed"
-            summary = str(exc)[:500]
-            if mid_turn_timeout:
-                log.error(
-                    "turn.dispatch gateway timeout id=%s role=%s "
-                    "deadline_s=%s rpc_timeout_s=%s: %s",
+                    )
+            except Exception as exc:
+                ended = int(time.time())
+                mid_turn_timeout = call_started and _is_rpc_timeout(exc)
+                status = "gateway_timeout" if mid_turn_timeout else "failed"
+                summary = str(exc)[:500]
+                if mid_turn_timeout:
+                    log.error(
+                        "turn.dispatch gateway timeout id=%s role=%s "
+                        "deadline_s=%s rpc_timeout_s=%s: %s",
+                        turn_id,
+                        role,
+                        deadline_s,
+                        rpc_timeout_s,
+                        exc,
+                    )
+                    # Runner may still be inside the turn; keep role busy until
+                    # the deadline the runner was given (not cancel — out of scope).
+                    _role_busy_until[rkey] = started + float(deadline_s)
+                else:
+                    log.exception("turn.dispatch failed")
+                self.store.finish_turn(
                     turn_id,
-                    role,
-                    deadline_s,
-                    rpc_timeout_s,
-                    exc,
+                    ended_at=ended,
+                    status=status,
+                    summary=summary,
+                    public_actions="[]",
                 )
-                # Runner may still be inside the turn; keep role busy until
-                # the deadline the runner was given (not cancel — out of scope).
-                _role_busy_until[rkey] = started + float(deadline_s)
-            else:
-                log.exception("turn.dispatch failed")
+                try:
+                    _append_host_transcript(
+                        transcript_path,
+                        {
+                            "ts": ended,
+                            "turn_id": turn_id,
+                            "role": role,
+                            "kind": dig.get("kind"),
+                            "status": status,
+                            "summary": summary,
+                            "public_actions": [],
+                            "source": "gateway",
+                        },
+                    )
+                except OSError as texc:
+                    log.warning("host transcript append failed: %s", texc)
+                return {"status": status, "summary": summary, "public_actions": []}
+
+            ended = int(time.time())
+            status = _normalize_turn_status(str((result or {}).get("status") or "done"))
+            if isinstance(result, dict):
+                result = dict(result)
+                result["status"] = status
+            if status == "quota_exhausted":
+                _hold_role_for_quota(
+                    rkey,
+                    (result or {}).get("retry_after"),
+                    session_key=session_key,
+                    role=role,
+                )
+            summary = str((result or {}).get("summary") or "")[:2000]
+            raw_actions = (result or {}).get("public_actions") or []
+            if not isinstance(raw_actions, list):
+                raw_actions = []
+            actions_json = json.dumps(raw_actions, separators=(",", ":"))[:8000]
             self.store.finish_turn(
                 turn_id,
                 ended_at=ended,
                 status=status,
                 summary=summary,
-                public_actions="[]",
+                public_actions=actions_json,
             )
-            try:
-                _append_host_transcript(
-                    transcript_path,
-                    {
-                        "ts": ended,
-                        "turn_id": turn_id,
-                        "role": role,
-                        "kind": dig.get("kind"),
-                        "status": status,
-                        "summary": summary,
-                        "public_actions": [],
-                        "source": "gateway",
-                    },
-                )
-            except OSError as texc:
-                log.warning("host transcript append failed: %s", texc)
-            return {"status": status, "summary": summary, "public_actions": []}
 
-        ended = int(time.time())
-        status = _normalize_turn_status(str((result or {}).get("status") or "done"))
-        if isinstance(result, dict):
-            result = dict(result)
-            result["status"] = status
-        if status == "quota_exhausted":
-            _hold_role_for_quota(
-                rkey,
-                (result or {}).get("retry_after"),
-                session_key=session_key,
-                role=role,
+            # Model-reported artifacts are optional extras; primary ledger is
+            # supervisor-observed at ensure_session (M3-C).
+            for art in (result or {}).get("artifacts") or []:
+                if isinstance(art, dict) and art.get("ref"):
+                    self.store.register_artifact(
+                        session_key=session_key,
+                        role=role,
+                        kind=str(art.get("kind") or "scratch"),
+                        ref=str(art["ref"]),
+                    )
+
+            if status == "needs_human":
+                if session_state == "TEARDOWN":
+                    log.warning(
+                        "teardown turn needs_human session=%s role=%s — staying "
+                        "TEARDOWN (no escalate on closed issue); leftovers stay leaks",
+                        session_key,
+                        role,
+                    )
+                else:
+                    self._escalate(session_key, role, summary or "needs_human")
+
+            # Provenance footer helper for agent comments (agents should append; we log it)
+            log.info(
+                "turn complete id=%s public_actions=%s footer=%s",
+                turn_id,
+                len(raw_actions),
+                provenance_footer(session_key=session_key, role=role, turn_id=turn_id),
             )
-        summary = str((result or {}).get("summary") or "")[:2000]
-        raw_actions = (result or {}).get("public_actions") or []
-        if not isinstance(raw_actions, list):
-            raw_actions = []
-        actions_json = json.dumps(raw_actions, separators=(",", ":"))[:8000]
-        self.store.finish_turn(
-            turn_id,
-            ended_at=ended,
-            status=status,
-            summary=summary,
-            public_actions=actions_json,
-        )
-
-        # Model-reported artifacts are optional extras; primary ledger is
-        # supervisor-observed at ensure_session (M3-C).
-        for art in (result or {}).get("artifacts") or []:
-            if isinstance(art, dict) and art.get("ref"):
-                self.store.register_artifact(
-                    session_key=session_key,
-                    role=role,
-                    kind=str(art.get("kind") or "scratch"),
-                    ref=str(art["ref"]),
-                )
-
-        if status == "needs_human":
-            if session_state == "TEARDOWN":
-                log.warning(
-                    "teardown turn needs_human session=%s role=%s — staying "
-                    "TEARDOWN (no escalate on closed issue); leftovers stay leaks",
-                    session_key,
-                    role,
-                )
-            else:
-                self._escalate(session_key, role, summary or "needs_human")
-
-        # Provenance footer helper for agent comments (agents should append; we log it)
-        log.info(
-            "turn complete id=%s public_actions=%s footer=%s",
-            turn_id,
-            len(raw_actions),
-            provenance_footer(session_key=session_key, role=role, turn_id=turn_id),
-        )
-        out = {"status": status, "summary": summary, **(result or {})}
-        out["public_actions"] = raw_actions
-        return out
+            out = {"status": status, "summary": summary, **(result or {})}
+            out["public_actions"] = raw_actions
+            return out
+        finally:
+            _inflight_turn_ids.discard(turn_id)
 
     def _session_issue_nums(self, repo: str) -> set[int]:
         out: set[int] = set()

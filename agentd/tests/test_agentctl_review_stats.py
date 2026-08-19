@@ -76,9 +76,9 @@ def _insert_turn(
         role="developer",
         delivery_id=delivery_id,
         started_at=started_at,
-        ended_at=started_at + 1,
-        status="done",
-        summary="ok",
+        ended_at=None,
+        status=None,
+        summary=None,
     )
     store.finish_turn(
         turn_id,

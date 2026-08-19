@@ -2,15 +2,27 @@
 
 from __future__ import annotations
 
+import logging
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
+import pytest
+
 from agentd.db import Store
+from agentd.design_loop import _inflight_turn_ids
 from agentd.reconciler import RESUME_MAX_AGE_S, Reconciler
 
 _RUNNER_ROOT = Path(__file__).resolve().parents[1] / "docker" / "session-runner"
 if str(_RUNNER_ROOT) not in sys.path:
     sys.path.insert(0, str(_RUNNER_ROOT))
+
+
+@pytest.fixture(autouse=True)
+def _clear_inflight_ids() -> Iterator[None]:
+    _inflight_turn_ids.clear()
+    yield
+    _inflight_turn_ids.clear()
 
 
 def _sess(
@@ -101,7 +113,7 @@ def test_paused_session_retires_young_turn(tmp_path: Path) -> None:
 
 
 def test_young_running_turn_is_marked_not_dispatched(tmp_path: Path) -> None:
-    """Reconciler hands off; it does not run the RPC (ADR-20)."""
+    """Reconciler hands off; it does not run the RPC (ADR-20). ADR-27 (3)."""
     store = Store(tmp_path / "state.db")
     sk = _sess(store, state="IMPLEMENTING")
     now = 10_000
@@ -116,6 +128,84 @@ def test_young_running_turn_is_marked_not_dispatched(tmp_path: Path) -> None:
     rec.reconcile_once()
     open_row = next(t for t in store.list_open_turns())
     assert int(open_row["resume_attempts"] or 0) == 1
+    store.close()
+
+
+def test_inflight_id_skips_resume_and_retire(tmp_path: Path) -> None:
+    """ADR-27 (1): same fixture, unseeded marks resuming; seeded is untouched."""
+    store = Store(tmp_path / "state.db")
+    sk = _sess(store, state="IMPLEMENTING")
+    now = 10_000
+    _turn(store, sk, turn_id="t-orphan", started_at=now - 30)
+    _turn(store, sk, turn_id="t-live", started_at=now - 30)
+    _inflight_turn_ids.add("t-live")
+    _, report = _rec(store, now=now)
+    assert report["resumed"] == 1
+    assert report["retired"] == 0
+    rows = {t["turn_id"]: t for t in store.list_open_turns()}
+    assert rows["t-orphan"]["status"] == "resuming"
+    assert rows["t-live"]["status"] is None
+    assert int(rows["t-live"]["resume_attempts"] or 0) == 0
+    store.close()
+
+
+def test_teardown_retires_young_turn_absent_from_inflight(tmp_path: Path) -> None:
+    """ADR-27 (2): NON_RUNNING_STATES retires at any age when not in-flight."""
+    store = Store(tmp_path / "state.db")
+    sk = _sess(store, state="TEARDOWN")
+    now = 10_000
+    _turn(store, sk, started_at=now - 11)
+    _, report = _rec(store, now=now)
+    assert report["retired"] == 1
+    assert report["resumed"] == 0
+    row = next(t for t in store.list_turns(sk))
+    assert row["status"] == "interrupted"
+    assert row["ended_at"] is not None
+    store.close()
+
+
+def test_inflight_id_spares_teardown_turn(tmp_path: Path) -> None:
+    """Live teardown turn must not be retired (the 11s #63 case)."""
+    store = Store(tmp_path / "state.db")
+    sk = _sess(store, state="TEARDOWN")
+    now = 10_000
+    _turn(store, sk, started_at=now - 11)
+    _inflight_turn_ids.add("t-open")
+    _, report = _rec(store, now=now)
+    assert report["retired"] == 0
+    assert report["resumed"] == 0
+    open_row = next(t for t in store.list_open_turns())
+    assert open_row["turn_id"] == "t-open"
+    assert open_row["status"] is None
+    store.close()
+
+
+def test_finish_turn_does_not_overwrite_ended_row(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """ADR-27 (4): already-ended row keeps first status; second write logs."""
+    store = Store(tmp_path / "state.db")
+    sk = _sess(store)
+    _turn(store, sk, started_at=1)
+    store.finish_turn(
+        "t-open",
+        ended_at=2,
+        status="interrupted",
+        summary="session TEARDOWN is not running",
+    )
+    with caplog.at_level(logging.WARNING, logger="agentd.db"):
+        store.finish_turn(
+            "t-open",
+            ended_at=3,
+            status="done",
+            summary="real completion",
+        )
+    row = next(t for t in store.list_turns(sk))
+    assert row["status"] == "interrupted"
+    assert row["summary"] == "session TEARDOWN is not running"
+    assert int(row["ended_at"]) == 2
+    assert "t-open" in caplog.text
+    assert "done" in caplog.text
     store.close()
 
 

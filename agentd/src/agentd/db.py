@@ -967,14 +967,20 @@ class Store:
     ) -> None:
         """Mark a turn row complete (success, failed, or gateway_timeout)."""
         with self._lock:
-            self._conn.execute(
+            cur = self._conn.execute(
                 """
                 UPDATE turns
                 SET ended_at=?, status=?, summary=?, public_actions=COALESCE(?, public_actions)
-                WHERE turn_id=?
+                WHERE turn_id=? AND ended_at IS NULL
                 """,
                 (ended_at, status, summary, public_actions, turn_id),
             )
+            if cur.rowcount == 0:
+                log.warning(
+                    "finish_turn ignored turn=%s status=%s (already ended)",
+                    turn_id,
+                    status,
+                )
             self._conn.commit()
 
     def mark_turn_resuming(self, turn_id: str) -> int:
