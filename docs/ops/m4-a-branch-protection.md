@@ -35,11 +35,18 @@ Observed as `huozhegrok` / `huozheclaude` (no admin):
 | `deletion` | (main cannot be deleted) |
 | `non_fast_forward` | (no force-push) |
 
-**No `required_status_checks` rule** on the ruleset today. Collaborators
-cannot add one (`admin: false`). That is a separate owner step.
+**A `required_status_checks` rule now exists**, added by the owner on
+2026-08-18 as ruleset `main-required-checks` (id `21017175`, enforcement
+`active`, applied to `~DEFAULT_BRANCH` and `refs/heads/main`). Collaborators
+still cannot add or change one (`admin: false`).
 
-agentd `repos.huozhe/code-workflow.required_checks` should be the `pr.yml`
-check-run names:
+| Rule `type` | Parameters (relevant) |
+|---|---|
+| `required_status_checks` | `lint`, `types`, `pytest` — each `integration_id: 15368` (GitHub Actions) |
+| | `strict_required_status_checks_policy: false` |
+
+agentd `repos.huozhe/code-workflow.required_checks` **is** the same three
+`pr.yml` check-run names, set in `~/.agentd/config.yaml` the same evening:
 
 ```yaml
 repos:
@@ -48,19 +55,43 @@ repos:
 ```
 
 Do not list `image`. That workflow is path-filtered and would leave
-`merge_authorized` settling on every PR that does not touch the runner.
+`merge_authorized` settling on every PR that does not touch the runner — see
+the runbook note below on why a check that never reports hangs rather than
+fails.
+
+`strict_required_status_checks_policy: false` means a PR may merge without
+being up to date with `main`, so two individually green PRs can still break it
+together. Acceptable while work is serial; revisit if that stops being true.
 
 Gateway helper: `agentd.verify.verify_branch_pull_request_rules` — asserts
 `required_approving_review_count >= 1` and surfaces the flags above.
 
 ### Alignment risk (runbook)
 
-If a `required_status_checks` rule is added to the ruleset later **without**
-updating `repos.<repo>.required_checks` in config, the gateway can emit
-`merge_authorized` while GitHub still blocks the Developer merge. Keep the two
-lists aligned. On `merge_authorized`, the gateway logs the configured
-`required_checks` list for post-hoc comparison. The owner adds the ruleset
-rule; this file names the list.
+**The same three strings must appear in three places**: the `pr.yml` job ids,
+the ruleset contexts, and `repos.<repo>.required_checks` in config. They agree
+today. If they ever drift, the two directions fail differently:
+
+- **Ruleset has a check that config does not** → the gateway emits
+  `merge_authorized` while GitHub still blocks the Developer merge. Loud, and
+  visible on the PR.
+- **Config names a check that never reports** — a typo, or a path-filtered
+  workflow like `image` — → **it hangs rather than fails.**
+  `verify._classify_required_checks` buckets an absent check as *missing*,
+  missing counts as *pending*, and the gateway retries forever without ever
+  emitting a permanent refusal. The stall is indistinguishable from "CI is
+  still running"; the evidence is `missing/not-yet-reported: <name>` in the
+  gateway log.
+
+On `merge_authorized`, the gateway logs the configured `required_checks` list
+for post-hoc comparison.
+
+**This file records live host and GitHub state, which the repo cannot verify.**
+It went stale once already: it described the ruleset rule as "a separate owner
+step" for hours after the owner had taken it, and an agent reading it drafted
+an ADR on the false premise (#63 / PR #148). Check it against
+`gh api repos/huozhe/code-workflow/rulesets` and `~/.agentd/config.yaml` before
+relying on it.
 
 `require_last_push_approval: true` means after a `CODE_REWORK` push the Architect
 must approve **again** on the new head. M4-2 already binds approval to current
