@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import sqlite3
 import threading
 import time
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -137,6 +139,16 @@ _role_busy_until: dict[str, float] = {}
 # ADR-27: process-local ids of turns this process is currently dispatching.
 # Empty after a restart, which is when a genuine orphan must still be caught.
 _inflight_turn_ids: set[str] = set()
+
+
+@contextlib.contextmanager
+def _inflight(turn_id: str) -> Iterator[None]:
+    """ADR-28: mark turn_id in-flight in this process for the block's duration."""
+    _inflight_turn_ids.add(turn_id)
+    try:
+        yield
+    finally:
+        _inflight_turn_ids.discard(turn_id)
 
 # ADR-9 / #86: statuses the gateway understands. Anything else degrades
 # to failed so a newer runner against an older gateway does not crash.
@@ -1021,8 +1033,7 @@ class DesignLoop:
             status=None,
             summary=None,
         )
-        _inflight_turn_ids.add(turn_id)
-        try:
+        with _inflight(turn_id):
             def _on_runner_notify(method: str, params: dict[str, Any]) -> None:
                 # Runner → gateway: artifact.register (M3-C / §14.2).
                 if method != "artifact.register":
@@ -1187,8 +1198,6 @@ class DesignLoop:
             out = {"status": status, "summary": summary, **(result or {})}
             out["public_actions"] = raw_actions
             return out
-        finally:
-            _inflight_turn_ids.discard(turn_id)
 
     def _session_issue_nums(self, repo: str) -> set[int]:
         out: set[int] = set()
@@ -1305,63 +1314,64 @@ class DesignLoop:
         deadline_s = int(self.config.turn_deadline_s)
         started = time.time()
         call_started = False
-        lock = _lock_for_project_role(project_key, role)
-        try:
-            with lock, RunnerClient(
-                host,
-                int(port_s),
-                bearer,
-                timeout_s=float(self.config.rpc_timeout_s),
-            ) as cli:
-                call_started = True
-                result = cli.call(
-                    "turn.resume",
-                    {
-                        "turn_id": turn_id,
-                        "role": role,
-                        "session_state": str(sess.get("state") or ""),
-                        "deadline_s": deadline_s,
-                        "event": dig,
-                        "context": {
-                            "worktree": (
-                                f"/srv/agentd/sessions/{issue_num}/"
-                                f"{role}/worktrees/issue-{issue_num}"
-                            ),
-                            "digest": (
-                                f"/srv/agentd/sessions/{issue_num}/"
-                                f"{role}/context/digest-{turn_id}.md"
-                            ),
-                            "session_key": sk,
-                            "project_key": project_key,
-                            "issue_num": issue_num,
+        with _inflight(turn_id):
+            lock = _lock_for_project_role(project_key, role)
+            try:
+                with lock, RunnerClient(
+                    host,
+                    int(port_s),
+                    bearer,
+                    timeout_s=float(self.config.rpc_timeout_s),
+                ) as cli:
+                    call_started = True
+                    result = cli.call(
+                        "turn.resume",
+                        {
+                            "turn_id": turn_id,
+                            "role": role,
+                            "session_state": str(sess.get("state") or ""),
+                            "deadline_s": deadline_s,
+                            "event": dig,
+                            "context": {
+                                "worktree": (
+                                    f"/srv/agentd/sessions/{issue_num}/"
+                                    f"{role}/worktrees/issue-{issue_num}"
+                                ),
+                                "digest": (
+                                    f"/srv/agentd/sessions/{issue_num}/"
+                                    f"{role}/context/digest-{turn_id}.md"
+                                ),
+                                "session_key": sk,
+                                "project_key": project_key,
+                                "issue_num": issue_num,
+                            },
+                            "budget": {},
                         },
-                        "budget": {},
-                    },
+                    )
+            except Exception as exc:
+                if call_started and _is_rpc_timeout(exc):
+                    _role_busy_until[rkey] = started + float(deadline_s)
+                raise
+            ended = int(time.time())
+            status = str((result or {}).get("status") or "done")
+            summary = str((result or {}).get("summary") or "")[:2000]
+            self.store.finish_turn(
+                turn_id, ended_at=ended, status=status, summary=summary
+            )
+            if status not in ("gateway_timeout", "quota_exhausted", "role_busy"):
+                fresh = self.store.get_session(sk) or {}
+                budget = BudgetState(
+                    turn_count=int(fresh.get("turn_count") or 0),
+                    consec_agent_turns=int(fresh.get("consec_agent_turns") or 0),
+                    review_rounds=int(fresh.get("review_rounds") or 0),
                 )
-        except Exception as exc:
-            if call_started and _is_rpc_timeout(exc):
-                _role_busy_until[rkey] = started + float(deadline_s)
-            raise
-        ended = int(time.time())
-        status = str((result or {}).get("status") or "done")
-        summary = str((result or {}).get("summary") or "")[:2000]
-        self.store.finish_turn(
-            turn_id, ended_at=ended, status=status, summary=summary
-        )
-        if status not in ("gateway_timeout", "quota_exhausted", "role_busy"):
-            fresh = self.store.get_session(sk) or {}
-            budget = BudgetState(
-                turn_count=int(fresh.get("turn_count") or 0),
-                consec_agent_turns=int(fresh.get("consec_agent_turns") or 0),
-                review_rounds=int(fresh.get("review_rounds") or 0),
-            )
-            budget.after_agent_turn()
-            self.store.update_session_fields(
-                sk,
-                turn_count=budget.turn_count,
-                consec_agent_turns=budget.consec_agent_turns,
-            )
-        return True
+                budget.after_agent_turn()
+                self.store.update_session_fields(
+                    sk,
+                    turn_count=budget.turn_count,
+                    consec_agent_turns=budget.consec_agent_turns,
+                )
+            return True
 
     def report_missed(
         self, session_key: str, notices: list[dict[str, Any]]
