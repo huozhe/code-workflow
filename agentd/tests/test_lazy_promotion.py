@@ -107,6 +107,7 @@ class _DockerWorld:
         self.exists = exists
         self.removed: list[tuple] = []
         self.started: list[str] = []
+        self.worktrees: list[tuple[str, int]] = []
 
     def docker(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
         cmd = args[0] if args else ""
@@ -149,9 +150,11 @@ def _wire_supervisor(sup: SessionSupervisor, world: _DockerWorld, monkeypatch) -
     monkeypatch.setattr(sup, "_load_tokens", lambda: {"architect": "a", "developer": "d"})
     monkeypatch.setattr(sup, "_load_model_credentials", dict)
     monkeypatch.setattr(sup, "_wait_rpc", lambda *a, **k: None)
-    monkeypatch.setattr(
-        "agentd.supervisor.assert_worktree_usable", lambda *a, **k: None
-    )
+
+    def _wt(_cid, *, issue_num, role, uid):
+        world.worktrees.append((role, issue_num))
+
+    monkeypatch.setattr("agentd.supervisor.assert_worktree_usable", _wt)
     import agentd.supervisor as sm
 
     monkeypatch.setattr(sm, "RunnerClient", _FakePing)
@@ -180,6 +183,7 @@ def test_ensure_stopped_promotes_same_container(
     assert row["tier"] == "hot"
     assert row["container_id"] == "cid-keep"
     assert not world.removed
+    assert {r for r, n in world.worktrees if n == 1} == {"architect", "developer"}
     store.close()
 
 
@@ -206,6 +210,7 @@ def test_ensure_stopped_promotes_without_session_row(
     assert row["tier"] == "hot"
     sess = store.get_session("o/r#42")
     assert sess is not None
+    assert {r for r, n in world.worktrees if n == 42} == {"architect", "developer"}
     store.close()
 
 
@@ -327,4 +332,5 @@ def test_ensure_running_uninitialised_promotes_same_id(
     assert handle.container_id == "cid-keep"
     assert "session.resume" in _FakePing.calls
     assert not world.removed
+    assert {r for r, n in world.worktrees if n == 1} == {"architect", "developer"}
     store.close()
