@@ -627,3 +627,97 @@ def test_pick_merge_authorized_is_developer() -> None:
     )
     assert role == "developer"
     assert login == "huozhegrok"
+
+
+def test_blocked_unresolved_threads_escalate_on_first_observation(
+    tmp_path: Path,
+) -> None:
+    """ADR-26 (1): retry counter never leaves zero — no wait for max attempts."""
+    import agentd.design_loop as dl
+    from agentd.github_fetch import PrReviewThreadSnapshot
+
+    store = Store(tmp_path / "state.db")
+    cfg = _cfg(tmp_path, required_checks=[])
+    sk = _seed(store, state="CODE_REVIEW")
+    feat_ref = _feature_ref(100)
+    head = "abc123"
+    posts: list[str] = []
+    dl._merge_auth_attempts.clear()
+
+    def fake_get(url: str, *, token: str):
+        if url.endswith("/reviews"):
+            return [
+                {
+                    "user": {"login": "huozheclaude"},
+                    "state": "APPROVED",
+                    "commit_id": head,
+                }
+            ]
+        if "/pulls/60" in url:
+            return {
+                "number": 60,
+                "head": {"sha": head, "ref": feat_ref},
+                "mergeable_state": "blocked",
+            }
+        raise AssertionError(url)
+
+    snap = PrReviewThreadSnapshot(
+        open_thread_ids=["t1", "t2"],
+        unresolved_count=2,
+        all_thread_ids=["t1", "t2"],
+    )
+
+    import agentd.verify as vmod
+
+    real = vmod.verify_feature_merge
+
+    def patched(**kwargs):
+        kwargs = dict(kwargs)
+        kwargs["http_get"] = fake_get
+        kwargs["token"] = "tok"
+        kwargs["fetch_threads"] = lambda **_k: snap
+        return real(**kwargs)
+
+    vmod.verify_feature_merge = patched  # type: ignore[assignment]
+    try:
+        loop = DesignLoop(
+            store,
+            cfg,
+            supervisor=None,
+            dispatch_turns=False,
+            post_comment=lambda **k: posts.append(k.get("body", "")) or 1,
+            gateway_token="gw",
+            github_token="gw-read",
+        )
+        _insert(
+            store,
+            did="d-threads",
+            event="pull_request_review",
+            action="submitted",
+            sender="huozheclaude",
+            issue=60,
+            payload={
+                "action": "submitted",
+                "review": {"id": 1, "state": "APPROVED", "commit_id": head},
+                "pull_request": {
+                    "number": 60,
+                    "head": {"sha": head, "ref": feat_ref},
+                },
+                "repository": {"full_name": "huozhe/code-workflow"},
+                "sender": {"login": "huozheclaude"},
+            },
+        )
+        loop.process_deferred_batch()
+    finally:
+        vmod.verify_feature_merge = real  # type: ignore[assignment]
+
+    sess = store.get_session(sk)
+    assert sess["state"] == "PAUSED_HUMAN"
+    reason = str(sess.get("paused_reason") or "")
+    assert "2 unresolved review thread" in reason
+    assert "was transient" not in reason
+    assert "d-threads" not in dl._merge_auth_attempts
+    assert store.count_by_status().get("done", 0) == 1
+    assert store.count_by_status().get("deferred", 0) == 0
+    assert posts and "@huozhe" in posts[0]
+    store.close()
