@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import subprocess
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -333,4 +335,27 @@ def test_ensure_running_uninitialised_promotes_same_id(
     assert "session.resume" in _FakePing.calls
     assert not world.removed
     assert {r for r, n in world.worktrees if n == 1} == {"architect", "developer"}
+    store.close()
+
+
+def test_recreate_warning_names_reason_and_container(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The recreate destroys the evidence, so the log must carry it (#116)."""
+    store = Store(tmp_path / "state.db")
+    sk = _seed(store, cid="cid-gone")
+    world = _DockerWorld(running=False, exists=False)  # inspect fails -> "gone"
+    sup = SessionSupervisor(store, _cfg(tmp_path))
+    _wire_supervisor(sup, world, monkeypatch)
+
+    # The recreate that follows is not what this test is about; the fake world
+    # cannot complete a real create, so only the warning matters here.
+    with caplog.at_level(logging.WARNING, logger="agentd.supervisor"), suppress(Exception):
+        sup.ensure_session(session_key=sk, repo="o/r", issue_num=1)
+
+    recreate = [r for r in caplog.records if "recreating" in r.getMessage()]
+    assert recreate, "no recreate warning emitted"
+    msg = recreate[0].getMessage()
+    assert "reason=" in msg, msg
+    assert "cid-gone" in msg, msg
     store.close()
