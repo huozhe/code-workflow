@@ -97,7 +97,7 @@ def test_duplicate_delivery_ignored(client) -> None:
 
 
 def test_bad_signature_401_no_persist(client) -> None:
-    tc, store, secret = client
+    tc, store, _secret = client
     body = b"{}"
     r = tc.post(
         "/webhooks/github",
@@ -132,7 +132,7 @@ def test_p7_200_while_breaker_open(client) -> None:
 
 
 def test_content_length_over_cap_413(client) -> None:
-    tc, store, secret = client
+    tc, _store, secret = client
     body = b"x"
     r = tc.post(
         "/webhooks/github",

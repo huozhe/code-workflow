@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
@@ -113,20 +114,21 @@ def test_types_job_is_blocking() -> None:
 
 
 def test_lint_job_stays_advisory() -> None:
-    """ruff tests still 27. Do not fail the job on that yet (#134)."""
+    """ruff src/tests are 0. Job stays advisory until wired (#134)."""
     run = _job_run(_load(_PR), "lint", "ruff")
     assert "exit 0" in run
 
 
-# Mechanical leftovers on tests. Not the 26 that need a judgement
-# (PLW1510/RUF012/RUF059/E402/C408/F841/SIM117).
-_TESTS_AUTOFIX = "PIE807,F401,UP017,I001,F541"
+def _ruff_bin() -> Path:
+    exe = Path(sys.prefix) / "bin" / "ruff"
+    assert exe.is_file(), exe
+    return exe
 
 
-def test_tests_autofixable_ruff_is_clean() -> None:
-    """PIE807 F401 UP017 I001 F541 on tests stay at 0 (#134)."""
+def test_tests_ruff_is_clean() -> None:
+    """ruff check tests stays at 0 (#134)."""
     r = subprocess.run(
-        ["uv", "run", "ruff", "check", "tests", "--select", _TESTS_AUTOFIX],
+        [str(_ruff_bin()), "check", "tests"],
         cwd=Path(__file__).resolve().parents[1],
         capture_output=True,
         text=True,

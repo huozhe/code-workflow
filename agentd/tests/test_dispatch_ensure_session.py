@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import ClassVar
 
 from agentd.config import Config
 from agentd.db import Store
@@ -64,7 +65,7 @@ def _owner_comment(store: Store, *, did: str) -> None:
 
 
 class _RecordingClient:
-    calls: list[tuple[str, dict]] = []
+    calls: ClassVar[list[tuple[str, dict]]] = []
 
     def __init__(self, *a, **k):
         pass

@@ -7,6 +7,7 @@ import subprocess
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -23,7 +24,9 @@ from agentd.supervisor import (
 
 def _docker_ok() -> bool:
     try:
-        r = subprocess.run(["docker", "info"], capture_output=True, timeout=10)
+        r = subprocess.run(
+            ["docker", "info"], capture_output=True, timeout=10, check=False
+        )
         return r.returncode == 0
     except (FileNotFoundError, subprocess.SubprocessError):
         return False
@@ -35,7 +38,7 @@ pytestmark = pytest.mark.skipif(not _docker_ok(), reason="docker not available")
 class _GitHubStub(BaseHTTPRequestHandler):
     """Minimal GET /user stub keyed by Bearer token → login."""
 
-    tokens: dict[str, str] = {}
+    tokens: ClassVar[dict[str, str]] = {}
 
     def do_GET(self) -> None:
         if self.path.rstrip("/") != "/user":
@@ -84,7 +87,7 @@ def test_session_health_ping_and_token_boundary(
     monkeypatch: pytest.MonkeyPatch,
     github_stub: tuple[str, dict[str, str]],
 ) -> None:
-    api_base, tokens = github_stub
+    api_base, _tokens = github_stub
     monkeypatch.setenv("AGENTD_SECRET_CLAUDE_BOT", "pat-architect-realshape")
     monkeypatch.setenv("AGENTD_SECRET_GROK_BOT", "pat-developer-realshape")
     store = Store(tmp_path / "state.db")
@@ -172,6 +175,7 @@ def test_session_health_ping_and_token_boundary(
             ],
             capture_output=True,
             text=True,
+            check=False,
         )
         assert git_st.returncode == 0, git_st.stderr
 
@@ -204,6 +208,7 @@ def test_session_health_ping_and_token_boundary(
         subprocess.run(
             ["docker", "rm", "-f", "agentd-test-repo"],
             capture_output=True,
+            check=False,
         )
         store.close()
 

@@ -113,7 +113,7 @@ def test_new_comments_synthesize_once(tmp_path: Path) -> None:
             },
         ],
     }
-    rec, report, _ = _sweep_rec(store, snap)
+    _, report, _ = _sweep_rec(store, snap)
     assert report["synthesized"] == 2
     queued = [dict(r) for r in store.list_queued()]
     ids = {r["delivery_id"] for r in queued}
@@ -163,7 +163,7 @@ def test_never_synthesize_issue_edited_or_closed(tmp_path: Path) -> None:
             {"id": "I_32", "kind": "issue", "created_at": 200, "author": "huozheclaude", "body": ""},
         ],
     }
-    _, report, esc = _sweep_rec(store, snap)
+    _, report, _ = _sweep_rec(store, snap)
     assert report["synthesized"] == 0
     queued = [dict(r) for r in store.list_queued()]
     assert not any(r["event"] == "issues" for r in queued)

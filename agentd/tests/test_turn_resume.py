@@ -5,12 +5,12 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from agentd.db import Store
+from agentd.reconciler import RESUME_MAX_AGE_S, Reconciler
+
 _RUNNER_ROOT = Path(__file__).resolve().parents[1] / "docker" / "session-runner"
 if str(_RUNNER_ROOT) not in sys.path:
     sys.path.insert(0, str(_RUNNER_ROOT))
-
-from agentd.db import Store
-from agentd.reconciler import RESUME_MAX_AGE_S, Reconciler
 
 
 def _sess(
