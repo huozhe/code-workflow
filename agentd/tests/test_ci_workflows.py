@@ -113,10 +113,12 @@ def test_types_job_is_blocking() -> None:
     assert "exit 0" not in run
 
 
-def test_lint_job_stays_advisory() -> None:
-    """ruff src/tests are 0. Job stays advisory until wired (#134)."""
+def test_lint_job_is_blocking() -> None:
+    """ruff src/tests are 0. A regression must fail the job (#134)."""
     run = _job_run(_load(_PR), "lint", "ruff")
-    assert "exit 0" in run
+    assert "uv run ruff check src tests" in run
+    assert "set +e" not in run
+    assert "exit 0" not in run
 
 
 def _ruff_bin() -> Path:
@@ -125,10 +127,10 @@ def _ruff_bin() -> Path:
     return exe
 
 
-def test_tests_ruff_is_clean() -> None:
-    """ruff check tests stays at 0 (#134)."""
+def test_src_and_tests_ruff_is_clean() -> None:
+    """ruff check src tests stays at 0 (#134)."""
     r = subprocess.run(
-        [str(_ruff_bin()), "check", "tests"],
+        [str(_ruff_bin()), "check", "src", "tests"],
         cwd=Path(__file__).resolve().parents[1],
         capture_output=True,
         text=True,
