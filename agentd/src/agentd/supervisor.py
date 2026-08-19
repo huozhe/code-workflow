@@ -365,10 +365,15 @@ class SessionSupervisor:
                 )
             except (CapacityRefusal, StructuralRefusal):
                 raise
-            except Exception:  # noqa: BLE001 — adopt-or-recreate
+            except Exception as exc:  # noqa: BLE001 — adopt-or-recreate
+                # Name the reason and the container about to be destroyed: the
+                # recreate below removes the only evidence of why (#116).
                 log.warning(
-                    "existing project runner unreachable; recreating project=%s",
+                    "existing project runner unreachable; recreating project=%s "
+                    "container=%s reason=%s",
                     project_key,
+                    str(existing_runner.get("container_id") or "?")[:12],
+                    exc,
                 )
 
         # §6.6 admission: HOT unit is the project container (before clone/create).
