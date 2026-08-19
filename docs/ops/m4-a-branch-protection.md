@@ -35,11 +35,30 @@ Observed as `huozhegrok` / `huozheclaude` (no admin):
 | `deletion` | (main cannot be deleted) |
 | `non_fast_forward` | (no force-push) |
 
-**No `required_status_checks` rule** on the ruleset today. Collaborators
-cannot add one (`admin: false`). That is a separate owner step.
+**`required_status_checks` rule wired 2026-08-18/19 (owner step, #144 + #63).**
+This section said "a separate owner step" for five days after #144 named the
+list; the owner took that step, and this file did not move — which is how
+#63's ADR-26 draft sourced a stale "`required_checks` unset" premise straight
+from here (corrected in ADR-26 1.22.0 / PR #148, #149). Live, verified via:
 
-agentd `repos.huozhe/code-workflow.required_checks` should be the `pr.yml`
-check-run names:
+```http
+GET /repos/huozhe/code-workflow/rules/branches/main
+```
+
+```json
+{
+  "type": "required_status_checks",
+  "parameters": {
+    "required_status_checks": [
+      {"context": "lint", "integration_id": 15368},
+      {"context": "types", "integration_id": 15368},
+      {"context": "pytest", "integration_id": 15368}
+    ]
+  }
+}
+```
+
+agentd `repos.huozhe/code-workflow.required_checks` matches (per #144):
 
 ```yaml
 repos:
@@ -53,14 +72,38 @@ Do not list `image`. That workflow is path-filtered and would leave
 Gateway helper: `agentd.verify.verify_branch_pull_request_rules` — asserts
 `required_approving_review_count >= 1` and surfaces the flags above.
 
-### Alignment risk (runbook)
+### Alignment risk (runbook) — this is not just theoretical
 
-If a `required_status_checks` rule is added to the ruleset later **without**
-updating `repos.<repo>.required_checks` in config, the gateway can emit
-`merge_authorized` while GitHub still blocks the Developer merge. Keep the two
-lists aligned. On `merge_authorized`, the gateway logs the configured
-`required_checks` list for post-hoc comparison. The owner adds the ruleset
-rule; this file names the list.
+The two lists (ruleset `required_status_checks`, config `required_checks`)
+must stay aligned, or the gateway can emit `merge_authorized` while GitHub
+still blocks the Developer merge — or, the failure mode #63 actually hit,
+a stale *description* of the ruleset (this file, not the ruleset itself)
+misleads whoever reads it next into re-deriving an already-fixed bug's
+premise. On `merge_authorized`, the gateway logs the configured
+`required_checks` list for post-hoc comparison against the ruleset. When
+the owner changes the ruleset, **this file needs a same-day edit** — "the
+owner does the ruleset step, this file names the list" was the old
+one-directional framing, and it silently rots the moment the owner acts
+without a matching doc update. Treat this file as a cache of ruleset state,
+not a description of intent, and invalidate it the same way: on write, not
+on next read.
+
+**The two drift directions do not fail alike, and only one is loud.**
+
+- **Ruleset requires a check that config does not name** → the gateway emits
+  `merge_authorized` while GitHub blocks the merge. Visible on the PR, and the
+  logged `required_checks` list is enough to spot it.
+- **Config names a check that never reports** — a typo, or a path-filtered
+  workflow like `image` — → **it hangs rather than fails.**
+  `verify._classify_required_checks` buckets an absent check as *missing*,
+  missing counts as *pending*, and the gateway retries with no permanent
+  refusal, indefinitely. The stall is indistinguishable from "CI is still
+  running"; the only evidence is `missing/not-yet-reported: <name>` in the
+  gateway log.
+
+That asymmetry is why `image` must never be listed: it is path-filtered, so on
+every PR that does not touch the runner it reports nothing at all, and nothing
+is exactly what hangs.
 
 `require_last_push_approval: true` means after a `CODE_REWORK` push the Architect
 must approve **again** on the new head. M4-2 already binds approval to current
