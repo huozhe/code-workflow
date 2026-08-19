@@ -209,6 +209,179 @@ def test_finish_turn_does_not_overwrite_ended_row(
     store.close()
 
 
+def test_inflight_spares_resuming_turn_when_session_not_running(
+    tmp_path: Path,
+) -> None:
+    """ADR-28 (1): in-progress resume is not retired on NON_RUNNING_STATES."""
+    store = Store(tmp_path / "state.db")
+    sk = _sess(store, state="TEARDOWN")
+    now = 10_000
+    _turn(store, sk, started_at=now - 30, status="resuming")
+    _inflight_turn_ids.add("t-open")
+    _, report = _rec(store, now=now)
+    assert report["retired"] == 0
+    assert report["resumed"] == 0
+    row = next(t for t in store.list_open_turns())
+    assert row["status"] == "resuming"
+    store.close()
+
+
+def test_inflight_spares_resuming_turn_past_resume_max_age(
+    tmp_path: Path,
+) -> None:
+    """ADR-28 (2): in-progress resume is not retired when age crosses the bound."""
+    store = Store(tmp_path / "state.db")
+    sk = _sess(store, state="IMPLEMENTING")
+    now = 10_000
+    _turn(
+        store,
+        sk,
+        started_at=now - RESUME_MAX_AGE_S - 10,
+        status="resuming",
+    )
+    _inflight_turn_ids.add("t-open")
+    _, report = _rec(store, now=now)
+    assert report["retired"] == 0
+    assert report["resumed"] == 0
+    row = next(t for t in store.list_open_turns())
+    assert row["status"] == "resuming"
+    store.close()
+
+
+def test_resume_interrupted_turn_registers_inflight_id(tmp_path: Path) -> None:
+    """ADR-28 (3): id is in the set during cli.call and finish_turn, gone after."""
+    import agentd.design_loop as dl
+    from agentd.config import Config
+    from agentd.design_loop import DesignLoop
+
+    store = Store(tmp_path / "state.db")
+    sk = _sess(store, state="IMPLEMENTING")
+    store.upsert_runner(
+        "huozhe/code-workflow",
+        container_id="c",
+        endpoint="127.0.0.1:9",
+        token="t",
+        tier="hot",
+    )
+    now = 10_000
+    _turn(store, sk, started_at=now - 30)
+    store.mark_turn_resuming("t-open")
+    during_call: list[bool] = []
+    during_finish: list[bool] = []
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def call(self, method, params=None):
+            during_call.append("t-open" in _inflight_turn_ids)
+            return {"status": "done", "summary": "ok"}
+
+    orig_finish = store.finish_turn
+
+    def spy_finish(turn_id: str, **kwargs: object) -> None:
+        during_finish.append(turn_id in _inflight_turn_ids)
+        orig_finish(turn_id, **kwargs)
+
+    store.finish_turn = spy_finish  # type: ignore[method-assign]
+    orig = dl.RunnerClient
+    dl.RunnerClient = FakeClient  # type: ignore[misc]
+    try:
+        loop = DesignLoop(store, Config(), dispatch_turns=False, gateway_token="")
+        loop.resume_interrupted_turn(
+            next(t for t in store.list_resuming_turns())
+        )
+        assert "t-open" not in _inflight_turn_ids
+    finally:
+        dl.RunnerClient = orig
+        store.finish_turn = orig_finish
+    assert during_call == [True]
+    assert during_finish == [True]
+    store.close()
+
+
+def test_resume_interrupted_turn_clears_inflight_id_on_error(
+    tmp_path: Path,
+) -> None:
+    """ADR-28 (3): exception path discards the id."""
+    import agentd.design_loop as dl
+    from agentd.config import Config
+    from agentd.design_loop import DesignLoop
+
+    store = Store(tmp_path / "state.db")
+    sk = _sess(store, state="IMPLEMENTING")
+    store.upsert_runner(
+        "huozhe/code-workflow",
+        container_id="c",
+        endpoint="127.0.0.1:9",
+        token="t",
+        tier="hot",
+    )
+    now = 10_000
+    _turn(store, sk, started_at=now - 30)
+    store.mark_turn_resuming("t-open")
+    during_call: list[bool] = []
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def call(self, method, params=None):
+            during_call.append("t-open" in _inflight_turn_ids)
+            raise RuntimeError("rpc down")
+
+    orig = dl.RunnerClient
+    dl.RunnerClient = FakeClient  # type: ignore[misc]
+    try:
+        loop = DesignLoop(store, Config(), dispatch_turns=False, gateway_token="")
+        with pytest.raises(RuntimeError, match="rpc down"):
+            loop.resume_interrupted_turn(
+                next(t for t in store.list_resuming_turns())
+            )
+        assert "t-open" not in _inflight_turn_ids
+    finally:
+        dl.RunnerClient = orig
+    assert during_call == [True]
+    store.close()
+
+
+def test_inflight_check_prevents_retire_finish_turn(tmp_path: Path) -> None:
+    """ADR-28 (4): seeded id never reaches finish_turn; the set is the mechanism."""
+    store = Store(tmp_path / "state.db")
+    sk = _sess(store, state="TEARDOWN")
+    now = 10_000
+    _turn(store, sk, started_at=now - 30, status="resuming")
+    _inflight_turn_ids.add("t-open")
+    finished: list[str] = []
+    orig = store.finish_turn
+
+    def spy(turn_id: str, **kwargs: object) -> None:
+        finished.append(turn_id)
+        orig(turn_id, **kwargs)
+
+    store.finish_turn = spy  # type: ignore[method-assign]
+    try:
+        _, report = _rec(store, now=now)
+    finally:
+        store.finish_turn = orig
+    assert report["retired"] == 0
+    assert finished == []
+    assert next(t for t in store.list_open_turns())["status"] == "resuming"
+    store.close()
+
+
 def test_resume_fails_twice_then_retires(tmp_path: Path) -> None:
     from agentd.config import Config
     from agentd.design_loop import DesignLoop
