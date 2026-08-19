@@ -896,7 +896,7 @@ class DesignLoop:
         )
 
     def _runner_reachable(self, runner: dict[str, Any]) -> bool:
-        """health.ping only — no layout work. A ledger row is not reachability."""
+        """Serviceable ping — answering is not enough (ADR-25)."""
         endpoint = str(runner.get("endpoint") or "")
         host, _, port_s = endpoint.partition(":")
         token = str(runner.get("token") or runner.get("runner_token") or "")
@@ -908,8 +908,8 @@ class DesignLoop:
             return False
         try:
             with RunnerClient(host, port, token, timeout_s=2.0) as cli:
-                cli.call("health.ping")
-            return True
+                ping = cli.call("health.ping")
+            return isinstance(ping, dict) and ping.get("initialized") is True
         except Exception:  # noqa: BLE001 — ping probe
             return False
 

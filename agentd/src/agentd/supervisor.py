@@ -162,6 +162,25 @@ def assert_no_secrets_in_inspect_env(container_id: str) -> None:
 # Back-compat name used by tests
 assert_bearer_not_in_inspect_env = assert_no_secrets_in_inspect_env
 
+def _inspect_running_and_image(
+    container_id: str,
+) -> tuple[bool | None, str | None]:
+    """None, None if the container is gone."""
+    r = _docker(
+        "inspect",
+        container_id,
+        "--format",
+        "{{.State.Running}}\t{{.Config.Image}}",
+        check=False,
+    )
+    if r.returncode != 0:
+        return None, None
+    running_s, sep, image = (r.stdout or "").strip().partition("\t")
+    if not sep:
+        return None, None
+    return running_s.lower() == "true", image or None
+
+
 def _host_port_from_inspect(container_id: str) -> int:
     """Resolve published host port (retry — OrbStack can lag right after start)."""
     last = ""
@@ -334,53 +353,22 @@ class SessionSupervisor:
     ) -> SessionHandle:
         if existing_runner and existing_runner.get("container_id"):
             try:
-                # Ensure worktrees exist on host before ping/assert.
-                self._prepare_project_issue_layout(
+                return self._adopt_or_promote(
+                    session_key=session_key,
                     repo=repo,
                     issue_num=issue_num,
-                    clone_url=clone_url,
-                )
-                handle = self._handle_from_runner(
-                    session_key=session_key,
                     project_key=project_key,
-                    runner=existing_runner,
-                )
-                with RunnerClient("127.0.0.1", handle.host_port, handle.bearer) as cli:
-                    cli.call("health.ping")
-                assert_worktree_usable(
-                    handle.container_id, issue_num=issue_num, role="architect", uid="1001:1001"
-                )
-                assert_worktree_usable(
-                    handle.container_id, issue_num=issue_num, role="developer", uid="1002:1002"
-                )
-                now = int(time.time())
-                self.store.upsert_session(
-                    session_key=session_key,
-                    project_key=project_key,
-                    repo=repo,
-                    issue_num=issue_num,
-                    state="INTAKE",
                     architect=architect,
                     developer=developer,
-                    created_at=now,
-                    updated_at=now,
+                    clone_url=clone_url,
+                    existing_runner=existing_runner,
                 )
-                self._register_session_layout_artifacts(
-                    session_key=session_key,
-                    repo=repo,
-                    issue_num=issue_num,
-                )
-                self.store.upsert_runner(
-                    project_key,
-                    container_id=handle.container_id,
-                    endpoint=handle.endpoint,
-                    token=handle.bearer,
-                    tier="hot",
-                )
-                return handle
+            except (CapacityRefusal, StructuralRefusal):
+                raise
             except Exception:  # noqa: BLE001 — adopt-or-recreate
                 log.warning(
-                    "existing project runner unreachable; recreating project=%s", project_key
+                    "existing project runner unreachable; recreating project=%s",
+                    project_key,
                 )
 
         # §6.6 admission: HOT unit is the project container (before clone/create).
@@ -547,6 +535,87 @@ class SessionSupervisor:
             endpoint=endpoint,
             tier="hot",
         )
+
+    def _adopt_or_promote(
+        self,
+        *,
+        session_key: str,
+        repo: str,
+        issue_num: int,
+        project_key: str,
+        architect: str,
+        developer: str,
+        clone_url: str | None,
+        existing_runner: dict[str, Any],
+    ) -> SessionHandle:
+        """ADR-25: adopt if serviceable; else promote_hot (resume ± start).
+
+        Adopt's ping-success return is only valid when initialized is true.
+        Stopped + image mismatch recreates (raise into the caller). Capacity
+        and structural refusals propagate.
+        """
+        cid = str(existing_runner["container_id"])
+        running, image = _inspect_running_and_image(cid)
+        if running is None:
+            raise RuntimeError(f"container {cid} gone")
+        mismatch = bool(image) and image != IMAGE
+        self._prepare_project_issue_layout(
+            repo=repo,
+            issue_num=issue_num,
+            clone_url=clone_url,
+        )
+        if running:
+            handle = self._handle_from_runner(
+                session_key=session_key,
+                project_key=project_key,
+                runner=existing_runner,
+            )
+            with RunnerClient("127.0.0.1", handle.host_port, handle.bearer) as cli:
+                ping = cli.call("health.ping")
+            if isinstance(ping, dict) and ping.get("initialized") is True:
+                assert_worktree_usable(
+                    handle.container_id,
+                    issue_num=issue_num,
+                    role="architect",
+                    uid="1001:1001",
+                )
+                assert_worktree_usable(
+                    handle.container_id,
+                    issue_num=issue_num,
+                    role="developer",
+                    uid="1002:1002",
+                )
+                now = int(time.time())
+                self.store.upsert_session(
+                    session_key=session_key,
+                    project_key=project_key,
+                    repo=repo,
+                    issue_num=issue_num,
+                    state="INTAKE",
+                    architect=architect,
+                    developer=developer,
+                    created_at=now,
+                    updated_at=now,
+                )
+                self._register_session_layout_artifacts(
+                    session_key=session_key,
+                    repo=repo,
+                    issue_num=issue_num,
+                )
+                self.store.upsert_runner(
+                    project_key,
+                    container_id=handle.container_id,
+                    endpoint=handle.endpoint,
+                    token=handle.bearer,
+                    tier="hot",
+                )
+                return handle
+            if mismatch:
+                raise RuntimeError(f"image mismatch {image} != {IMAGE}")
+            return self.promote_hot(session_key)
+        if mismatch:
+            raise RuntimeError(f"image mismatch {image} != {IMAGE}")
+        return self.promote_hot(session_key)
 
     def demote_cold(self, project_key: str) -> None:
         """COLD = docker stop for a **project** runner (§6.5)."""

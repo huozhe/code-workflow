@@ -78,7 +78,19 @@ class _RecordingClient:
 
     def call(self, method, params=None):
         self.calls.append((method, dict(params or {})))
+        if method == "health.ping":
+            return {"ok": True, "initialized": True}
         return {"status": "done", "summary": "ok", "public_actions": []}
+
+
+class _UninitPing(_RecordingClient):
+    """health.ping answers but initialized is false (reboot residual)."""
+
+    def call(self, method, params=None):
+        if method == "health.ping":
+            self.calls.append((method, dict(params or {})))
+            return {"ok": True, "initialized": False}
+        return super().call(method, params)
 
 
 class _UnreachablePing(_RecordingClient):
@@ -189,6 +201,24 @@ def test_stale_runner_row_still_calls_ensure_on_turn(tmp_path: Path) -> None:
     _run(store, tmp_path, sup, client=_UnreachablePing)
     assert sup.calls == 1
     assert any(m == "turn.dispatch" for m, _ in _RecordingClient.calls)
+    store.close()
+
+
+def test_uninitialized_ping_calls_ensure(tmp_path: Path) -> None:
+    """ADR-25: answering is not reachable. initialized false → ensure_session."""
+    store = Store(tmp_path / "state.db")
+    _seed_session(store)
+    store.upsert_runner(
+        "huozhe/code-workflow",
+        container_id="rebooted",
+        endpoint="127.0.0.1:9",
+        token="tok",
+        tier="hot",
+    )
+    sup = _EnsureSupervisor(store)
+    _owner_comment(store, did="d-uninit")
+    _run(store, tmp_path, sup, client=_UninitPing)
+    assert sup.calls == 1
     store.close()
 
 

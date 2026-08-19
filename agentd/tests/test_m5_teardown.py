@@ -391,6 +391,8 @@ class _RecordingClient:
 
     def call(self, method, params=None):
         self.__class__.calls.append((method, dict(params or {})))
+        if method == "health.ping":
+            return {"ok": True, "initialized": True}
         return {"status": "done", "summary": "cleaned", "public_actions": []}
 
 
