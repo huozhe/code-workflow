@@ -1,0 +1,4 @@
+Throwaway artifact for #63 verification item 3 (ADR-26 exit condition).
+Creates a PR that can be held at mergeable_state=blocked by an unresolved
+review thread, so verify_feature_merge can be observed classifying it.
+Delete with the PR.
