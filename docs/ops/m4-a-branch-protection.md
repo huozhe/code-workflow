@@ -88,6 +88,23 @@ without a matching doc update. Treat this file as a cache of ruleset state,
 not a description of intent, and invalidate it the same way: on write, not
 on next read.
 
+**The two drift directions do not fail alike, and only one is loud.**
+
+- **Ruleset requires a check that config does not name** → the gateway emits
+  `merge_authorized` while GitHub blocks the merge. Visible on the PR, and the
+  logged `required_checks` list is enough to spot it.
+- **Config names a check that never reports** — a typo, or a path-filtered
+  workflow like `image` — → **it hangs rather than fails.**
+  `verify._classify_required_checks` buckets an absent check as *missing*,
+  missing counts as *pending*, and the gateway retries with no permanent
+  refusal, indefinitely. The stall is indistinguishable from "CI is still
+  running"; the only evidence is `missing/not-yet-reported: <name>` in the
+  gateway log.
+
+That asymmetry is why `image` must never be listed: it is path-filtered, so on
+every PR that does not touch the runner it reports nothing at all, and nothing
+is exactly what hangs.
+
 `require_last_push_approval: true` means after a `CODE_REWORK` push the Architect
 must approve **again** on the new head. M4-2 already binds approval to current
 head SHA; M4-4 exercises this live.
