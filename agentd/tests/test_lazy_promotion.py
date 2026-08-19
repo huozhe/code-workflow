@@ -356,6 +356,9 @@ def test_recreate_warning_names_reason_and_container(
     recreate = [r for r in caplog.records if "recreating" in r.getMessage()]
     assert recreate, "no recreate warning emitted"
     msg = recreate[0].getMessage()
-    assert "reason=" in msg, msg
-    assert "cid-gone" in msg, msg
+    # Token asserts, not substrings: the reason text itself contains the id, so
+    # `"cid-gone" in msg` passes even with container=%s dropped, and `"reason="`
+    # passes with an empty value. (Developer's catch on #153.)
+    assert "container=cid-gone" in msg, msg
+    assert "reason=container cid-gone gone" in msg, msg
     store.close()
