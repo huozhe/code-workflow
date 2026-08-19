@@ -9,6 +9,8 @@ from typing import Any
 
 import httpx
 
+from agentd.github_fetch import fetch_pr_review_threads
+
 log = logging.getLogger("agentd.verify")
 
 
@@ -192,6 +194,7 @@ def verify_feature_merge(
     token: str | None,
     required_checks: list[str] | None = None,
     http_get: Callable[..., Any] | None = None,
+    fetch_threads: Callable[..., Any] | None = None,
 ) -> ApprovalCheck:
     """§8.4 Feature PR merge authorization (M4-2).
 
@@ -204,13 +207,15 @@ def verify_feature_merge(
     Gateway verifies only — it does **not** merge (ADR-8). On success the
     design loop emits ``merge_authorized`` so the **Developer** acts.
 
-    Failures are classified (PR #54 B1 / #38 split):
+    Failures are classified (PR #54 B1 / #38 split, ADR-26):
 
     - **transient** (``transient=True``): GitHub still computing mergeability
-      (``unknown`` / null), or ``blocked`` while checks are pending — caller
-      must leave the delivery deferred and retry.
+      (``unknown`` / null), or ``blocked`` with no unresolved review threads
+      while checks are pending / unset — caller must leave the delivery
+      deferred and retry.
     - **permanent** (``transient=False``): wrong approver, stale head,
-      ``dirty``, or a required check that has concluded ``failure``.
+      ``dirty``, a required check that has concluded ``failure``, or
+      ``blocked`` with ``unresolved_count > 0``.
     """
     if not token:
         return ApprovalCheck(False, "no token for GitHub API verification")
@@ -289,6 +294,22 @@ def verify_feature_merge(
             transient=False,
         )
     if mergeable_state == "blocked":
+        # ADR-26: unresolved threads outrank checks. Fetch only on blocked.
+        unresolved = _observe_unresolved_threads(
+            repo=repo,
+            pr_number=pr_number,
+            token=token,
+            fetch_threads=fetch_threads,
+        )
+        if unresolved is not None and unresolved > 0:
+            return ApprovalCheck(
+                False,
+                (
+                    f"mergeable_state is 'blocked': {unresolved} "
+                    "unresolved review thread(s) — resolve before merge"
+                ),
+                transient=False,
+            )
         if checks_pending or not wanted:
             # Checks still running, or no named checks yet — not ready.
             detail = checks_reason or "settling"
@@ -409,6 +430,36 @@ _FAILED_CHECK_STATES = frozenset(
         "neutral",  # not success for required gates
     }
 )
+
+
+def _observe_unresolved_threads(
+    *,
+    repo: str,
+    pr_number: int,
+    token: str | None,
+    fetch_threads: Callable[..., Any] | None,
+) -> int | None:
+    """Unresolved review-thread count, or None if the fetch is not a verdict.
+
+    ``None`` is *not* zero: a failed or empty observation falls through to
+    the pre-existing checks classification (ADR-26). ``fetch_pr_review_threads``
+    already returns None on error; the injectable hook may also raise.
+    """
+    try:
+        if fetch_threads is not None:
+            snap = fetch_threads(repo=repo, pr_number=pr_number, token=token)
+        else:
+            snap = fetch_pr_review_threads(
+                repo=repo, pr_number=pr_number, token=token
+            )
+    except Exception:  # noqa: BLE001
+        return None
+    if snap is None:
+        return None
+    try:
+        return int(snap.unresolved_count)
+    except (AttributeError, TypeError, ValueError):
+        return None
 
 
 def _classify_required_checks(
