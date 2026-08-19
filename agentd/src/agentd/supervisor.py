@@ -612,10 +612,68 @@ class SessionSupervisor:
                 return handle
             if mismatch:
                 raise RuntimeError(f"image mismatch {image} != {IMAGE}")
-            return self.promote_hot(session_key)
+            return self._promote_existing(
+                session_key=session_key,
+                repo=repo,
+                issue_num=issue_num,
+                project_key=project_key,
+                architect=architect,
+                developer=developer,
+            )
         if mismatch:
             raise RuntimeError(f"image mismatch {image} != {IMAGE}")
-        return self.promote_hot(session_key)
+        return self._promote_existing(
+            session_key=session_key,
+            repo=repo,
+            issue_num=issue_num,
+            project_key=project_key,
+            architect=architect,
+            developer=developer,
+        )
+
+    def _promote_existing(
+        self,
+        *,
+        session_key: str,
+        repo: str,
+        issue_num: int,
+        project_key: str,
+        architect: str,
+        developer: str,
+    ) -> SessionHandle:
+        """Create-path ensure_session has no session row yet (ADR-25)."""
+        if self.store.get_session(session_key) is None:
+            now = int(time.time())
+            self.store.upsert_session(
+                session_key=session_key,
+                project_key=project_key,
+                repo=repo,
+                issue_num=issue_num,
+                state="INTAKE",
+                architect=architect,
+                developer=developer,
+                created_at=now,
+                updated_at=now,
+            )
+        handle = self.promote_hot(session_key)
+        assert_worktree_usable(
+            handle.container_id,
+            issue_num=issue_num,
+            role="architect",
+            uid="1001:1001",
+        )
+        assert_worktree_usable(
+            handle.container_id,
+            issue_num=issue_num,
+            role="developer",
+            uid="1002:1002",
+        )
+        self._register_session_layout_artifacts(
+            session_key=session_key,
+            repo=repo,
+            issue_num=issue_num,
+        )
+        return handle
 
     def demote_cold(self, project_key: str) -> None:
         """COLD = docker stop for a **project** runner (§6.5)."""

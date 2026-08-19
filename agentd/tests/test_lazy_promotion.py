@@ -183,6 +183,32 @@ def test_ensure_stopped_promotes_same_container(
     store.close()
 
 
+def test_ensure_stopped_promotes_without_session_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Create path: new issue, stopped project runner, no session row (ADR-25)."""
+    store = Store(tmp_path / "state.db")
+    store.upsert_runner(
+        "o/r",
+        container_id="cid-keep",
+        endpoint="127.0.0.1:1",
+        token="tok",
+        tier="cold",
+    )
+    world = _DockerWorld(running=False)
+    sup = SessionSupervisor(store, _cfg(tmp_path))
+    _wire_supervisor(sup, world, monkeypatch)
+    handle = sup.ensure_session(session_key="o/r#42", repo="o/r", issue_num=42)
+    assert handle.container_id == "cid-keep"
+    assert not world.removed
+    row = store.get_runner("o/r")
+    assert row is not None
+    assert row["tier"] == "hot"
+    sess = store.get_session("o/r#42")
+    assert sess is not None
+    store.close()
+
+
 def test_ensure_plants_port_is_replaced(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
