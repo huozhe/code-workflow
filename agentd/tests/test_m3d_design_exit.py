@@ -98,9 +98,6 @@ def test_design_half_happy_path_to_implementing(tmp_path: Path) -> None:
             ]
         return {"head": {"sha": head}, "number": 50}
 
-
-    original_verify = None
-
     posts: list[str] = []
     loop = DesignLoop(
         store,

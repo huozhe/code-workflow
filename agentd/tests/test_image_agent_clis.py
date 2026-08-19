@@ -17,7 +17,9 @@ _EXPECTED_GROK = "1.0.5"
 
 def _docker_ok() -> bool:
     try:
-        r = subprocess.run(["docker", "info"], capture_output=True, timeout=10)
+        r = subprocess.run(
+            ["docker", "info"], capture_output=True, timeout=10, check=False
+        )
         return r.returncode == 0
     except (FileNotFoundError, subprocess.SubprocessError):
         return False
@@ -63,6 +65,7 @@ def test_clis_on_path_as_role_uids(session_runner_image: str) -> None:
             capture_output=True,
             text=True,
             timeout=60,
+            check=False,
         )
         assert r.returncode == 0, f"uid={uid} stderr={r.stderr!r} out={r.stdout!r}"
         assert labels["agentd.claude_code_version"] in r.stdout, r.stdout
@@ -124,6 +127,7 @@ print("GROK_ADAPTER_OK")
         capture_output=True,
         text=True,
         timeout=120,
+        check=False,
     )
     combined = r.stdout + r.stderr
     assert "GROK_ADAPTER_OK" in combined, combined[-2500:]
@@ -179,6 +183,7 @@ print("CLAUDE_ADAPTER_OK")
         capture_output=True,
         text=True,
         timeout=120,
+        check=False,
     )
     combined = r.stdout + r.stderr
     assert "CLAUDE_ADAPTER_OK" in combined, combined[-2500:]

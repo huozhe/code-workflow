@@ -41,13 +41,17 @@ def test_claude_oauth_in_env_forbidden() -> None:
         "AGENTD_RPC_HOST=0.0.0.0",
         "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-FAKE",
     ]
-    with patch("agentd.supervisor._docker", _fake_docker(env)):
-        with pytest.raises(RuntimeError, match="CLAUDE_CODE_OAUTH_TOKEN"):
-            assert_no_secrets_in_inspect_env("cid")
+    with (
+        patch("agentd.supervisor._docker", _fake_docker(env)),
+        pytest.raises(RuntimeError, match="CLAUDE_CODE_OAUTH_TOKEN"),
+    ):
+        assert_no_secrets_in_inspect_env("cid")
 
 
 def test_bearer_in_env_forbidden() -> None:
     env = ["PATH=/usr/bin", "AGENTD_RUNNER_BEARER=secret"]
-    with patch("agentd.supervisor._docker", _fake_docker(env)):
-        with pytest.raises(RuntimeError, match="AGENTD_RUNNER_BEARER"):
-            assert_no_secrets_in_inspect_env("cid")
+    with (
+        patch("agentd.supervisor._docker", _fake_docker(env)),
+        pytest.raises(RuntimeError, match="AGENTD_RUNNER_BEARER"),
+    ):
+        assert_no_secrets_in_inspect_env("cid")

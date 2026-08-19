@@ -32,11 +32,11 @@ def test_fingerprint_fires_on_cosmetic_pushes_after_arm() -> None:
     """
     st = StallTracker(fp_threshold=3)
     # Frozen review/diff state — only head changes each round
-    frozen = dict(
-        open_thread_ids=["t1", "t2"],
-        unresolved_count=2,
-        diff_stat="1 file changed, 1 insertion(+)",
-    )
+    frozen = {
+        "open_thread_ids": ["t1", "t2"],
+        "unresolved_count": 2,
+        "diff_stat": "1 file changed, 1 insertion(+)",
+    }
     # Initial head — not armed yet
     fp0 = progress_fingerprint(**frozen)
     assert st.observe_fingerprint(fp0, "sha0") is None

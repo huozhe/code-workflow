@@ -83,7 +83,7 @@ def _rpc(port: int, lines: list[dict]) -> list[dict]:
 
 
 def test_turn_dispatch_writes_transcript(runner_env: tuple[int, Path]) -> None:
-    port, sess = runner_env
+    port, _sess = runner_env
     resp = _rpc(
         port,
         [
@@ -403,13 +403,14 @@ def test_drop_privs_clears_groups_and_rejects_root() -> None:
     assert calls[1] == ("setgid", 1001)
     assert calls[2] == ("setuid", 1001)
 
-    with patch("agentd_runner.cli_session.os.setgroups"), patch(
-        "agentd_runner.cli_session.os.setgid"
-    ), patch("agentd_runner.cli_session.os.setuid"), patch(
-        "agentd_runner.cli_session.os.geteuid", return_value=0
+    with (
+        patch("agentd_runner.cli_session.os.setgroups"),
+        patch("agentd_runner.cli_session.os.setgid"),
+        patch("agentd_runner.cli_session.os.setuid"),
+        patch("agentd_runner.cli_session.os.geteuid", return_value=0),
+        pytest.raises(RuntimeError, match="still euid 0"),
     ):
-        with pytest.raises(RuntimeError, match="still euid 0"):
-            cli_session._drop_privs(1001)
+        cli_session._drop_privs(1001)
 
 
 def test_role_env_paths_under_role_tree(tmp_path: Path) -> None:

@@ -28,7 +28,9 @@ _RUNNER_ROOT = Path(__file__).resolve().parents[1] / "docker" / "session-runner"
 
 def _docker_ok() -> bool:
     try:
-        r = subprocess.run(["docker", "info"], capture_output=True, timeout=10)
+        r = subprocess.run(
+            ["docker", "info"], capture_output=True, timeout=10, check=False
+        )
         return r.returncode == 0
     except (FileNotFoundError, subprocess.SubprocessError):
         return False
@@ -55,6 +57,7 @@ def session_runner_image() -> str:
         ],
         capture_output=True,
         text=True,
+        check=False,
     )
     if r.returncode != 0:
         pytest.fail(

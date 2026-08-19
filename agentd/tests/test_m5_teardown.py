@@ -7,6 +7,7 @@ import logging
 import subprocess
 import time
 from pathlib import Path
+from typing import ClassVar
 
 from agentd.config import Config
 from agentd.db import Store
@@ -377,7 +378,7 @@ def test_reclose_after_closed_is_noop(tmp_path: Path) -> None:
 
 
 class _RecordingClient:
-    calls: list[tuple[str, dict]] = []
+    calls: ClassVar[list[tuple[str, dict]]] = []
 
     def __init__(self, *a, **k):
         pass
