@@ -65,12 +65,8 @@ jobs:
           enable-cache: true
           python-version: "3.12"
       - run: uv sync --all-extras
-      - name: ruff (advisory)
-        run: |
-          set +e
-          uv run ruff check src tests
-          echo "ruff exit=$?" >> "$GITHUB_STEP_SUMMARY"
-          exit 0
+      - name: ruff
+        run: uv run ruff check src tests
 
   types:
     runs-on: ubuntu-latest
