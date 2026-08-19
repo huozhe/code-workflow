@@ -30,6 +30,16 @@ def _on(data: dict) -> dict:
     return trigger
 
 
+# §8.4 / #131: GitHub check-run names. Not `image` — that workflow is
+# path-filtered and would stall every PR that does not touch the runner.
+REQUIRED_CHECKS = ["pytest", "lint", "types"]
+
+
+def test_pr_job_names_are_required_checks() -> None:
+    """required_checks in host config must match these check-run names."""
+    assert list(_load(_PR)["jobs"]) == REQUIRED_CHECKS
+
+
 def test_pr_workflow_exists_and_covers_pr_and_main() -> None:
     data = _load(_PR)
     trigger = _on(data)
