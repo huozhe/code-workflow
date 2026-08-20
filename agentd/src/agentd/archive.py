@@ -35,6 +35,7 @@ def build_manifest(
     feature_pr: int | None,
     turn_count: int,
     closed_at: int,
+    models: dict[str, dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     return {
         "session_key": session_key,
@@ -44,6 +45,9 @@ def build_manifest(
         "feature_pr": feature_pr,
         "turn_count": int(turn_count),
         "closed_at": int(closed_at),
+        # #92: the archive must be able to answer "what produced this".
+        # {} means every CLI ran its own default — not that nothing ran.
+        "models": models or {},
     }
 
 
@@ -107,6 +111,7 @@ def archive_and_purge(
     feature_pr: int | None,
     turn_count: int,
     closed_at: int | None = None,
+    models: dict[str, dict[str, str]] | None = None,
 ) -> Path | None:
     """If the session dir exists: manifest, tar, purge. Return dest or None.
 
@@ -128,6 +133,7 @@ def archive_and_purge(
             feature_pr=feature_pr,
             turn_count=turn_count,
             closed_at=ts,
+            models=models,
         ),
     )
     write_tarball(session_dir, dest)

@@ -29,6 +29,9 @@ class RunnerState:
         self.session_key: str | None = None
         self.project_key: str | None = None
         self.roles: dict[str, str] = {}  # role -> github login
+        # adapter -> {"model": str, "reasoning_effort": str} (ADR-9 v2 / #92).
+        # Empty ⇒ every CLI keeps its own default.
+        self.models: dict[str, dict[str, str]] = {}
         self.initialized = False
         self.missed: dict[str, Any] = {}
         self._lock = threading.Lock()
@@ -309,6 +312,8 @@ def handle_request(req: dict[str, Any], authed: bool) -> dict[str, Any]:
                 "cli_rss_kb": _cli.rss_snapshot(),
                 "session_key": STATE.session_key,
                 "initialized": STATE.initialized,
+                # #92: the record must be able to say which model did the work.
+                "models": STATE.models,
             }
         )
 
@@ -319,12 +324,30 @@ def handle_request(req: dict[str, Any], authed: bool) -> dict[str, Any]:
         roles = params.get("roles") or {}
         tokens = params.get("tokens") or {}
         model_creds = params.get("model_credentials") or {}
+        models = params.get("models") or {}
         if not isinstance(roles, dict) or not isinstance(tokens, dict):
             return err(-32602, "roles and tokens must be objects")
         if not isinstance(model_creds, dict):
             return err(-32602, "model_credentials must be an object")
+        # ADR-9 v2 (#92). An older gateway omits the field entirely — that is a
+        # valid downgrade and means "CLI defaults", exactly as before. A malformed
+        # field is not: refuse rather than silently run the default model.
+        if not isinstance(models, dict):
+            return err(-32602, "models must be an object")
+        parsed_models: dict[str, dict[str, str]] = {}
+        for adapter, spec in models.items():
+            if not isinstance(spec, dict):
+                return err(-32602, f"models.{adapter} must be an object")
+            entry = {
+                k: str(spec[k]).strip()
+                for k in ("model", "reasoning_effort")
+                if str(spec.get(k) or "").strip()
+            }
+            if entry:
+                parsed_models[str(adapter)] = entry
         STATE.session_key = session_key
         STATE.roles = {str(k): str(v) for k, v in roles.items()}
+        STATE.models = parsed_models
 
         # Project-scoped TMPDIR/XDG as the role UID (§7.3). No issue in
         # scope — do not mkdir AGENTD_SESSION_DIR (#76 B1/B2).
@@ -380,6 +403,9 @@ def handle_request(req: dict[str, Any], authed: bool) -> dict[str, Any]:
                 "initialized": True,
                 "method": method,
                 "roles": STATE.roles,
+                # Echo what will actually be spawned, so the gateway logs the
+                # models rather than assuming its own config took effect (#92).
+                "models": STATE.models,
                 "rehydrated": rehydrated,
                 "cli_spawn": cli_spawn,
             }

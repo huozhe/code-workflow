@@ -20,6 +20,28 @@ from agentd_runner.server import ROLE_UIDS, ensure_role_layout, project_root, se
 
 log = logging.getLogger("agentd_runner.turn")
 
+
+# config.yaml keys agents by their yaml id (`claude`, `grok`); resolve_adapter
+# returns the adapter name (`claude-code`, `grok-cli`, adapters.py:21). Accept
+# both, the same way cli_session's spawn branches already do — otherwise the
+# lookup misses on every live spawn and silently keeps the CLI default, which is
+# exactly the failure #92 exists to prevent. (PR #164 review, huozhegrok.)
+_ADAPTER_ALIASES = {"claude-code": "claude", "grok-cli": "grok"}
+
+
+def model_spec(adapter: str) -> tuple[str | None, str | None]:
+    """(model, reasoning_effort) for an adapter, from session.init (#92).
+
+    Keyed by adapter, not role: §5.3 lets a role swap adapter, and only the
+    adapter knows what a vendor string means. Missing ⇒ (None, None) ⇒ the CLI's
+    own default, which is the pre-#92 behaviour.
+    """
+    from agentd_runner.server import STATE
+
+    models = STATE.models or {}
+    spec = models.get(adapter) or models.get(_ADAPTER_ALIASES.get(adapter, adapter)) or {}
+    return (spec.get("model") or None, spec.get("reasoning_effort") or None)
+
 ProgressCb = Callable[[dict[str, Any]], None]
 
 
@@ -414,6 +436,7 @@ def _live_result(
     role = str(params.get("role") or "")
     uid = ROLE_UIDS[role]
     deadline_s = int(params.get("deadline_s") or 900)
+    model, effort = model_spec(adapter)
     sess = cli_session.get_or_create_session(
         role=role,
         adapter=adapter,
@@ -422,6 +445,8 @@ def _live_result(
         tmp=paths["tmp"],
         xdg=paths["xdg"],
         spawn_cwd=project_root(),
+        model=model,
+        reasoning_effort=effort,
     )
     try:
         sess.ensure_spawned(continue_session=True)
@@ -532,6 +557,7 @@ def ensure_role_cli_spawned(role: str, *, continue_session: bool = False) -> dic
     paths = role_paths(role)
     for p in (paths["home"], paths["tmp"], paths["xdg"]):
         p.mkdir(parents=True, exist_ok=True)
+    model, effort = model_spec(adapter)
     try:
         sess = cli_session.get_or_create_session(
             role=role,
@@ -541,12 +567,16 @@ def ensure_role_cli_spawned(role: str, *, continue_session: bool = False) -> dic
             tmp=paths["tmp"],
             xdg=paths["xdg"],
             spawn_cwd=project_root(),
+            model=model,
+            reasoning_effort=effort,
         )
         sess.ensure_spawned(continue_session=continue_session)
         return {
             "role": role,
             "spawned": True,
             "adapter": adapter,
+            "model": model,
+            "reasoning_effort": effort,
             "pid": sess.proc.pid if sess.proc else None,
             "rss_kb": sess.last_rss_kb,
             "continue_session": continue_session,

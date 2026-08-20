@@ -362,3 +362,48 @@ def test_recreate_warning_names_reason_and_container(
     assert "container=cid-gone" in msg, msg
     assert "reason=container cid-gone gone" in msg, msg
     store.close()
+
+
+# ---------------------------------------------------------- PR #164 review
+
+
+class _RecordingClient(_FakePing):
+    """_FakePing that also records the params of every call."""
+
+    payloads: ClassVar[list[tuple[str, dict]]] = []
+
+    def call(self, method, params=None):
+        type(self).payloads.append((method, dict(params or {})))
+        return super().call(method, params)
+
+
+def test_session_resume_carries_models(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#92 / PR #164: the runner handler is shared between init and resume and
+    does `params.get("models") or {}`, so a resume that omits the field CLEARS
+    STATE.models. After an ADR-25 promote the configured models would silently
+    stop applying.
+    """
+    store = Store(tmp_path / "state.db")
+    sk = _seed(store, cid="cid-keep")
+    cfg = _cfg(tmp_path)
+    cfg.raw["agents"]["claude"]["model"] = "opus"
+    cfg.raw["agents"]["claude"]["reasoning_effort"] = "high"
+    world = _DockerWorld(running=False)  # stopped ⇒ promote_hot ⇒ session.resume
+    sup = SessionSupervisor(store, cfg)
+    _wire_supervisor(sup, world, monkeypatch)
+    import agentd.supervisor as sm
+
+    monkeypatch.setattr(sm, "RunnerClient", _RecordingClient)
+    _RecordingClient.payloads = []
+    _RecordingClient.ping_exc = None
+    _RecordingClient.ping_result = {"ok": True, "initialized": True}
+
+    sup.ensure_session(session_key=sk, repo="o/r", issue_num=1)
+
+    resumes = [p for m, p in _RecordingClient.payloads if m == "session.resume"]
+    assert resumes, "expected a session.resume on the promote path"
+    assert resumes[0].get("models") == {
+        "claude": {"model": "opus", "reasoning_effort": "high"}
+    }

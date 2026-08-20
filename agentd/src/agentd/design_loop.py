@@ -2513,6 +2513,10 @@ class DesignLoop:
             design_pr=fresh.get("design_pr"),
             feature_pr=fresh.get("feature_pr"),
             turn_count=turn_count,
+            # #92: record which models produced the work. Read from config at
+            # close time — the runner echoes the same values back on session.init
+            # and health.ping, so a mismatch is visible in the log.
+            models=self.config.agent_models(),
         )
         if dest is None:
             return None

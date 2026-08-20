@@ -135,6 +135,36 @@ class Config:
         entry = agents.get(agent_id) or {}
         return entry.get("login")
 
+    def agent_models(self) -> dict[str, dict[str, str]]:
+        """§5.3 / ADR-9: per-adapter model + reasoning effort, both optional (#92).
+
+        Keyed by the **yaml agent id** (``claude``, ``grok``), never by role,
+        because a role may swap adapter and only the adapter knows what a vendor
+        string means.
+
+        The agent id is *not* the adapter name: ``resolve_adapter`` returns
+        ``claude-code`` / ``grok-cli`` (§5.4), so the runner resolves both forms
+        (``turn.model_spec``). Keep that alias map in step with any new agent id.
+
+        An agent with neither key is omitted entirely, so an empty dict means
+        "every CLI keeps its own default" — the pre-#92 behaviour.
+        """
+        agents = self.raw.get("agents") or {}
+        out: dict[str, dict[str, str]] = {}
+        for agent_id, entry in agents.items():
+            if not isinstance(entry, dict):
+                continue
+            spec: dict[str, str] = {}
+            model = str(entry.get("model") or "").strip()
+            effort = str(entry.get("reasoning_effort") or "").strip()
+            if model:
+                spec["model"] = model
+            if effort:
+                spec["reasoning_effort"] = effort
+            if spec:
+                out[str(agent_id)] = spec
+        return out
+
     def required_checks(self, repo: str) -> list[str]:
         """Repo-level required check names for §8.4 Feature merge (M4-2)."""
         repos = self.raw.get("repos") or {}

@@ -153,6 +153,13 @@ def _is_jsonrpc_request(obj: dict[str, Any]) -> bool:
     return bool(obj.get("method")) and "id" in obj and "result" not in obj and "error" not in obj
 
 
+# #92: claude documents its accepted --effort levels and silently falls back to
+# the default on anything else, so validate before spawn. grok 1.0.5 accepts any
+# --reasoning-effort string at parse time (exit 0 on a bogus value), so there is
+# no equivalent set to check against — that gap is recorded in the ADR.
+_CLAUDE_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max"})
+
+
 @dataclass
 class LiveCliSession:
     """One long-lived vendor CLI process for a role."""
@@ -164,6 +171,10 @@ class LiveCliSession:
     tmp: Path
     xdg: Path
     spawn_cwd: Path
+    # ADR-9 v2 (#92). None ⇒ the CLI's own default; never a silent fallback if a
+    # value is set and the vendor rejects it — the spawn fails instead.
+    model: str | None = None
+    reasoning_effort: str | None = None
     proc: subprocess.Popen[str] | None = None
     claude_session_id: str | None = None
     acp_session_id: str | None = None
@@ -345,11 +356,33 @@ class LiveCliSession:
         ]
         if continue_session:
             cmd.append("-c")
+        # #92: claude 2.1.234 takes --model <alias|full> and --effort <level>.
+        if self.model:
+            cmd += ["--model", self.model]
+        if self.reasoning_effort:
+            # claude WARNS and silently uses the default on an unknown effort
+            # ("ignoring it and using the default effort"). That is the exact
+            # failure #92 exists to prevent, so refuse before spawning instead.
+            if self.reasoning_effort not in _CLAUDE_EFFORTS:
+                raise ValueError(
+                    f"unknown claude reasoning_effort {self.reasoning_effort!r}; "
+                    f"valid: {', '.join(sorted(_CLAUDE_EFFORTS))}"
+                )
+            cmd += ["--effort", self.reasoning_effort]
         return cmd
 
     def _grok_cmd(self) -> list[str]:
         binary = shutil.which("grok") or os.environ.get("GROK_BIN") or "grok"
-        return [binary, "agent", "stdio"]
+        # #92: -m / --reasoning-effort belong to `grok agent`, NOT to the `stdio`
+        # subcommand — `grok agent stdio -m X` exits 2 with "unexpected argument".
+        # Verified against grok 1.0.5 inside the image.
+        cmd = [binary, "agent"]
+        if self.model:
+            cmd += ["-m", self.model]
+        if self.reasoning_effort:
+            cmd += ["--reasoning-effort", self.reasoning_effort]
+        cmd.append("stdio")
+        return cmd
 
     def _acp_write(self, obj: dict[str, Any]) -> None:
         assert self.proc and self.proc.stdin
@@ -796,10 +829,25 @@ def get_or_create_session(
     tmp: Path,
     xdg: Path,
     spawn_cwd: Path | None = None,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
 ) -> LiveCliSession:
     with _REGISTRY_LOCK:
         existing = _SESSIONS.get(role)
-        if existing is not None and existing.adapter == adapter and existing.is_alive():
+        # #92: model/effort are spawn-time flags, so a change needs a respawn.
+        # Without this the cached CLI would keep the old model for the container's
+        # lifetime and the config would silently not apply.
+        same_model = (
+            existing is not None
+            and existing.model == model
+            and existing.reasoning_effort == reasoning_effort
+        )
+        if (
+            existing is not None
+            and existing.adapter == adapter
+            and same_model
+            and existing.is_alive()
+        ):
             return existing
         if existing is not None:
             if existing.adapter != adapter:
@@ -808,6 +856,16 @@ def get_or_create_session(
                     role,
                     existing.adapter,
                     adapter,
+                )
+            elif not same_model:
+                log.warning(
+                    "model swap role=%s %s/%s→%s/%s; killing live CLI "
+                    "(conversation reset, #92)",
+                    role,
+                    existing.model,
+                    existing.reasoning_effort,
+                    model,
+                    reasoning_effort,
                 )
             existing.shutdown()
         sess = LiveCliSession(
@@ -818,6 +876,8 @@ def get_or_create_session(
             tmp=tmp,
             xdg=xdg,
             spawn_cwd=spawn_cwd or project_root(),
+            model=model,
+            reasoning_effort=reasoning_effort,
         )
         _SESSIONS[role] = sess
         return sess

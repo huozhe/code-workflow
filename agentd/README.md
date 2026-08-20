@@ -21,7 +21,7 @@ Contract: [`docs/design/unified_design_spec.md`](../docs/design/unified_design_s
 
 ```bash
 cd agentd
-docker build -t agentd/session-runner:1.1.0 -f docker/session-runner/Dockerfile docker/session-runner
+docker build -t agentd/session-runner:1.2.0 -f docker/session-runner/Dockerfile docker/session-runner
 # Pins: git 2.48.1, Claude Code 2.1.224, Grok CLI 1.0.0 (override via --build-arg)
 ```
 
