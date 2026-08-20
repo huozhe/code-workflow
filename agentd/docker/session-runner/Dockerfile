@@ -57,7 +57,7 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
 
 # Agent CLIs (§7.1 / #23) — Linux binaries, versions pinned (#19 exercised these).
 # Install as root into a system prefix so role UIDs (1001/1002) share PATH.
-ARG CLAUDE_CODE_VERSION=2.1.234
+ARG CLAUDE_CODE_VERSION=2.1.237
 ARG GROK_CLI_VERSION=1.0.5
 # Labels so tests can read pins from docker inspect (single source of truth).
 LABEL agentd.claude_code_version="${CLAUDE_CODE_VERSION}" \
