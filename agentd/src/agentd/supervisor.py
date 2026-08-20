@@ -31,7 +31,7 @@ from agentd.rpc_client import RunnerClient
 
 log = logging.getLogger("agentd.supervisor")
 
-IMAGE = "agentd/session-runner:1.1.0"
+IMAGE = "agentd/session-runner:1.2.0"
 RPC_CONTAINER_PORT = 7000
 # Container-local rootfs path (docker cp after create). Not bind mount, not Env.
 BEARER_IN_CONTAINER = "/etc/agentd/rpc.bearer"
@@ -497,6 +497,9 @@ class SessionSupervisor:
                     "tokens": tokens,
                     # Model creds over control channel → tmpfs (#21 R1), never Env.
                     "model_credentials": self._load_model_credentials(),
+                    # ADR-9 v2 (#92): per-adapter model / reasoning effort.
+                    # Absent or {} ⇒ each CLI keeps its own default.
+                    "models": self.config.agent_models(),
                 },
             )
             ping = cli.call("health.ping")

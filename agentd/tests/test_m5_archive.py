@@ -250,6 +250,9 @@ def test_drained_teardown_archives_then_closes(tmp_path: Path, monkeypatch) -> N
         "feature_pr": 60,
         "turn_count": 0,
         "closed_at": 1_700_000_000,
+        # #92: no agents.*.model configured in this fixture ⇒ {} ⇒ every CLI ran
+        # its own default. {} is a real answer, not a missing one.
+        "models": {},
     }
     # Archive is not an artifacts-ledger row (ADR-12).
     assert store.list_artifacts(sk, open_only=False) == []
