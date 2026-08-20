@@ -431,6 +431,7 @@ def _live_result(
     adapter: str,
     prompt: str,
     progress: ProgressCb | None,
+    turn_id: str | None = None,
 ) -> dict[str, Any]:
     """Multiplex one turn over the long-lived per-role CLI (§6.3 / #25)."""
     role = str(params.get("role") or "")
@@ -457,7 +458,9 @@ def _live_result(
             "public_actions": [],
             "artifacts": [],
         }
-    return sess.turn(prompt, deadline_s=deadline_s, progress=progress)
+    return sess.turn(
+        prompt, deadline_s=deadline_s, progress=progress, turn_id=turn_id
+    )
 
 
 def exec_turn_as_role(
@@ -507,7 +510,7 @@ def exec_turn_as_role(
     if oneshot:
         result = _oneshot_result(params, paths, adapter, prompt)
     else:
-        result = _live_result(params, paths, adapter, prompt, progress)
+        result = _live_result(params, paths, adapter, prompt, progress, turn_id)
 
     record = {
         "ts": int(time.time()),

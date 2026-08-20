@@ -99,13 +99,10 @@ def test_classify_gh_api_write_is_public() -> None:
 def test_classify_gh_api_get_with_field_still_read() -> None:
     """PR #44 B1: -X GET with -f is still a read (query params)."""
     assert (
-        classify_shell_command("gh api -X GET -f per_page=100 repos/o/r/issues")
-        is None
+        classify_shell_command("gh api -X GET -f per_page=100 repos/o/r/issues") is None
     )
     assert (
-        classify_shell_command(
-            "gh api repos/o/r/issues --method GET -f per_page=100"
-        )
+        classify_shell_command("gh api repos/o/r/issues --method GET -f per_page=100")
         is None
     )
 
@@ -127,7 +124,7 @@ def test_classify_curl_github_requires_write_method() -> None:
     assert act is not None and act["kind"] == "api_write"
     # curl -d implies POST without -X (PR #44 NB)
     act2 = classify_shell_command(
-        "curl -d '{\"body\":\"hi\"}' https://api.github.com/repos/o/r/issues/32/comments"
+        'curl -d \'{"body":"hi"}\' https://api.github.com/repos/o/r/issues/32/comments'
     )
     assert act2 is not None and act2["kind"] == "api_write"
     assert (
@@ -136,6 +133,7 @@ def test_classify_curl_github_requires_write_method() -> None:
         )
         is None
     )
+
 
 def test_claude_stream_tool_use() -> None:
     obj = {
@@ -181,9 +179,7 @@ def test_claude_live_turn_reports_public_actions(tmp_path: Path) -> None:
                             "type": "tool_use",
                             "id": "t1",
                             "name": "Bash",
-                            "input": {
-                                "command": "gh pr create --title demo --body b"
-                            },
+                            "input": {"command": "gh pr create --title demo --body b"},
                         }
                     ]
                 },
@@ -217,13 +213,12 @@ def test_claude_live_turn_reports_public_actions(tmp_path: Path) -> None:
         spawn_cwd=tmp_path,
     )
     q: qmod.Queue[str | None] = qmod.Queue()
-    for line in lines:
-        q.put(line)
     sess._stdout_q = q
     sess.proc = MagicMock()
     sess.proc.poll.return_value = None
     sess.proc.pid = 1
     sess.proc.stdin = MagicMock()
+    sess.proc.stdin.write.side_effect = lambda _line: [q.put(f) for f in lines]
     with patch.object(cli_session.LiveCliSession, "_sample_rss"):
         result = sess.turn("do it", deadline_s=5)
     assert result["status"] == "done"
@@ -237,9 +232,7 @@ def test_claude_silent_turn_empty_actions(tmp_path: Path) -> None:
             {
                 "type": "assistant",
                 "session_id": "s1",
-                "message": {
-                    "content": [{"type": "text", "text": "nothing to do"}]
-                },
+                "message": {"content": [{"type": "text", "text": "nothing to do"}]},
             }
         ),
         json.dumps(
@@ -263,13 +256,12 @@ def test_claude_silent_turn_empty_actions(tmp_path: Path) -> None:
         spawn_cwd=tmp_path,
     )
     q: qmod.Queue[str | None] = qmod.Queue()
-    for line in lines:
-        q.put(line)
     sess._stdout_q = q
     sess.proc = MagicMock()
     sess.proc.poll.return_value = None
     sess.proc.pid = 1
     sess.proc.stdin = MagicMock()
+    sess.proc.stdin.write.side_effect = lambda _line: [q.put(f) for f in lines]
     with patch.object(cli_session.LiveCliSession, "_sample_rss"):
         result = sess.turn("check", deadline_s=5)
     assert result["status"] == "done"
@@ -279,18 +271,14 @@ def test_claude_silent_turn_empty_actions(tmp_path: Path) -> None:
 def test_silent_tracker_escalates_after_n() -> None:
     t = SilentTurnTracker(threshold=3)
     assert (
-        t.after_turn(public_actions=[], observed_progress=False, status="done")
-        is None
+        t.after_turn(public_actions=[], observed_progress=False, status="done") is None
     )
     assert t.silent_count == 1
     assert (
-        t.after_turn(public_actions=[], observed_progress=False, status="done")
-        is None
+        t.after_turn(public_actions=[], observed_progress=False, status="done") is None
     )
     assert t.silent_count == 2
-    breach = t.after_turn(
-        public_actions=[], observed_progress=False, status="done"
-    )
+    breach = t.after_turn(public_actions=[], observed_progress=False, status="done")
     assert breach is not None
     assert "silent_turns" in breach
 
@@ -474,9 +462,9 @@ def test_design_loop_escalates_after_silent_run(tmp_path: Path) -> None:
     ).fetchone()
     assert turn is not None
     assert turn["status"] == "done"
-    assert turn["public_actions"] in ("[]", "null", None) or turn[
-        "public_actions"
-    ] == "[]"
+    assert (
+        turn["public_actions"] in ("[]", "null", None) or turn["public_actions"] == "[]"
+    )
     store.close()
 
 

@@ -36,6 +36,7 @@ log = logging.getLogger("agentd_runner.cli_session")
 _SESSIONS: dict[str, "LiveCliSession"] = {}
 _REGISTRY_LOCK = threading.Lock()
 
+
 def project_root() -> Path:
     return Path(
         os.environ.get("AGENTD_PROJECT_ROOT")
@@ -95,17 +96,17 @@ def _wrap_with_role_secrets(role: str, cmd: list[str]) -> list[str]:
         raise ValueError(f"unknown role {role!r}")
     # $1 = role; remaining argv = vendor command.
     script = (
-        'set -e\n'
+        "set -e\n"
         'ROLE="$1"; shift\n'
         'TOK="/run/agent/${ROLE}/token"\n'
         'if [ -r "$TOK" ]; then\n'
         '  export GH_TOKEN="$(cat "$TOK")"\n'
         '  export GITHUB_TOKEN="$GH_TOKEN"\n'
-        'fi\n'
+        "fi\n"
         'OAUTH="/run/agent/${ROLE}/claude_oauth_token"\n'
         'if [ -r "$OAUTH" ]; then\n'
         '  export CLAUDE_CODE_OAUTH_TOKEN="$(cat "$OAUTH")"\n'
-        'fi\n'
+        "fi\n"
         'exec "$@"\n'
     )
     return ["bash", "-c", script, "role-secret-wrap", role, *cmd]
@@ -150,7 +151,12 @@ def _is_jsonrpc_response(obj: dict[str, Any]) -> bool:
 
 def _is_jsonrpc_request(obj: dict[str, Any]) -> bool:
     """Agent→client request: method + id (needs a reply)."""
-    return bool(obj.get("method")) and "id" in obj and "result" not in obj and "error" not in obj
+    return (
+        bool(obj.get("method"))
+        and "id" in obj
+        and "result" not in obj
+        and "error" not in obj
+    )
 
 
 # #92: claude documents its accepted --effort levels and silently falls back to
@@ -158,6 +164,26 @@ def _is_jsonrpc_request(obj: dict[str, Any]) -> bool:
 # --reasoning-effort string at parse time (exit 0 on a bogus value), so there is
 # no equivalent set to check against — that gap is recorded in the ADR.
 _CLAUDE_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max"})
+
+# ADR-29 (b′): post-spawn poll window. Tests patch this to 0.
+_SPAWN_LIVENESS_S = 0.75
+
+
+def _frame_fields(line: str) -> str:
+    """Compact frame identity for stale-drain WARNING lines (ADR-29 (a))."""
+    try:
+        obj = json.loads(line)
+    except json.JSONDecodeError:
+        raw = line if len(line) <= 200 else line[:200] + "…"
+        return f"raw={raw!r}"
+    if not isinstance(obj, dict):
+        raw = line if len(line) <= 200 else line[:200] + "…"
+        return f"raw={raw!r}"
+    parts: list[str] = []
+    for key in ("type", "subtype", "is_error", "session_id", "method", "id"):
+        if key in obj:
+            parts.append(f"{key}={obj[key]!r}")
+    return " ".join(parts) if parts else "type=absent"
 
 
 @dataclass
@@ -185,6 +211,8 @@ class LiveCliSession:
     _stderr_fh: IO[str] | None = field(default=None, repr=False)
     _stdout_q: queue.Queue[str | None] | None = field(default=None, repr=False)
     _reader_thread: threading.Thread | None = field(default=None, repr=False)
+    # ADR-29 §2.4: assigned every spawn, True iff this spawn's argv used --resume.
+    _spawned_with_resume: bool = False
 
     def is_alive(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
@@ -258,7 +286,6 @@ class LiveCliSession:
         self.acp_session_id = None
         self._rpc_id = 1000
 
-        env = _role_env(self.role, self.home, self.tmp, self.xdg)
         if self.adapter in ("claude-code", "claude"):
             cmd = self._claude_cmd(continue_session)
         elif self.adapter in ("grok-cli", "grok"):
@@ -273,6 +300,50 @@ class LiveCliSession:
         self._close_stderr()
         self._stderr_fh = open(stderr_path, "a", encoding="utf-8")  # noqa: SIM115
 
+        log.info(
+            "spawning long-lived cli role=%s adapter=%s uid=%s cwd=%s continue=%s",
+            self.role,
+            self.adapter,
+            self.uid,
+            self.spawn_cwd,
+            continue_session,
+        )
+        used_resume = bool(
+            continue_session
+            and self.adapter in ("claude-code", "claude")
+            and self.claude_session_id
+        )
+        self._popen_unlocked(cmd)
+        self._spawned_with_resume = used_resume
+        if not self._await_liveness(_SPAWN_LIVENESS_S):
+            tail = self._stderr_tail()
+            if used_resume:
+                log.warning(
+                    "claude died %.2gs after --resume %s; falling back to -c: %s",
+                    _SPAWN_LIVENESS_S,
+                    self.claude_session_id,
+                    tail,
+                )
+                self.claude_session_id = None
+                self._discard_dead_child_unlocked()
+                cmd = _wrap_with_role_secrets(self.role, self._claude_cmd(True))
+                self._popen_unlocked(cmd)
+                self._spawned_with_resume = False
+                if not self._await_liveness(_SPAWN_LIVENESS_S):
+                    raise RuntimeError(
+                        f"claude died after -c fallback: {self._stderr_tail()}"
+                    )
+            else:
+                raise RuntimeError(f"cli died {_SPAWN_LIVENESS_S}s after spawn: {tail}")
+
+        self._start_stdout_reader()
+        if self.adapter in ("grok-cli", "grok"):
+            self._acp_initialize_unlocked()
+        self._sample_rss()
+
+    def _popen_unlocked(self, cmd: list[str]) -> None:
+        """Popen + preexec_fn fallback only (ADR-29 (b′): :300–314)."""
+        env = _role_env(self.role, self.home, self.tmp, self.xdg)
         popen_kwargs: dict[str, Any] = {
             "args": cmd,
             "stdin": subprocess.PIPE,
@@ -288,19 +359,9 @@ class LiveCliSession:
             popen_kwargs["user"] = self.uid
             popen_kwargs["group"] = self.uid
             popen_kwargs["extra_groups"] = []
-
-        log.info(
-            "spawning long-lived cli role=%s adapter=%s uid=%s cwd=%s continue=%s",
-            self.role,
-            self.adapter,
-            self.uid,
-            self.spawn_cwd,
-            continue_session,
-        )
         try:
             self.proc = subprocess.Popen(**popen_kwargs)
         except (TypeError, ValueError, PermissionError) as exc:
-            # Older Python or non-Linux: fall back to preexec_fn setuid.
             log.warning("Popen(user=) failed (%s); falling back to preexec_fn", exc)
             popen_kwargs.pop("user", None)
             popen_kwargs.pop("group", None)
@@ -313,10 +374,64 @@ class LiveCliSession:
             popen_kwargs["preexec_fn"] = preexec if os.geteuid() == 0 else None
             self.proc = subprocess.Popen(**popen_kwargs)
 
-        self._start_stdout_reader()
-        if self.adapter in ("grok-cli", "grok"):
-            self._acp_initialize_unlocked()
-        self._sample_rss()
+    def _await_liveness(self, timeout_s: float) -> bool:
+        """True if the child is still alive after timeout_s. False on death."""
+        deadline = time.monotonic() + max(0.0, timeout_s)
+        while True:
+            proc = self.proc
+            if proc is None or proc.poll() is not None:
+                return False
+            if time.monotonic() >= deadline:
+                return True
+            time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+
+    def _discard_dead_child_unlocked(self) -> None:
+        """Close a dead child's pipes before overwriting self.proc (ADR-29 (b′))."""
+        proc = self.proc
+        if proc is None:
+            return
+        for stream in (proc.stdin, proc.stdout):
+            if stream is not None:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+
+    def _drain_stdout_unlocked(self, *, turn_id: str | None, reason: str) -> int:
+        """ADR-29 (a). Anything queued before this turn's prompt is stale."""
+        q = self._stdout_q
+        if q is None:
+            return 0
+        n = 0
+        while True:
+            try:
+                line = q.get_nowait()
+            except queue.Empty:
+                return n
+            if line is None:
+                q.put(None)  # EOF sentinel: re-put and stop
+                return n
+            n += 1
+            log.warning(
+                "stale frame discarded role=%s turn_id=%s reason=%s %s",
+                self.role,
+                turn_id or "unknown",
+                reason,
+                _frame_fields(line),
+            )
+
+    def _respawn_after_error_unlocked(self) -> None:
+        """ADR-29 (b). is_error does not prove the vendor is done with the prompt."""
+        log.warning(
+            "respawning cli after is_error role=%s pid=%s",
+            self.role,
+            None if self.proc is None else self.proc.pid,
+        )
+        try:
+            self._kill_unlocked()
+            self._spawn_unlocked(continue_session=True)
+        except Exception as exc:  # noqa: BLE001
+            log.error("respawn after is_error failed role=%s: %s", self.role, exc)
 
     def _start_stdout_reader(self) -> None:
         """Reader thread avoids select+TextIOWrapper buffer trap (NB3)."""
@@ -337,9 +452,7 @@ class LiveCliSession:
                 log.debug("stdout reader ended role=%s: %s", self.role, exc)
                 q.put(None)
 
-        t = threading.Thread(
-            target=_run, name=f"cli-stdout-{self.role}", daemon=True
-        )
+        t = threading.Thread(target=_run, name=f"cli-stdout-{self.role}", daemon=True)
         self._reader_thread = t
         t.start()
 
@@ -355,7 +468,10 @@ class LiveCliSession:
             "--dangerously-skip-permissions",
         ]
         if continue_session:
-            cmd.append("-c")
+            if self.claude_session_id:
+                cmd += ["--resume", self.claude_session_id]
+            else:
+                cmd.append("-c")
         # #92: claude 2.1.234 takes --model <alias|full> and --effort <level>.
         if self.model:
             cmd += ["--model", self.model]
@@ -478,7 +594,9 @@ class LiveCliSession:
                     },
                 }
             )
-            log.warning("acp unexpected client request method=%s role=%s", method, self.role)
+            log.warning(
+                "acp unexpected client request method=%s role=%s", method, self.role
+            )
             return
         log.warning("acp unhandled server request method=%s role=%s", method, self.role)
         if rid is not None:
@@ -496,6 +614,7 @@ class LiveCliSession:
         *,
         deadline_s: int = 900,
         progress: Callable[[dict[str, Any]], None] | None = None,
+        turn_id: str | None = None,
     ) -> dict[str, Any]:
         with self._lock:
             if not self.is_alive():
@@ -511,9 +630,13 @@ class LiveCliSession:
             assert self.proc is not None
             try:
                 if self.adapter in ("claude-code", "claude"):
-                    result = self._claude_turn_unlocked(prompt, deadline_s, progress)
+                    result = self._claude_turn_unlocked(
+                        prompt, deadline_s, progress, turn_id
+                    )
                 else:
-                    result = self._grok_turn_unlocked(prompt, deadline_s, progress)
+                    result = self._grok_turn_unlocked(
+                        prompt, deadline_s, progress, turn_id
+                    )
             except TimeoutError:
                 log.warning("turn deadline exceeded role=%s; killing cli", self.role)
                 self._kill_unlocked()
@@ -561,6 +684,7 @@ class LiveCliSession:
         prompt: str,
         deadline_s: int,
         progress: Callable[[dict[str, Any]], None] | None,
+        turn_id: str | None = None,
     ) -> dict[str, Any]:
         assert self.proc and self.proc.stdin
         msg: dict[str, Any] = {
@@ -569,6 +693,7 @@ class LiveCliSession:
         }
         if self.claude_session_id:
             msg["session_id"] = self.claude_session_id
+        self._drain_stdout_unlocked(turn_id=turn_id, reason="before claude prompt")
         self.proc.stdin.write(json.dumps(msg) + "\n")
         self.proc.stdin.flush()
 
@@ -578,6 +703,13 @@ class LiveCliSession:
         deadline = time.time() + deadline_s
         while time.time() < deadline:
             if self.proc.poll() is not None:
+                if self._spawned_with_resume:
+                    log.warning(
+                        "claude died mid-turn after --resume role=%s; "
+                        "clearing session id",
+                        self.role,
+                    )
+                    self.claude_session_id = None
                 raise RuntimeError(f"claude exited early: {self._stderr_tail()}")
             line = self._readline_timeout(max(0.1, deadline - time.time()))
             if line is None:
@@ -624,6 +756,8 @@ class LiveCliSession:
                 self.role,
                 redact_envelope(result_obj),
             )
+            # ADR-29 (b): keyed on is_error, before either return path.
+            self._respawn_after_error_unlocked()
             # Vendor refusal produces no assistant text and no tool use.
             # A turn that *talked about* a limit still has both (#94 B1).
             quota = (
@@ -649,6 +783,7 @@ class LiveCliSession:
         prompt: str,
         deadline_s: int,
         progress: Callable[[dict[str, Any]], None] | None,
+        turn_id: str | None = None,
     ) -> dict[str, Any]:
         assert self.proc and self.proc.stdin
         if not self.acp_session_id:
@@ -664,6 +799,7 @@ class LiveCliSession:
                 "prompt": [{"type": "text", "text": prompt}],
             },
         }
+        self._drain_stdout_unlocked(turn_id=turn_id, reason="before grok prompt")
         self._acp_write(req)
 
         chunks: list[str] = []

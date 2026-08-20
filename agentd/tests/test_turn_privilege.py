@@ -121,9 +121,10 @@ def test_turn_dispatch_writes_transcript(runner_env: tuple[int, Path]) -> None:
     assert resp[1]["result"]["initialized"] is True
     # mock → oneshot; no live CLI spawn
     spawn = resp[1]["result"].get("cli_spawn") or {}
-    assert spawn.get("architect", {}).get("mode") == "oneshot" or spawn.get(
-        "architect", {}
-    ).get("spawned") is False
+    assert (
+        spawn.get("architect", {}).get("mode") == "oneshot"
+        or spawn.get("architect", {}).get("spawned") is False
+    )
     assert "result" in resp[2]
     status = resp[2]["result"].get("status")
     assert status in ("done", "failed", "needs_human")
@@ -152,7 +153,9 @@ def test_turn_dispatch_writes_transcript(runner_env: tuple[int, Path]) -> None:
     assert "rehydrated" in resp2[1]["result"]
 
 
-def test_role_paths_home_tmp_xdg_under_tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_role_paths_home_tmp_xdg_under_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """§7.3 env roots stay under the durable project tree (ADR-4 / #76 B1)."""
     sess = tmp_path / "sessions" / "k"
     monkeypatch.setenv("AGENTD_SESSION_DIR", str(sess))
@@ -180,8 +183,14 @@ def test_role_paths_keyed_by_issue_num_not_env(
 
     assert p58["context"] == tmp_path / "sessions" / "58" / "architect" / "context"
     assert p32["context"] == tmp_path / "sessions" / "32" / "developer" / "context"
-    assert p58["transcript"] == tmp_path / "sessions" / "58" / "architect" / "transcript.jsonl"
-    assert p32["transcript"] == tmp_path / "sessions" / "32" / "developer" / "transcript.jsonl"
+    assert (
+        p58["transcript"]
+        == tmp_path / "sessions" / "58" / "architect" / "transcript.jsonl"
+    )
+    assert (
+        p32["transcript"]
+        == tmp_path / "sessions" / "32" / "developer" / "transcript.jsonl"
+    )
     assert p58["context"] != p32["context"]
     assert p58["home"] == tmp_path / "home" / "architect"
     assert str(pinned) not in str(p58["context"])
@@ -274,7 +283,9 @@ def test_ensure_role_cli_spawned_tmp_xdg_ignore_env_pin(
     with (
         patch.object(turn_mod, "resolve_adapter", return_value="claude-code"),
         patch.object(cli_session, "use_oneshot", return_value=False),
-        patch.object(cli_session, "get_or_create_session", side_effect=fake_get_or_create),
+        patch.object(
+            cli_session, "get_or_create_session", side_effect=fake_get_or_create
+        ),
     ):
         result = turn_mod.ensure_role_cli_spawned("architect")
 
@@ -323,6 +334,7 @@ def test_live_spawn_drops_privs_once_via_popen_user(
 ) -> None:
     """Privilege drop at spawn via Popen(user=) — not per turn (#25 / §7.3 / NB2)."""
     monkeypatch.delenv("AGENTD_CLI_MODE", raising=False)
+    monkeypatch.setattr(cli_session, "_SPAWN_LIVENESS_S", 0.0)
     import queue as qmod
 
     spawn_kwargs: list[dict] = []
@@ -337,10 +349,11 @@ def test_live_spawn_drops_privs_once_via_popen_user(
         fake.stdout.readline.side_effect = [""]  # reader thread EOF
         return fake
 
-    with patch("agentd_runner.cli_session.subprocess.Popen", side_effect=fake_popen), patch(
-        "agentd_runner.cli_session.os.geteuid", return_value=0
-    ), patch("agentd_runner.cli_session.os.chown"), patch.object(
-        cli_session.LiveCliSession, "_sample_rss"
+    with (
+        patch("agentd_runner.cli_session.subprocess.Popen", side_effect=fake_popen),
+        patch("agentd_runner.cli_session.os.geteuid", return_value=0),
+        patch("agentd_runner.cli_session.os.chown"),
+        patch.object(cli_session.LiveCliSession, "_sample_rss"),
     ):
         sess = cli_session.LiveCliSession(
             role="architect",
@@ -361,18 +374,21 @@ def test_live_spawn_drops_privs_once_via_popen_user(
 
         # Two turns without re-spawn: drop only once
         q: qmod.Queue[str | None] = qmod.Queue()
-        for _ in range(2):
-            q.put(
-                json.dumps(
-                    {
-                        "type": "assistant",
-                        "session_id": "x",
-                        "message": {"content": [{"type": "text", "text": "ok"}]},
-                    }
-                )
-            )
-            q.put(json.dumps({"type": "result", "session_id": "x", "result": "ok"}))
         sess._stdout_q = q
+        frames = [
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "session_id": "x",
+                    "message": {"content": [{"type": "text", "text": "ok"}]},
+                }
+            ),
+            json.dumps({"type": "result", "session_id": "x", "result": "ok"}),
+        ]
+        batches = iter([frames, list(frames)])
+        sess.proc.stdin.write.side_effect = lambda _line: [
+            q.put(f) for f in next(batches, ())
+        ]
         r1 = sess.turn("t1", deadline_s=5)
         r2 = sess.turn("t2", deadline_s=5)
 
@@ -393,10 +409,11 @@ def test_drop_privs_clears_groups_and_rejects_root() -> None:
     def setuid(u):
         calls.append(("setuid", u))
 
-    with patch("agentd_runner.cli_session.os.setgroups", side_effect=setgroups), patch(
-        "agentd_runner.cli_session.os.setgid", side_effect=setgid
-    ), patch("agentd_runner.cli_session.os.setuid", side_effect=setuid), patch(
-        "agentd_runner.cli_session.os.geteuid", return_value=1001
+    with (
+        patch("agentd_runner.cli_session.os.setgroups", side_effect=setgroups),
+        patch("agentd_runner.cli_session.os.setgid", side_effect=setgid),
+        patch("agentd_runner.cli_session.os.setuid", side_effect=setuid),
+        patch("agentd_runner.cli_session.os.geteuid", return_value=1001),
     ):
         cli_session._drop_privs(1001)
     assert calls[0] == ("setgroups", [])

@@ -114,3 +114,44 @@ def test_write_role_secret_rewrites_after_0400(
     os.chmod(first, 0o400)
     second = runner_server.write_role_secret("architect", "token", "second")
     assert second.read_text(encoding="utf-8") == "second"
+
+
+def test_consecutive_runner_clients_issue_distinct_dispatch_ids() -> None:
+    """ADR-29 acceptance (5): process-unique ids — not a #162 regression test."""
+    from agentd.rpc_client import RunnerClient
+
+    written: list[int] = []
+
+    class FakeWfile:
+        def write(self, data: bytes) -> None:
+            written.append(json.loads(data.decode())["id"])
+
+        def flush(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    class FakeRfile:
+        def __init__(self) -> None:
+            self._n = 0
+
+        def readline(self) -> bytes:
+            self._n += 1
+            req_id = written[-1]
+            return (
+                json.dumps({"jsonrpc": "2.0", "id": req_id, "result": {"ok": True}})
+                + "\n"
+            ).encode()
+
+        def close(self) -> None:
+            return None
+
+    ids: list[int] = []
+    for _ in range(2):
+        cli = RunnerClient("127.0.0.1", 1, "b")
+        cli._wfile = FakeWfile()  # type: ignore[assignment]
+        cli._rfile = FakeRfile()  # type: ignore[assignment]
+        cli.call("turn.dispatch", {})
+        ids.append(written[-1])
+    assert ids[0] != ids[1]

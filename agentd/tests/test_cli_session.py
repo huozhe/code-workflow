@@ -10,6 +10,7 @@ import os
 import sys
 import threading
 import time
+from collections.abc import Callable, Iterable
 from datetime import UTC
 from pathlib import Path
 from typing import Any
@@ -30,18 +31,45 @@ def _clean_registry() -> None:
     cli_session.shutdown_all()
 
 
-def _wire_stdout_queue(sess: cli_session.LiveCliSession, lines: list[str]) -> None:
-    """Simulate reader thread: put lines then leave queue open for more pushes."""
+@pytest.fixture(autouse=True)
+def _fast_spawn_liveness(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli_session, "_SPAWN_LIVENESS_S", 0.0)
+
+
+def _wire_scripted_cli(
+    sess: cli_session.LiveCliSession,
+    script: list[list[str]],
+    *,
+    preseed: Iterable[str] = (),
+    on_write: Callable[[str], None] | None = None,
+    pid: int = 4242,
+) -> None:
+    """Frames arrive because the prompt was written (RFC 169 §2.3)."""
     import queue as qmod
 
     q: qmod.Queue[str | None] = qmod.Queue()
-    for line in lines:
+    for line in preseed:
         q.put(line)
+    batches = iter(script)
     sess._stdout_q = q
     sess.proc = MagicMock()
     sess.proc.poll.return_value = None
-    sess.proc.pid = 4242
+    sess.proc.pid = pid
     sess.proc.stdin = MagicMock()
+
+    def _write(line: str) -> int:
+        for frame in next(batches, ()):
+            q.put(frame)
+        if on_write is not None:
+            on_write(line)
+        return len(line) if isinstance(line, str) else 0
+
+    sess.proc.stdin.write.side_effect = _write
+
+
+def _vendor_argv(cmd: list[str]) -> list[str]:
+    i = cmd.index("role-secret-wrap")
+    return cmd[i + 2 :]
 
 
 def test_claude_turn_ends_on_type_result(tmp_path: Path) -> None:
@@ -53,7 +81,14 @@ def test_claude_turn_ends_on_type_result(tmp_path: Path) -> None:
                 "message": {"content": [{"type": "text", "text": "hi "}]},
             }
         ),
-        json.dumps({"type": "result", "session_id": "s1", "result": "hi done", "is_error": False}),
+        json.dumps(
+            {
+                "type": "result",
+                "session_id": "s1",
+                "result": "hi done",
+                "is_error": False,
+            }
+        ),
     ]
     progress: list[str] = []
     sess = cli_session.LiveCliSession(
@@ -65,9 +100,13 @@ def test_claude_turn_ends_on_type_result(tmp_path: Path) -> None:
         xdg=tmp_path / "x",
         spawn_cwd=tmp_path,
     )
-    _wire_stdout_queue(sess, lines)
+    _wire_scripted_cli(sess, [lines])
     with patch.object(cli_session.LiveCliSession, "_sample_rss"):
-        result = sess.turn("hello", deadline_s=5, progress=lambda p: progress.append(p.get("chunk", "")))
+        result = sess.turn(
+            "hello",
+            deadline_s=5,
+            progress=lambda p: progress.append(p.get("chunk", "")),
+        )
 
     assert result["status"] == "done"
     assert "hi" in result["summary"]
@@ -93,10 +132,11 @@ def test_claude_spawn_uses_continue_flag(tmp_path: Path) -> None:
         proc.stdout.readline.side_effect = [""]  # EOF immediately after spawn
         return proc
 
-    with patch("agentd_runner.cli_session.subprocess.Popen", side_effect=fake_popen), patch(
-        "agentd_runner.cli_session.os.geteuid", return_value=501
-    ), patch.object(cli_session.LiveCliSession, "_sample_rss"), patch.object(
-        cli_session.LiveCliSession, "_acp_initialize_unlocked"
+    with (
+        patch("agentd_runner.cli_session.subprocess.Popen", side_effect=fake_popen),
+        patch("agentd_runner.cli_session.os.geteuid", return_value=501),
+        patch.object(cli_session.LiveCliSession, "_sample_rss"),
+        patch.object(cli_session.LiveCliSession, "_acp_initialize_unlocked"),
     ):
         sess = cli_session.LiveCliSession(
             role="architect",
@@ -145,7 +185,13 @@ def test_grok_acp_initialize_and_prompt(tmp_path: Path) -> None:
                     assert caps.get("fs", {}).get("readTextFile") is False
                     assert caps.get("terminal") is False
                     out_q.append(
-                        json.dumps({"jsonrpc": "2.0", "id": mid, "result": {"protocolVersion": 1}})
+                        json.dumps(
+                            {
+                                "jsonrpc": "2.0",
+                                "id": mid,
+                                "result": {"protocolVersion": 1},
+                            }
+                        )
                     )
                 elif method == "session/new":
                     out_q.append(
@@ -241,7 +287,9 @@ def test_grok_acp_initialize_and_prompt(tmp_path: Path) -> None:
     assert result["live_session"] is True
 
 
-def test_grok_answers_permission_and_ignores_request_id_collision(tmp_path: Path) -> None:
+def test_grok_answers_permission_and_ignores_request_id_collision(
+    tmp_path: Path,
+) -> None:
     """B1+B2 regression: request_permission id=0 must not be treated as turn result.
 
     Real grok sends agent→client requests with ids starting at 0 while our
@@ -316,17 +364,14 @@ def test_grok_answers_permission_and_ignores_request_id_collision(tmp_path: Path
     )
     sess.acp_session_id = "s-live"
     sess._rpc_id = 1000
-    sess._stdout_q = q
-    sess.proc = MagicMock()
-    sess.proc.poll.return_value = None
-    sess.proc.pid = 3
-    sess.proc.stdin = MagicMock()
+    frames = []
+    while not q.empty():
+        frames.append(q.get())
 
-    def capture_write(data: str) -> int:
+    def capture_write(data: str) -> None:
         writes.append(json.loads(data.strip()))
-        return len(data)
 
-    sess.proc.stdin.write.side_effect = capture_write
+    _wire_scripted_cli(sess, [frames], on_write=capture_write, pid=3)
 
     with patch.object(cli_session.LiveCliSession, "_sample_rss"):
         result = sess.turn("write a file with HELLO", deadline_s=5)
@@ -335,9 +380,7 @@ def test_grok_answers_permission_and_ignores_request_id_collision(tmp_path: Path
     assert result["summary"] == "HELLO"
     # Permission approved with Architect-verified optionId
     perm_replies = [
-        w
-        for w in writes
-        if w.get("id") == 0 and "result" in w and not w.get("method")
+        w for w in writes if w.get("id") == 0 and "result" in w and not w.get("method")
     ]
     assert perm_replies, writes
     outcome = perm_replies[0]["result"]["outcome"]
@@ -350,7 +393,12 @@ def test_grok_answers_permission_and_ignores_request_id_collision(tmp_path: Path
 
 def test_id_collision_request_not_accepted_as_response() -> None:
     """B2 unit: method+id is a request, not a response even if id matches mid."""
-    req = {"jsonrpc": "2.0", "id": 5, "method": "session/request_permission", "params": {}}
+    req = {
+        "jsonrpc": "2.0",
+        "id": 5,
+        "method": "session/request_permission",
+        "params": {},
+    }
     resp = {"jsonrpc": "2.0", "id": 5, "result": {"stopReason": "end_turn"}}
     assert cli_session._is_jsonrpc_request(req) is True
     assert cli_session._is_jsonrpc_response(req) is False
@@ -402,10 +450,11 @@ def test_stderr_redirected_to_role_log_not_pipe(tmp_path: Path) -> None:
         proc.stdout.readline.side_effect = [""]
         return proc
 
-    with patch("agentd_runner.cli_session.subprocess.Popen", side_effect=fake_popen), patch(
-        "agentd_runner.cli_session.os.geteuid", return_value=501
-    ), patch.object(cli_session.LiveCliSession, "_sample_rss"), patch.object(
-        cli_session.LiveCliSession, "_acp_initialize_unlocked"
+    with (
+        patch("agentd_runner.cli_session.subprocess.Popen", side_effect=fake_popen),
+        patch("agentd_runner.cli_session.os.geteuid", return_value=501),
+        patch.object(cli_session.LiveCliSession, "_sample_rss"),
+        patch.object(cli_session.LiveCliSession, "_acp_initialize_unlocked"),
     ):
         sess = cli_session.LiveCliSession(
             role="architect",
@@ -427,10 +476,11 @@ def test_stderr_redirected_to_role_log_not_pipe(tmp_path: Path) -> None:
 
 
 def test_registry_one_session_per_role(tmp_path: Path) -> None:
-    with patch("agentd_runner.cli_session.subprocess.Popen") as popen, patch(
-        "agentd_runner.cli_session.os.geteuid", return_value=501
-    ), patch.object(cli_session.LiveCliSession, "_sample_rss"), patch.object(
-        cli_session.LiveCliSession, "_acp_initialize_unlocked"
+    with (
+        patch("agentd_runner.cli_session.subprocess.Popen") as popen,
+        patch("agentd_runner.cli_session.os.geteuid", return_value=501),
+        patch.object(cli_session.LiveCliSession, "_sample_rss"),
+        patch.object(cli_session.LiveCliSession, "_acp_initialize_unlocked"),
     ):
         fake = MagicMock()
         fake.poll.return_value = None
@@ -478,8 +528,9 @@ def test_use_oneshot_for_mock_and_env() -> None:
 
 def test_role_lock_serializes_pipe_writes(tmp_path: Path) -> None:
     order: list[str] = []
-    with patch.object(cli_session.LiveCliSession, "_spawn_unlocked"), patch.object(
-        cli_session.LiveCliSession, "_sample_rss"
+    with (
+        patch.object(cli_session.LiveCliSession, "_spawn_unlocked"),
+        patch.object(cli_session.LiveCliSession, "_sample_rss"),
     ):
         sess = cli_session.LiveCliSession(
             role="architect",
@@ -493,11 +544,18 @@ def test_role_lock_serializes_pipe_writes(tmp_path: Path) -> None:
         sess.proc = MagicMock()
         sess.proc.poll.return_value = None
 
-        def slow_turn(prompt: str, deadline_s: int, progress=None) -> dict:
+        def slow_turn(
+            prompt: str, deadline_s: int, progress=None, turn_id=None
+        ) -> dict:
             order.append(f"start:{prompt}")
             time.sleep(0.08)
             order.append(f"end:{prompt}")
-            return {"status": "done", "summary": prompt, "public_actions": [], "artifacts": []}
+            return {
+                "status": "done",
+                "summary": prompt,
+                "public_actions": [],
+                "artifacts": [],
+            }
 
         sess._claude_turn_unlocked = slow_turn  # type: ignore[method-assign]
 
@@ -531,15 +589,18 @@ def test_ensure_role_dirs_chowns_when_root(tmp_path: Path) -> None:
         xdg=tmp_path / "x",
         spawn_cwd=tmp_path / "cwd",
     )
-    with patch("agentd_runner.cli_session.os.geteuid", return_value=0), patch(
-        "agentd_runner.cli_session.os.chown", side_effect=fake_chown
+    with (
+        patch("agentd_runner.cli_session.os.geteuid", return_value=0),
+        patch("agentd_runner.cli_session.os.chown", side_effect=fake_chown),
     ):
         sess._ensure_role_dirs()
     assert any(c[1] == 1001 for c in chowns)
     assert (tmp_path / "h").is_dir()
 
 
-def test_role_env_does_not_read_secrets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_role_env_does_not_read_secrets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """B5: runner must not open 0400 role secret files as root."""
     # Even if files exist on the host path layout, _role_env must not load them.
     monkeypatch.setenv("GH_TOKEN", "leak-me")
@@ -553,7 +614,9 @@ def test_role_env_does_not_read_secrets(tmp_path: Path, monkeypatch: pytest.Monk
 
 
 def test_wrap_with_role_secrets_prepends_bash() -> None:
-    wrapped = cli_session._wrap_with_role_secrets("developer", ["grok", "agent", "stdio"])
+    wrapped = cli_session._wrap_with_role_secrets(
+        "developer", ["grok", "agent", "stdio"]
+    )
     assert wrapped[:5] == ["bash", "-c", wrapped[2], "role-secret-wrap", "developer"]
     assert wrapped[-3:] == ["grok", "agent", "stdio"]
     assert "/run/agent/${ROLE}/token" in wrapped[2] or "/run/agent/" in wrapped[2]
@@ -622,7 +685,9 @@ def test_grok_execute_permission_picks_allow_once(tmp_path: Path) -> None:
             }
         )
     )
-    q.put(json.dumps({"jsonrpc": "2.0", "id": 1001, "result": {"stopReason": "end_turn"}}))
+    q.put(
+        json.dumps({"jsonrpc": "2.0", "id": 1001, "result": {"stopReason": "end_turn"}})
+    )
 
     sess = cli_session.LiveCliSession(
         role="developer",
@@ -635,12 +700,13 @@ def test_grok_execute_permission_picks_allow_once(tmp_path: Path) -> None:
     )
     sess.acp_session_id = "s"
     sess._rpc_id = 1000
-    sess._stdout_q = q
-    sess.proc = MagicMock()
-    sess.proc.poll.return_value = None
-    sess.proc.stdin = MagicMock()
-    sess.proc.stdin.write.side_effect = lambda data: writes.append(json.loads(data.strip())) or len(
-        data
+    frames = []
+    while not q.empty():
+        frames.append(q.get())
+    _wire_scripted_cli(
+        sess,
+        [frames],
+        on_write=lambda data: writes.append(json.loads(data.strip())),
     )
 
     with patch.object(cli_session.LiveCliSession, "_sample_rss"):
@@ -676,10 +742,10 @@ def test_grok_cancelled_stop_reason_is_failed(tmp_path: Path) -> None:
     )
     sess.acp_session_id = "s"
     sess._rpc_id = 1000
-    sess._stdout_q = q
-    sess.proc = MagicMock()
-    sess.proc.poll.return_value = None
-    sess.proc.stdin = MagicMock()
+    frames = []
+    while not q.empty():
+        frames.append(q.get())
+    _wire_scripted_cli(sess, [frames])
 
     with patch.object(cli_session.LiveCliSession, "_sample_rss"):
         result = sess.turn("do something", deadline_s=5)
@@ -693,7 +759,9 @@ def test_grok_empty_end_turn_is_failed(tmp_path: Path) -> None:
     import queue as qmod
 
     q: qmod.Queue[str | None] = qmod.Queue()
-    q.put(json.dumps({"jsonrpc": "2.0", "id": 1001, "result": {"stopReason": "end_turn"}}))
+    q.put(
+        json.dumps({"jsonrpc": "2.0", "id": 1001, "result": {"stopReason": "end_turn"}})
+    )
     sess = cli_session.LiveCliSession(
         role="developer",
         adapter="grok-cli",
@@ -705,10 +773,10 @@ def test_grok_empty_end_turn_is_failed(tmp_path: Path) -> None:
     )
     sess.acp_session_id = "s"
     sess._rpc_id = 1000
-    sess._stdout_q = q
-    sess.proc = MagicMock()
-    sess.proc.poll.return_value = None
-    sess.proc.stdin = MagicMock()
+    frames = []
+    while not q.empty():
+        frames.append(q.get())
+    _wire_scripted_cli(sess, [frames])
 
     with patch.object(cli_session.LiveCliSession, "_sample_rss"):
         result = sess.turn("x", deadline_s=5)
@@ -740,10 +808,12 @@ def test_claude_session_limit_is_quota_exhausted(tmp_path: Path) -> None:
         xdg=tmp_path / "x",
         spawn_cwd=tmp_path,
     )
-    _wire_stdout_queue(sess, lines)
+    _wire_scripted_cli(sess, [lines])
     now = datetime(2026, 8, 13, 1, 43, tzinfo=UTC).timestamp()
     with (
         patch.object(cli_session.LiveCliSession, "_sample_rss"),
+        patch.object(cli_session.LiveCliSession, "_spawn_unlocked"),
+        patch.object(cli_session.LiveCliSession, "_kill_unlocked"),
         patch("agentd_runner.quota.time.time", return_value=now),
     ):
         result = sess.turn("continue", deadline_s=5)
@@ -775,8 +845,12 @@ def test_claude_generic_is_error_still_failed(tmp_path: Path) -> None:
         xdg=tmp_path / "x",
         spawn_cwd=tmp_path,
     )
-    _wire_stdout_queue(sess, lines)
-    with patch.object(cli_session.LiveCliSession, "_sample_rss"):
+    _wire_scripted_cli(sess, [lines])
+    with (
+        patch.object(cli_session.LiveCliSession, "_sample_rss"),
+        patch.object(cli_session.LiveCliSession, "_spawn_unlocked"),
+        patch.object(cli_session.LiveCliSession, "_kill_unlocked"),
+    ):
         result = sess.turn("go", deadline_s=5)
     assert result["status"] == "failed"
     assert result.get("retry_after") is None
@@ -809,10 +883,10 @@ def test_grok_rate_limit_stop_reason_is_quota_exhausted(tmp_path: Path) -> None:
     )
     sess.acp_session_id = "s"
     sess._rpc_id = 1000
-    sess._stdout_q = q
-    sess.proc = MagicMock()
-    sess.proc.poll.return_value = None
-    sess.proc.stdin = MagicMock()
+    frames = []
+    while not q.empty():
+        frames.append(q.get())
+    _wire_scripted_cli(sess, [frames])
     with patch.object(cli_session.LiveCliSession, "_sample_rss"):
         result = sess.turn("go", deadline_s=5)
     assert result["status"] == "quota_exhausted"
@@ -847,10 +921,10 @@ def test_grok_error_session_limit_is_quota_exhausted(tmp_path: Path) -> None:
     )
     sess.acp_session_id = "s"
     sess._rpc_id = 1000
-    sess._stdout_q = q
-    sess.proc = MagicMock()
-    sess.proc.poll.return_value = None
-    sess.proc.stdin = MagicMock()
+    frames = []
+    while not q.empty():
+        frames.append(q.get())
+    _wire_scripted_cli(sess, [frames])
     now = datetime(2026, 8, 13, 1, 43, tzinfo=UTC).timestamp()
     with (
         patch.object(cli_session.LiveCliSession, "_sample_rss"),
@@ -906,8 +980,12 @@ def test_claude_mentions_of_limits_are_not_quota(tmp_path: Path) -> None:
             xdg=tmp_path / f"x{i}",
             spawn_cwd=tmp_path,
         )
-        _wire_stdout_queue(sess, lines)
-        with patch.object(cli_session.LiveCliSession, "_sample_rss"):
+        _wire_scripted_cli(sess, [lines])
+        with (
+            patch.object(cli_session.LiveCliSession, "_sample_rss"),
+            patch.object(cli_session.LiveCliSession, "_spawn_unlocked"),
+            patch.object(cli_session.LiveCliSession, "_kill_unlocked"),
+        ):
             result = sess.turn("go", deadline_s=5)
         assert result["status"] == "failed", summary
         assert result.get("retry_after") is None
@@ -948,7 +1026,313 @@ def test_claude_quota_with_assistant_text_is_failed(tmp_path: Path) -> None:
         xdg=tmp_path / "x",
         spawn_cwd=tmp_path,
     )
-    _wire_stdout_queue(sess, lines)
+    _wire_scripted_cli(sess, [lines])
+    with (
+        patch.object(cli_session.LiveCliSession, "_sample_rss"),
+        patch.object(cli_session.LiveCliSession, "_spawn_unlocked"),
+        patch.object(cli_session.LiveCliSession, "_kill_unlocked"),
+    ):
+        result = sess.turn("go", deadline_s=5)
+    assert result["status"] == "failed"
+
+
+def test_two_results_for_one_prompt_turn_two_does_not_take_leftover(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """ADR-29 acceptance (1): leftover result must not be claimed by turn 2."""
+    r1 = json.dumps(
+        {"type": "result", "session_id": "s1", "result": "TURN_ONE", "is_error": False}
+    )
+    r1_late = json.dumps(
+        {
+            "type": "result",
+            "session_id": "s1",
+            "result": "LATE_LEFTOVER",
+            "is_error": False,
+        }
+    )
+    r2 = json.dumps(
+        {"type": "result", "session_id": "s1", "result": "TURN_TWO", "is_error": False}
+    )
+    sess = cli_session.LiveCliSession(
+        role="architect",
+        adapter="claude-code",
+        uid=1001,
+        home=tmp_path / "h",
+        tmp=tmp_path / "t",
+        xdg=tmp_path / "x",
+        spawn_cwd=tmp_path,
+    )
+    _wire_scripted_cli(sess, [[r1, r1_late], [r2]])
+    with (
+        caplog.at_level("WARNING"),
+        patch.object(cli_session.LiveCliSession, "_sample_rss"),
+    ):
+        first = sess.turn("p1", deadline_s=5, turn_id="t-one")
+        second = sess.turn("p2", deadline_s=5, turn_id="t-two")
+    assert first["summary"] == "TURN_ONE"
+    assert second["summary"] == "TURN_TWO"
+    assert "LATE_LEFTOVER" not in second["summary"]
+    assert any(
+        "stale frame discarded" in r.message and "t-two" in r.message
+        for r in caplog.records
+    )
+
+
+def test_is_error_respawns_pid_only(tmp_path: Path) -> None:
+    """ADR-29 acceptance (2): after is_error, sess.proc.pid differs. Nothing else."""
+    err = json.dumps(
+        {
+            "type": "result",
+            "session_id": "s-err",
+            "is_error": True,
+            "result": "API Error: 500",
+        }
+    )
+    sess = cli_session.LiveCliSession(
+        role="architect",
+        adapter="claude-code",
+        uid=1001,
+        home=tmp_path / "h",
+        tmp=tmp_path / "t",
+        xdg=tmp_path / "x",
+        spawn_cwd=tmp_path,
+    )
+    _wire_scripted_cli(sess, [[err]], pid=4242)
+    old_pid = sess.proc.pid
+
+    def fake_spawn(*, continue_session: bool = True) -> None:
+        sess.proc = MagicMock()
+        sess.proc.poll.return_value = None
+        sess.proc.pid = 7777
+        sess.proc.stdin = MagicMock()
+        import queue as qmod
+
+        sess._stdout_q = qmod.Queue()
+
+    with (
+        patch.object(cli_session.LiveCliSession, "_sample_rss"),
+        patch.object(
+            cli_session.LiveCliSession, "_spawn_unlocked", side_effect=fake_spawn
+        ),
+    ):
+        result = sess.turn("go", deadline_s=5)
+    assert result["status"] == "failed"
+    assert sess.proc is not None
+    assert sess.proc.pid != old_pid
+    assert sess.proc.pid == 7777
+
+
+def test_claude_cmd_resume_and_continue_branches(tmp_path: Path) -> None:
+    """ADR-29 acceptance (3): --resume <id> when known, -c when not. Never bare --resume."""
+    sess = cli_session.LiveCliSession(
+        role="architect",
+        adapter="claude-code",
+        uid=1001,
+        home=tmp_path / "h",
+        tmp=tmp_path / "t",
+        xdg=tmp_path / "x",
+        spawn_cwd=tmp_path,
+    )
+    sess.claude_session_id = "sess-abc"
+    with_id = sess._claude_cmd(True)
+    idx = with_id.index("--resume")
+    assert with_id[idx : idx + 2] == ["--resume", "sess-abc"]
+    assert "-c" not in with_id
+
+    sess.claude_session_id = None
+    without = sess._claude_cmd(True)
+    assert "-c" in without
+    assert "--resume" not in without
+
+    fresh = sess._claude_cmd(False)
+    assert "-c" not in fresh
+    assert "--resume" not in fresh
+
+
+def test_spawn_rejected_resume_falls_back_to_c_and_starts_reader_once(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """ADR-29 acceptance (3): dead --resume child -> -c; reader on surviving child only."""
+    captured: list[list[str]] = []
+    reader_calls: list[int] = []
+
+    def fake_popen(**kwargs):
+        captured.append(list(kwargs["args"]))
+        proc = MagicMock()
+        proc.stdin = MagicMock()
+        proc.stdout = MagicMock()
+        proc.stdout.readline.side_effect = [""]
+        if len(captured) == 1:
+            proc.poll.return_value = 1
+            proc.pid = 1
+        else:
+            proc.poll.return_value = None
+            proc.pid = 2
+        return proc
+
+    orig_reader = cli_session.LiveCliSession._start_stdout_reader
+
+    def counting_reader(self):
+        reader_calls.append(self.proc.pid if self.proc else -1)
+        orig_reader(self)
+
+    sess = cli_session.LiveCliSession(
+        role="architect",
+        adapter="claude-code",
+        uid=1001,
+        home=tmp_path / "h",
+        tmp=tmp_path / "t",
+        xdg=tmp_path / "x",
+        spawn_cwd=tmp_path,
+    )
+    sess.claude_session_id = "rejected-id"
+    with (
+        caplog.at_level("WARNING"),
+        patch("agentd_runner.cli_session.subprocess.Popen", side_effect=fake_popen),
+        patch("agentd_runner.cli_session.os.geteuid", return_value=501),
+        patch.object(cli_session.LiveCliSession, "_sample_rss"),
+        patch.object(
+            cli_session.LiveCliSession, "_start_stdout_reader", counting_reader
+        ),
+    ):
+        sess.ensure_spawned(continue_session=True)
+
+    assert len(captured) == 2
+    v0 = _vendor_argv(captured[0])
+    idx = v0.index("--resume")
+    assert v0[idx : idx + 2] == ["--resume", "rejected-id"]
+    assert "-c" in _vendor_argv(captured[1])
+    assert "--resume" not in _vendor_argv(captured[1])
+    assert sess.claude_session_id is None
+    assert reader_calls == [2]
+    assert any("falling back to -c" in r.message for r in caplog.records)
+    sess.shutdown()
+
+
+def test_late_death_after_resume_clears_id_next_spawn_is_c(tmp_path: Path) -> None:
+    """ADR-29 acceptance (3b): mid-turn death after resume spawn clears the id."""
+    sess = cli_session.LiveCliSession(
+        role="architect",
+        adapter="claude-code",
+        uid=1001,
+        home=tmp_path / "h",
+        tmp=tmp_path / "t",
+        xdg=tmp_path / "x",
+        spawn_cwd=tmp_path,
+    )
+    sess.claude_session_id = "sid-live"
+    sess._spawned_with_resume = True
+    _wire_scripted_cli(sess, [[]])
+    # is_alive() needs poll() is None; the in-turn check then sees death.
+    sess.proc.poll.side_effect = [None, 1]
     with patch.object(cli_session.LiveCliSession, "_sample_rss"):
         result = sess.turn("go", deadline_s=5)
     assert result["status"] == "failed"
+    assert sess.claude_session_id is None
+
+    captured: list[list[str]] = []
+
+    def fake_popen(**kwargs):
+        captured.append(list(kwargs["args"]))
+        proc = MagicMock()
+        proc.poll.return_value = None
+        proc.pid = 3
+        proc.stdin = MagicMock()
+        proc.stdout = MagicMock()
+        proc.stdout.readline.side_effect = [""]
+        return proc
+
+    sess.proc = None
+    with (
+        patch("agentd_runner.cli_session.subprocess.Popen", side_effect=fake_popen),
+        patch("agentd_runner.cli_session.os.geteuid", return_value=501),
+        patch.object(cli_session.LiveCliSession, "_sample_rss"),
+    ):
+        sess.ensure_spawned(continue_session=True)
+    assert "-c" in _vendor_argv(captured[0])
+    assert "--resume" not in _vendor_argv(captured[0])
+    sess.shutdown()
+
+
+def test_grok_stale_lower_mid_injected_after_write_is_ignored(
+    tmp_path: Path,
+) -> None:
+    """ADR-29 acceptance (4): leftover lower-mid after write; id filter still holds."""
+    sess = cli_session.LiveCliSession(
+        role="developer",
+        adapter="grok-cli",
+        uid=1002,
+        home=tmp_path / "h",
+        tmp=tmp_path / "t",
+        xdg=tmp_path / "x",
+        spawn_cwd=tmp_path,
+    )
+    sess.acp_session_id = "s"
+    sess._rpc_id = 1000
+    import queue as qmod
+
+    q: qmod.Queue[str | None] = qmod.Queue()
+    sess._stdout_q = q
+    sess.proc = MagicMock()
+    sess.proc.poll.return_value = None
+    sess.proc.pid = 5
+    sess.proc.stdin = MagicMock()
+
+    def on_write(data: str) -> int:
+        q.put(
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {"stopReason": "end_turn", "text": "STALE"},
+                }
+            )
+        )
+        q.put(
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "session/update",
+                    "params": {
+                        "update": {
+                            "sessionUpdate": "agent_message_chunk",
+                            "content": {"text": "OWN"},
+                        }
+                    },
+                }
+            )
+        )
+        q.put(
+            json.dumps(
+                {"jsonrpc": "2.0", "id": 1001, "result": {"stopReason": "end_turn"}}
+            )
+        )
+        return len(data)
+
+    sess.proc.stdin.write.side_effect = on_write
+    with patch.object(cli_session.LiveCliSession, "_sample_rss"):
+        result = sess.turn("x", deadline_s=5)
+    assert result["status"] == "done"
+    assert result["summary"] == "OWN"
+
+
+def test_drain_reputs_eof_sentinel(tmp_path: Path) -> None:
+    import queue as qmod
+
+    sess = cli_session.LiveCliSession(
+        role="architect",
+        adapter="claude-code",
+        uid=1001,
+        home=tmp_path / "h",
+        tmp=tmp_path / "t",
+        xdg=tmp_path / "x",
+        spawn_cwd=tmp_path,
+    )
+    q: qmod.Queue[str | None] = qmod.Queue()
+    q.put(json.dumps({"type": "system", "subtype": "init"}))
+    q.put(None)
+    sess._stdout_q = q
+    n = sess._drain_stdout_unlocked(turn_id="t-x", reason="test")
+    assert n == 1
+    assert q.get_nowait() is None
