@@ -187,19 +187,11 @@ def test_rpc_client_forwards_artifact_register_notification() -> None:
 
     seen: list[tuple[str, dict]] = []
 
-    class FakeRfile:
-        def __init__(self, lines: list[bytes]) -> None:
-            self._lines = list(lines)
-
-        def readline(self) -> bytes:
-            return self._lines.pop(0) if self._lines else b""
-
-        def close(self) -> None:
-            return None
-
     class FakeWfile:
+        last: bytes = b""
+
         def write(self, data: bytes) -> None:
-            return None
+            type(self).last = data
 
         def flush(self) -> None:
             return None
@@ -209,26 +201,36 @@ def test_rpc_client_forwards_artifact_register_notification() -> None:
 
     import json
 
-    # Response sequence for call(): notify then result
-    lines = [
-        (
-            json.dumps(
-                {
-                    "jsonrpc": "2.0",
-                    "method": "artifact.register",
-                    "params": {
-                        "role": "developer",
-                        "kind": "scratch",
-                        "ref": "/tmp/a",
-                    },
-                }
-            )
-            + "\n"
-        ).encode(),
-        (
-            json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"ok": True}}) + "\n"
-        ).encode(),
-    ]
+    class MatchingRfile:
+        def __init__(self) -> None:
+            self._step = 0
+
+        def readline(self) -> bytes:
+            if self._step == 0:
+                self._step = 1
+                return (
+                    json.dumps(
+                        {
+                            "jsonrpc": "2.0",
+                            "method": "artifact.register",
+                            "params": {
+                                "role": "developer",
+                                "kind": "scratch",
+                                "ref": "/tmp/a",
+                            },
+                        }
+                    )
+                    + "\n"
+                ).encode()
+            req_id = json.loads(FakeWfile.last.decode())["id"]
+            return (
+                json.dumps({"jsonrpc": "2.0", "id": req_id, "result": {"ok": True}})
+                + "\n"
+            ).encode()
+
+        def close(self) -> None:
+            return None
+
     cli = RunnerClient(
         "127.0.0.1",
         1,
@@ -237,8 +239,7 @@ def test_rpc_client_forwards_artifact_register_notification() -> None:
     )
     # Bypass connect
     cli._wfile = FakeWfile()  # type: ignore[assignment]
-    cli._rfile = FakeRfile(lines)  # type: ignore[assignment]
-    cli._id = 0
+    cli._rfile = MatchingRfile()  # type: ignore[assignment]
     result = cli.call("health.ping", {})
     assert result == {"ok": True}
     assert len(seen) == 1

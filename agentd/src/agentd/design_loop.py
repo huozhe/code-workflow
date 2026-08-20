@@ -93,6 +93,13 @@ _MERGE_AUTH_MAX_ATTEMPTS = 5
 _delivery_attempts: dict[str, int] = {}
 _DELIVERY_MAX_ATTEMPTS = 5
 
+# ADR-29 (d) / RFC 169: _run_teardown_turns used to return bool, where False
+# meant both "succeeded" and "exhausted". Three interned outcomes so the
+# caller can `is`-compare.
+_TEARDOWN_CLEAN = "clean"
+_TEARDOWN_DEFER = "defer"
+_TEARDOWN_EXHAUSTED = "exhausted"
+
 # ADR-17 / #90: ticked body + NULL verified_at. Grace is durable received_at,
 # not the in-memory attempt counter (that resets on restart).
 CLOSE_RECONCILE_GRACE_S = 15 * 60
@@ -2243,7 +2250,7 @@ class DesignLoop:
         )
 
         if self.dispatch_turns:
-            deferred = self._run_teardown_turns(
+            outcome = self._run_teardown_turns(
                 session_key=session_key,
                 sess=sess,
                 repo=repo,
@@ -2251,10 +2258,16 @@ class DesignLoop:
                 delivery_id=delivery_id,
                 classification=classification,
             )
-            if deferred:
+            if outcome is _TEARDOWN_DEFER:
                 return
-
-        if self.store.list_artifacts(session_key, open_only=True):
+            if (
+                outcome is _TEARDOWN_EXHAUSTED
+                and self.store.list_artifacts(session_key, open_only=True)
+            ):
+                self.store.set_delivery_status(delivery_id, "done")
+                return
+        elif self.store.list_artifacts(session_key, open_only=True):
+            # No turn dispatch configured: nothing will ever clear these. As today.
             self._log_teardown_leaks(session_key)
             self.store.set_delivery_status(delivery_id, "done")
             return
@@ -2281,6 +2294,7 @@ class DesignLoop:
                 return
             self.store.set_delivery_status(delivery_id, "done")
             return
+        _delivery_attempts.pop(delivery_id, None)
         self.store.set_delivery_status(delivery_id, "done")
 
     def _close_grace_elapsed(self, delivery_id: str, received_at: int) -> bool:
@@ -2572,8 +2586,12 @@ class DesignLoop:
         issue_num: int,
         delivery_id: str,
         classification: str,
-    ) -> bool:
-        """Developer then Architect. Returns True if delivery should stay deferred."""
+    ) -> str:
+        """Developer then Architect.
+
+        Returns ``_TEARDOWN_CLEAN``, ``_TEARDOWN_DEFER``, or
+        ``_TEARDOWN_EXHAUSTED`` (RFC 169 / ADR-29 (d)).
+        """
         if not self.store.list_artifacts(session_key, open_only=True):
             # Drain-guard also stops ensure_session from re-registering
             # already-removed layout rows (register_artifact only matches
@@ -2582,8 +2600,7 @@ class DesignLoop:
                 "teardown skip turns session=%s — ledger already drained",
                 session_key,
             )
-            _delivery_attempts.pop(delivery_id, None)
-            return False
+            return _TEARDOWN_CLEAN
         project_key = str(sess.get("project_key") or project_key_from_repo(repo))
         # #67: a runners row is not reachability. Always ask ensure_session
         # to probe/adopt/recreate. B3 drain-guard above still skips this.
@@ -2597,17 +2614,21 @@ class DesignLoop:
                     developer_login=str(sess.get("developer") or ""),
                 )
             except CapacityRefusal as exc:
-                return self._teardown_retry_or_give_up(
-                    delivery_id=delivery_id,
-                    session_key=session_key,
-                    reason=f"ensure_session capacity: {exc}",
+                return self._teardown_outcome(
+                    self._teardown_retry_or_give_up(
+                        delivery_id=delivery_id,
+                        session_key=session_key,
+                        reason=f"ensure_session capacity: {exc}",
+                    )
                 )
             except Exception as exc:
                 log.exception("teardown ensure_session failed %s", session_key)
-                return self._teardown_retry_or_give_up(
-                    delivery_id=delivery_id,
-                    session_key=session_key,
-                    reason=f"ensure_session failed: {exc}",
+                return self._teardown_outcome(
+                    self._teardown_retry_or_give_up(
+                        delivery_id=delivery_id,
+                        session_key=session_key,
+                        reason=f"ensure_session failed: {exc}",
+                    )
                 )
             # ensure_session upserts state=INTAKE (create path). Re-assert
             # TEARDOWN so the runner prompt gets the teardown obligation.
@@ -2624,10 +2645,12 @@ class DesignLoop:
         )
         if not runner:
             self._log_teardown_leaks(session_key)
-            return self._teardown_retry_or_give_up(
-                delivery_id=delivery_id,
-                session_key=session_key,
-                reason="no runner after ensure_session; next drain will retry",
+            return self._teardown_outcome(
+                self._teardown_retry_or_give_up(
+                    delivery_id=delivery_id,
+                    session_key=session_key,
+                    reason="no runner after ensure_session; next drain will retry",
+                )
             )
 
         turn_failed = False
@@ -2649,7 +2672,8 @@ class DesignLoop:
                 issue_num=int(issue_num),
             )
             if result and result.get("status") in ("role_busy", "quota_exhausted"):
-                return True
+                # RFC 169: no turn happened — defer without charging the budget.
+                return _TEARDOWN_DEFER
             status = str((result or {}).get("status") or "")
             if result is None or status in ("failed", "gateway_timeout"):
                 turn_failed = True
@@ -2661,13 +2685,26 @@ class DesignLoop:
 
         self._log_teardown_leaks(session_key)
         if not turn_failed:
-            _delivery_attempts.pop(delivery_id, None)
-            return False
-        return self._teardown_retry_or_give_up(
-            delivery_id=delivery_id,
-            session_key=session_key,
-            reason=fail_reason,
+            if self.store.list_artifacts(session_key, open_only=True):
+                return self._teardown_outcome(
+                    self._teardown_retry_or_give_up(
+                        delivery_id=delivery_id,
+                        session_key=session_key,
+                        reason="teardown turns ran; ledger still open",
+                    )
+                )
+            return _TEARDOWN_CLEAN
+        return self._teardown_outcome(
+            self._teardown_retry_or_give_up(
+                delivery_id=delivery_id,
+                session_key=session_key,
+                reason=fail_reason,
+            )
         )
+
+    @staticmethod
+    def _teardown_outcome(stay: bool) -> str:
+        return _TEARDOWN_DEFER if stay else _TEARDOWN_EXHAUSTED
 
     def _retry_or_give_up(
         self,

@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import itertools
 import json
 import logging
 import socket
 from typing import IO, Any, Self
+
+# ADR-29 (c): process-unique request ids. Per-instance counters reset on every
+# `with RunnerClient` so turn.dispatch was always id=2. next() on a C iterator
+# is atomic under the GIL.
+_req_ids = itertools.count(1)
 
 log = logging.getLogger("agentd.rpc_client")
 
@@ -36,7 +42,6 @@ class RunnerClient:
         self._sock: socket.socket | None = None
         self._rfile: IO[bytes] | None = None
         self._wfile: IO[bytes] | None = None
-        self._id = 0
 
     def connect(self) -> None:
         self.close()
@@ -79,8 +84,7 @@ class RunnerClient:
     def call(self, method: str, params: dict[str, Any] | None = None) -> Any:
         if self._wfile is None or self._rfile is None:
             raise RuntimeError("not connected")
-        self._id += 1
-        req_id = self._id
+        req_id = next(_req_ids)
         req = {
             "jsonrpc": "2.0",
             "id": req_id,
@@ -98,7 +102,9 @@ class RunnerClient:
             resp = json.loads(raw.decode("utf-8"))
             if resp.get("id") is None and resp.get("method"):
                 method_n = str(resp.get("method") or "")
-                params_n = resp.get("params") if isinstance(resp.get("params"), dict) else {}
+                params_n = (
+                    resp.get("params") if isinstance(resp.get("params"), dict) else {}
+                )
                 log.debug("rpc notify %s params=%s", method_n, params_n)
                 if self.on_notification is not None:
                     try:

@@ -137,7 +137,9 @@ def _insert_close(
         store._conn.commit()
 
 
-def _register_open(store: Store, sk: str, *, kind: str = "scratch", ref: str = "/tmp/x") -> None:
+def _register_open(
+    store: Store, sk: str, *, kind: str = "scratch", ref: str = "/tmp/x"
+) -> None:
     store.register_artifact(session_key=sk, role="developer", kind=kind, ref=ref)
 
 
@@ -197,9 +199,7 @@ def test_classify_missing_block_is_abandoned() -> None:
 
 
 def test_classify_bare_tick_outside_sentinels_is_abandoned() -> None:
-    assert (
-        classify_at_close("- [x] Human Verification Complete\n") == "ABANDONED"
-    )
+    assert classify_at_close("- [x] Human Verification Complete\n") == "ABANDONED"
 
 
 # --- FSM ---
@@ -508,12 +508,19 @@ def test_redelivery_while_teardown_does_not_reclassify(tmp_path: Path) -> None:
 # --- ledger: observe disk, do not trust the turn report ---
 
 
-def test_removed_at_only_after_gateway_confirms_gone(
-    tmp_path: Path, caplog
-) -> None:
+def test_removed_at_only_after_gateway_confirms_gone(tmp_path: Path, caplog) -> None:
     store = Store(tmp_path / "state.db")
     sk = _seed(store, tmp_path)
-    wt = tmp_path / "projects" / "huozhe__code-workflow" / "sessions" / "58" / "developer" / "worktrees" / "issue-58"
+    wt = (
+        tmp_path
+        / "projects"
+        / "huozhe__code-workflow"
+        / "sessions"
+        / "58"
+        / "developer"
+        / "worktrees"
+        / "issue-58"
+    )
     scratch = (
         tmp_path
         / "projects"
@@ -559,9 +566,7 @@ def test_removed_at_only_after_gateway_confirms_gone(
 def test_gateway_marks_removed_when_path_gone(tmp_path: Path) -> None:
     store = Store(tmp_path / "state.db")
     sk = _seed(store, tmp_path)
-    issue_host = (
-        tmp_path / "projects" / "huozhe__code-workflow" / "sessions" / "58"
-    )
+    issue_host = tmp_path / "projects" / "huozhe__code-workflow" / "sessions" / "58"
     wt = issue_host / "developer" / "worktrees" / "issue-58"
     scratch = issue_host / "architect" / "scratch"
     wt.mkdir(parents=True)
@@ -631,9 +636,7 @@ def test_branch_marked_removed_only_when_git_list_empty(tmp_path: Path) -> None:
     subprocess.run(
         ["git", "branch", branch], cwd=clone, check=True, capture_output=True
     )
-    store.register_artifact(
-        session_key=sk, role="developer", kind="branch", ref=branch
-    )
+    store.register_artifact(session_key=sk, role="developer", kind="branch", ref=branch)
 
     class DeleteBranch(_RecordingClient):
         def call(self, method, params=None):
@@ -1018,15 +1021,15 @@ def test_teardown_second_role_does_not_resurrect_branch(tmp_path: Path) -> None:
     )
     (src / "f").write_text("x\n", encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=src, check=True, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "i"], cwd=src, check=True, capture_output=True)
-    clone = ensure_shared_clone(
-        tmp_path, "huozhe/code-workflow", clone_url=str(src)
+    subprocess.run(
+        ["git", "commit", "-m", "i"], cwd=src, check=True, capture_output=True
     )
+    clone = ensure_shared_clone(tmp_path, "huozhe/code-workflow", clone_url=str(src))
     branch = role_branch_name("huozhe/code-workflow", 58, "developer")
-    subprocess.run(["git", "branch", branch], cwd=clone, check=True, capture_output=True)
-    store.register_artifact(
-        session_key=sk, role="developer", kind="branch", ref=branch
+    subprocess.run(
+        ["git", "branch", branch], cwd=clone, check=True, capture_output=True
     )
+    store.register_artifact(session_key=sk, role="developer", kind="branch", ref=branch)
 
     class _RealisticSupervisor:
         def __init__(self) -> None:
@@ -1043,10 +1046,16 @@ def test_teardown_second_role_does_not_resurrect_branch(tmp_path: Path) -> None:
             )
             if not listed.stdout.strip():
                 subprocess.run(
-                    ["git", "branch", branch], cwd=clone, check=True, capture_output=True
+                    ["git", "branch", branch],
+                    cwd=clone,
+                    check=True,
+                    capture_output=True,
                 )
             store.register_artifact(
-                session_key=k["session_key"], role="developer", kind="branch", ref=branch
+                session_key=k["session_key"],
+                role="developer",
+                kind="branch",
+                ref=branch,
             )
             store.upsert_runner(
                 "huozhe/code-workflow",
@@ -1099,4 +1108,210 @@ def test_teardown_second_role_does_not_resurrect_branch(tmp_path: Path) -> None:
     assert store.list_artifacts(sk, open_only=True) == []
     assert (store.get_session(sk) or {})["state"] == "CLOSED"
     assert sup.calls == 1
+    store.close()
+
+
+def test_open_artifact_after_successful_turns_defers_across_passes(
+    tmp_path: Path,
+) -> None:
+    """ADR-29 acceptance (6)/(6b): open ledger after success is not done in one pass."""
+    store = Store(tmp_path / "state.db")
+    sk = _seed(store, tmp_path, with_session_dir=True)
+    wt = tmp_path / "still-here"
+    wt.mkdir()
+    (wt / "f").write_text("x", encoding="utf-8")
+    _register_open(store, sk, kind="worktree", ref=str(wt))
+    _RecordingClient.calls = []
+    import agentd.design_loop as dl
+
+    dl._delivery_attempts.clear()
+    _insert_close(
+        store,
+        did="d-leak",
+        payload=_closed_payload(body=_block(checked=True)),
+    )
+    loop = _loop(store, tmp_path, dispatch=True, client_factory=_RecordingClient)
+    try:
+        loop.process_deferred_batch()
+        row = store._conn.execute(
+            "SELECT status FROM deliveries WHERE delivery_id=?", ("d-leak",)
+        ).fetchone()
+        assert row["status"] == "deferred"
+        assert dl._delivery_attempts.get("d-leak") == 1
+        loop.process_deferred_batch()
+        assert dl._delivery_attempts.get("d-leak") == 2
+    finally:
+        dl.RunnerClient = loop._orig_client  # type: ignore[attr-defined, misc]
+    store.close()
+
+
+def test_open_artifact_exhausts_once_and_does_not_redispatch(
+    tmp_path: Path,
+) -> None:
+    """ADR-29 acceptance (6c): exhausting pass is done, one escalation, no extra turns."""
+    store = Store(tmp_path / "state.db")
+    sk = _seed(store, tmp_path, with_session_dir=True)
+    wt = tmp_path / "still-here"
+    wt.mkdir()
+    (wt / "f").write_text("x", encoding="utf-8")
+    _register_open(store, sk, kind="worktree", ref=str(wt))
+    posts: list = []
+    _RecordingClient.calls = []
+    import agentd.design_loop as dl
+
+    dl._delivery_attempts.clear()
+    _insert_close(
+        store,
+        did="d-leak-ex",
+        payload=_closed_payload(body=_block(checked=True)),
+    )
+    loop = _loop(
+        store,
+        tmp_path,
+        dispatch=True,
+        client_factory=_RecordingClient,
+        posts=posts,
+    )
+    try:
+        for _ in range(7):
+            loop.process_deferred_batch()
+    finally:
+        dl.RunnerClient = loop._orig_client  # type: ignore[attr-defined, misc]
+    row = store._conn.execute(
+        "SELECT status FROM deliveries WHERE delivery_id=?", ("d-leak-ex",)
+    ).fetchone()
+    assert row["status"] == "done"
+    n_dispatch = len([m for m, _ in _RecordingClient.calls if m == "turn.dispatch"])
+    assert n_dispatch == 10  # 2 roles × 5 attempts
+    assert len(posts) == 1
+    assert "@huozhe" in posts[0]["body"]
+    store.close()
+
+
+def test_drained_ledger_archive_failure_increments_attempts(
+    tmp_path: Path,
+) -> None:
+    """ADR-29 acceptance (6d): :2585 pop gone — archive failures share the budget."""
+    store = Store(tmp_path / "state.db")
+    _seed(store, tmp_path, with_session_dir=False)
+    posts: list = []
+    import agentd.design_loop as dl
+
+    dl._delivery_attempts.clear()
+    _insert_close(
+        store,
+        did="d-arch",
+        payload=_closed_payload(body=_block(checked=True)),
+    )
+    loop = _loop(store, tmp_path, dispatch=True, posts=posts)
+    orig = loop._archive_and_close
+
+    def boom(**k):
+        raise RuntimeError("archive failed")
+
+    loop._archive_and_close = boom  # type: ignore[method-assign]
+    try:
+        loop.process_deferred_batch()
+        assert dl._delivery_attempts.get("d-arch") == 1
+        loop.process_deferred_batch()
+        assert dl._delivery_attempts.get("d-arch") == 2
+        for _ in range(5):
+            loop.process_deferred_batch()
+        row = store._conn.execute(
+            "SELECT status FROM deliveries WHERE delivery_id=?", ("d-arch",)
+        ).fetchone()
+        assert row["status"] == "done"
+        assert posts and "archive failed" in posts[0]["body"].lower()
+    finally:
+        loop._archive_and_close = orig  # type: ignore[method-assign]
+    store.close()
+
+
+class _BusyClient(_RecordingClient):
+    def call(self, method, params=None):
+        self.__class__.calls.append((method, dict(params or {})))
+        if method == "health.ping":
+            return {"ok": True, "initialized": True}
+        return {"status": "role_busy", "summary": "busy"}
+
+
+class _QuotaClient(_RecordingClient):
+    def call(self, method, params=None):
+        self.__class__.calls.append((method, dict(params or {})))
+        if method == "health.ping":
+            return {"ok": True, "initialized": True}
+        return {"status": "quota_exhausted", "summary": "quota"}
+
+
+def test_teardown_role_busy_defers_without_archive(tmp_path: Path) -> None:
+    """ADR-29 acceptance (6e): leftover True would archive against a live CLI."""
+    store = Store(tmp_path / "state.db")
+    sk = _seed(store, tmp_path, with_session_dir=True)
+    _register_open(store, sk)
+    _BusyClient.calls = []
+    import agentd.design_loop as dl
+
+    dl._delivery_attempts.clear()
+    _insert_close(
+        store,
+        did="d-busy",
+        payload=_closed_payload(body=_block(checked=True)),
+    )
+    loop = _loop(store, tmp_path, dispatch=True, client_factory=_BusyClient)
+    archived: list[int] = []
+    orig = loop._archive_and_close
+
+    def track(**k):
+        archived.append(1)
+        return orig(**k)
+
+    loop._archive_and_close = track  # type: ignore[method-assign]
+    try:
+        loop.process_deferred_batch()
+    finally:
+        dl.RunnerClient = loop._orig_client  # type: ignore[attr-defined, misc]
+        loop._archive_and_close = orig  # type: ignore[method-assign]
+    row = store._conn.execute(
+        "SELECT status FROM deliveries WHERE delivery_id=?", ("d-busy",)
+    ).fetchone()
+    assert row["status"] == "deferred"
+    assert "d-busy" not in dl._delivery_attempts
+    assert archived == []
+    store.close()
+
+
+def test_teardown_quota_exhausted_defers_without_archive(tmp_path: Path) -> None:
+    """ADR-29 acceptance (6e) quota_exhausted sibling."""
+    store = Store(tmp_path / "state.db")
+    sk = _seed(store, tmp_path, with_session_dir=True)
+    _register_open(store, sk)
+    _QuotaClient.calls = []
+    import agentd.design_loop as dl
+
+    dl._delivery_attempts.clear()
+    _insert_close(
+        store,
+        did="d-quota",
+        payload=_closed_payload(body=_block(checked=True)),
+    )
+    loop = _loop(store, tmp_path, dispatch=True, client_factory=_QuotaClient)
+    archived: list[int] = []
+    orig = loop._archive_and_close
+
+    def track(**k):
+        archived.append(1)
+        return orig(**k)
+
+    loop._archive_and_close = track  # type: ignore[method-assign]
+    try:
+        loop.process_deferred_batch()
+    finally:
+        dl.RunnerClient = loop._orig_client  # type: ignore[attr-defined, misc]
+        loop._archive_and_close = orig  # type: ignore[method-assign]
+    row = store._conn.execute(
+        "SELECT status FROM deliveries WHERE delivery_id=?", ("d-quota",)
+    ).fetchone()
+    assert row["status"] == "deferred"
+    assert "d-quota" not in dl._delivery_attempts
+    assert archived == []
     store.close()
