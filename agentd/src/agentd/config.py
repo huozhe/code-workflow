@@ -138,10 +138,16 @@ class Config:
     def agent_models(self) -> dict[str, dict[str, str]]:
         """§5.3 / ADR-9: per-adapter model + reasoning effort, both optional (#92).
 
-        Keyed by **agent id** (== adapter: ``claude``, ``grok``), never by role,
+        Keyed by the **yaml agent id** (``claude``, ``grok``), never by role,
         because a role may swap adapter and only the adapter knows what a vendor
-        string means. An agent with neither key is omitted entirely, so an empty
-        dict means "every CLI keeps its own default" — the pre-#92 behaviour.
+        string means.
+
+        The agent id is *not* the adapter name: ``resolve_adapter`` returns
+        ``claude-code`` / ``grok-cli`` (§5.4), so the runner resolves both forms
+        (``turn.model_spec``). Keep that alias map in step with any new agent id.
+
+        An agent with neither key is omitted entirely, so an empty dict means
+        "every CLI keeps its own default" — the pre-#92 behaviour.
         """
         agents = self.raw.get("agents") or {}
         out: dict[str, dict[str, str]] = {}

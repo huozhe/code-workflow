@@ -741,6 +741,11 @@ class SessionSupervisor:
                     },
                     "tokens": tokens,
                     "model_credentials": self._load_model_credentials(),
+                    # Must be sent on resume too: the runner handler is shared and
+                    # does `params.get("models") or {}`, so omitting it CLEARS
+                    # STATE.models. After an ADR-25 promote the configured models
+                    # would silently stop applying. (PR #164 review, huozhegrok.)
+                    "models": self.config.agent_models(),
                     "missed": {"retired_turns": retired[-10:]},
                 },
             )

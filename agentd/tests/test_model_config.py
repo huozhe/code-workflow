@@ -19,6 +19,9 @@ _RUNNER_ROOT = Path(__file__).resolve().parents[1] / "docker" / "session-runner"
 sys.path.insert(0, str(_RUNNER_ROOT))
 
 from agentd_runner import cli_session  # noqa: E402
+from agentd_runner import turn as runner_turn  # noqa: E402
+from agentd_runner.adapters import resolve_adapter  # noqa: E402
+from agentd_runner.server import STATE  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -202,3 +205,43 @@ def test_manifest_models_defaults_to_empty_not_missing() -> None:
         closed_at=1_700_000_000,
     )
     assert m["models"] == {}
+
+
+# --------------------------------------------- live adapter names (PR #164)
+
+
+@pytest.fixture
+def _state_models():
+    """Set STATE.models for one test and restore it after."""
+    saved = STATE.models
+    yield lambda m: setattr(STATE, "models", m)
+    STATE.models = saved
+
+
+def test_resolve_adapter_names_actually_hit_the_config_keys(_state_models) -> None:
+    """The bug PR #164 caught: config keys by yaml id, resolve_adapter returns
+    `claude-code` / `grok-cli`, so a naive lookup misses and every live spawn
+    silently keeps the CLI default.
+
+    This drives the REAL adapter names rather than hand-passing "claude".
+    """
+    _state_models(Config.agent_models(_cfg({
+        "claude": {"model": "opus", "reasoning_effort": "high"},
+        "grok": {"model": "grok-4.6", "reasoning_effort": "high"},
+    })))
+    arch = resolve_adapter("architect")
+    dev = resolve_adapter("developer")
+    assert arch == "claude-code" and dev == "grok-cli"  # guard the premise
+    assert runner_turn.model_spec(arch) == ("opus", "high")
+    assert runner_turn.model_spec(dev) == ("grok-4.6", "high")
+
+
+def test_model_spec_accepts_the_short_id_too(_state_models) -> None:
+    """A runner told `claude` directly must still resolve."""
+    _state_models({"claude": {"model": "opus"}})
+    assert runner_turn.model_spec("claude") == ("opus", None)
+
+
+def test_model_spec_unknown_adapter_falls_back_to_cli_default(_state_models) -> None:
+    _state_models({"claude": {"model": "opus"}})
+    assert runner_turn.model_spec("grok-cli") == (None, None)

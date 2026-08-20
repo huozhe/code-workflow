@@ -21,6 +21,14 @@ from agentd_runner.server import ROLE_UIDS, ensure_role_layout, project_root, se
 log = logging.getLogger("agentd_runner.turn")
 
 
+# config.yaml keys agents by their yaml id (`claude`, `grok`); resolve_adapter
+# returns the adapter name (`claude-code`, `grok-cli`, adapters.py:21). Accept
+# both, the same way cli_session's spawn branches already do — otherwise the
+# lookup misses on every live spawn and silently keeps the CLI default, which is
+# exactly the failure #92 exists to prevent. (PR #164 review, huozhegrok.)
+_ADAPTER_ALIASES = {"claude-code": "claude", "grok-cli": "grok"}
+
+
 def model_spec(adapter: str) -> tuple[str | None, str | None]:
     """(model, reasoning_effort) for an adapter, from session.init (#92).
 
@@ -30,7 +38,8 @@ def model_spec(adapter: str) -> tuple[str | None, str | None]:
     """
     from agentd_runner.server import STATE
 
-    spec = (STATE.models or {}).get(adapter) or {}
+    models = STATE.models or {}
+    spec = models.get(adapter) or models.get(_ADAPTER_ALIASES.get(adapter, adapter)) or {}
     return (spec.get("model") or None, spec.get("reasoning_effort") or None)
 
 ProgressCb = Callable[[dict[str, Any]], None]
