@@ -15,7 +15,7 @@ ADR-29 already decided *what* to do and *why*, down to call sites. It is the dec
 
 - one of its five changes, **(d)**, is inert as literally specified, in two ways: the retry counter it routes through is reset earlier in the same handler, so the delivery defers at attempt 1 forever and never escalates; and the same block re-arms a budget `_run_teardown_turns` has *already* exhausted, buying a second `_DELIVERY_MAX_ATTEMPTS` of teardown turns against a closed issue and a second escalation (§2.1);
 - **(a)** invalidates the fixture pattern most of the CLI-session suite is built on — for both adapters, not just claude — and **(b)** turns four of those tests into live `claude` spawns (§2.3), which is also the mechanism by which acceptance (1) can be made to fail first;
-- the WARNING line that (a) is defined by needs a `turn_id` that `CliSession.turn()` is not given today (§2.2);
+- (a)'s WARNING line needs a `turn_id` that `CliSession.turn()` is not given today (§2.2);
 - the post-spawn poll of **(b′)** has a window, and a child that dies *after* the window leaves the role spawning against a rejected id on every subsequent turn (§2.4);
 - acceptance (7)'s live sign-off criterion — "the first drain discards zero frames" — has a benign counter-example that must not be read as a recurrence (§2.5).
 
@@ -178,7 +178,20 @@ return _TEARDOWN_DEFER if self._teardown_retry_or_give_up(
 ) else _TEARDOWN_EXHAUSTED
 ```
 
-`_run_teardown_turns` returns a three-valued outcome instead of a bool, because `False` today means two incompatible things — *succeeded* and *exhausted* — and the caller must not treat them alike. The four other `return self._teardown_retry_or_give_up(...)` sites (`:2600`, `:2607`, `:2627`, `:2666`) each become the same one-line `DEFER`/`EXHAUSTED` mapping; the drained short circuit (`:2578–2586`) returns `CLEAN`.
+`_run_teardown_turns` returns a three-valued outcome instead of a bool, because `False` today means two incompatible things — *succeeded* and *exhausted* — and the caller must not treat them alike. Changing the return type means **every** exit has to be mapped, and the function has six:
+
+| exit | today | becomes |
+|---|---|---|
+| `:2578–2586` drained short circuit | `False` | `_TEARDOWN_CLEAN` (and the `_delivery_attempts.pop` at `:2585` goes — §2.1) |
+| `:2600` `ensure_session` capacity refusal | `_teardown_retry_or_give_up(...)` | `DEFER` / `EXHAUSTED` |
+| `:2607` `ensure_session` failed | `_teardown_retry_or_give_up(...)` | `DEFER` / `EXHAUSTED` |
+| `:2627` no runner after `ensure_session` | `_teardown_retry_or_give_up(...)` | `DEFER` / `EXHAUSTED` |
+| **`:2651–2652` role busy / quota exhausted** | bare `return True` | **`_TEARDOWN_DEFER`, and the counter is not touched** |
+| `:2663–2670` turns succeeded / turns failed | `False` / `_teardown_retry_or_give_up(...)` | `CLEAN` or leak-`DEFER`/`EXHAUSTED` (above) / `DEFER`/`EXHAUSTED` |
+
+**`:2651` is the one that bites** (Developer's catch — it was missing from the first inventory). It is a bare `return True` in the middle of the role loop, not a `_teardown_retry_or_give_up` call, so a mechanical "replace the `_teardown_retry_or_give_up` returns" pass leaves it returning `True` — a value that is neither `DEFER` nor `EXHAUSTED`. The caller's `is` checks both miss, control falls through to `_archive_and_close`, and the gateway archives and closes a session while the role's CLI is still holding a turn. That is a worse outcome than the bug (d) exists to fix.
+
+It must **not** be routed through `_teardown_retry_or_give_up`: `role_busy` / `quota_exhausted` mean *no turn happened*, so charging the teardown budget for them would exhaust it without a single teardown attempt having failed. That is the same rule the sibling dispatch path already applies at `:874` (`# quota_exhausted is the same shape: no turn happened` — #37 B1 / #34 / #86), and this RFC changes neither it nor the fact that such a delivery defers without a bound. Deferring while a role is busy is pre-existing behaviour and is not (d)'s business.
 
 The caller then keeps today's terminal behaviour exactly:
 
@@ -226,7 +239,7 @@ Control then falls through to the caller's open-artifact check at `:2257`, which
 
 1. **Delete the pop at `:2664`** (success path) and the one in the drained short circuit at `:2585`. Neither means the delivery finished: after both, control continues into `_archive_and_close`, which can fail and defer on its own budget. `:2585`'s pop is in fact the same bug on the archive edge today — drained ledger, archive fails, defer at `n=1`, redeliver, short circuit pops, archive fails, `n=1` again — an unbounded loop that predates this RFC and costs one deleted line to close.
 2. **Clear it where the handler completes** — immediately before the success `set_delivery_status(delivery_id, "done")` at **`:2284`**. Not `:2281`: that is the archive-failure *defer* `return`, and clearing there would pop the counter on deferral, which is §2.1's own bug on a third edge. (Developer's catch; the first draft cited `:2281`.) Exhaustion already clears at `:2695`.
-3. **Move the leak deferral inside `_run_teardown_turns`** and give it a three-valued outcome, per §1 (d), so `CLEAN`, `DEFER` and `EXHAUSTED` are distinguishable. The leak check then shares the turn budget instead of opening a second one, and it is unreachable after exhaustion by construction rather than by an `if`.
+3. **Move the leak deferral inside `_run_teardown_turns`** and give it a three-valued outcome, per §1 (d), so `CLEAN`, `DEFER` and `EXHAUSTED` are distinguishable. The leak check then shares the turn budget instead of opening a second one, and it is unreachable after exhaustion by construction rather than by an `if`. **Map all six exits, not the four that name `_teardown_retry_or_give_up`** — the bare `return True` at `:2651` (role busy / quota exhausted) becomes `DEFER` *without* touching the counter, and a leftover `True` there means the caller archives a session whose role is mid-turn. §1 (d) has the table.
 
 Acceptance (6) is therefore asserted across passes, not one: pass 1 defers at attempt 1, pass `_DELIVERY_MAX_ATTEMPTS` exhausts, escalates **once**, and marks the delivery `done`. Asserting only "not `done` after a single pass" passes against every version above, including both broken ones.
 
@@ -324,6 +337,7 @@ Against ADR-29's acceptance (1)–(8). Traps ADR-29 already caught are restated 
 | 6b | §2.1 counter lifecycle | `test_m5_teardown.py` | Successful teardown turns with the ledger still open must **not** reset `_delivery_attempts` — attempts increment monotonically across passes. Regression guard for the inert edge. |
 | 6c | §2.1 no second budget after exhaustion | `test_m5_teardown.py` | On the pass where the budget exhausts: the delivery ends **`done`**, exactly **one** escalation is posted, and **no further teardown turns are dispatched** (assert the dispatch count). Without this, the re-arm lands green — the delivery merely stays `deferred` and buys another `_DELIVERY_MAX_ATTEMPTS` of turns against a closed issue. |
 | 6d | §2.1 archive edge | `test_m5_teardown.py` | Drained ledger + failing `_archive_and_close`, redelivered: attempts increment and exhaust. Guards the `:2585` pop, whose deletion closes a pre-existing unbounded loop. |
+| 6e | §1 (d) busy exit | `test_m5_teardown.py` | A teardown turn returning `role_busy` (and separately `quota_exhausted`): delivery stays **deferred**, `_delivery_attempts` is **unchanged**, and **`_archive_and_close` is not called** (assert it, e.g. by patching). The last assertion is the whole point — a leftover `return True` after the type change passes the first two and archives against a live CLI. |
 | 7 | Live | — | No unit test proves a vendor emits two `result`s for one prompt; (1) simulates it. Live criterion per §2.5: first architect turn after deploy discards **zero `result` frames**. Green tests are not sign-off. |
 | 8 | In-image | — | `_claude_turn_unlocked` is unreachable from the gateway suite. Rebuild → `docker rm -f` the project container → restart → confirm the code is in the *running* image. `ensure_session` adopts a running container regardless of image, so a rebuild alone reads like success. Verify `-r, --resume [value]` on the real binary at 2.1.237 while inside (`--help` on a parent command has misdescribed a subcommand's flags before — #92). |
 
@@ -338,6 +352,7 @@ Regression surface to keep green: the whole of `test_cli_session.py`, `test_publ
 | `--resume` id rejected by the vendor | Poll → `-c` fallback (§1 b′), plus §2.4 for deaths outside the window. |
 | Spawn latency +0.75 s | Once per CLI process lifetime, not per turn. Constant is patchable for tests. |
 | (d) defers forever, or re-arms after exhaustion | §2.1: one budget per delivery, cleared only at completion (`:2284`) or exhaustion (`:2695`), and a three-valued `_run_teardown_turns` so `CLEAN` and `EXHAUSTED` stop being the same `False`. Acceptance (6b)/(6c) are the guards; both bugs pass a single-pass test. |
+| `_run_teardown_turns` return type changed and an exit missed | The table in §1 (d) is the inventory; acceptance (6e) is the guard. A missed exit does not fail loudly — it archives a session mid-turn. |
 | Rollback | (a)–(b′) are one runner file plus a `turn.py` parameter — revert and rebuild the image. (c) and (d) are independent gateway commits, revertible on their own. |
 
 ## 6. Out of scope
