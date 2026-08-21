@@ -3,12 +3,38 @@
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 import threading
 import time
 from pathlib import Path
 
 log = logging.getLogger("agentd.gitops")
+
+# ADR-31 (b): a fetch that hangs under admit_lock blocks every project's drain.
+_FETCH_TIMEOUT_S = 120.0
+# The clone is a different job with a different failure: it runs once, moves the
+# whole history, and has no stale state to fall back on — so it gets its own
+# budget and, unlike the fetch, a timeout there refuses the session.
+_CLONE_TIMEOUT_S = 600.0
+
+
+def _git_env(*, lazy_fetch: bool = True) -> dict[str, str]:
+    """Never prompt; block lazy fetching only where it is a hazard (ADR-31).
+
+    The ADR asks for ``GIT_NO_LAZY_FETCH`` on "the gateway's git invocations".
+    Read literally that breaks ``worktree add``, which on a promisor clone must
+    materialise the blobs the agent is about to edit — verified against the live
+    clone: *fatal: could not fetch … from promisor remote*. The guard belongs on
+    the clone-root maintenance calls, which is where a working-tree touch would
+    silently re-open the hazard (d) closes.
+    """
+    env = dict(os.environ)
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    if not lazy_fetch:
+        env["GIT_NO_LAZY_FETCH"] = "1"
+    return env
+
 
 _repo_locks: dict[str, threading.Lock] = {}
 _repo_locks_guard = threading.Lock()
@@ -125,16 +151,109 @@ def ensure_shared_clone(
         if not (path / ".git").exists() and not (path / "HEAD").exists():
             path.parent.mkdir(parents=True, exist_ok=True)
             url = clone_url or f"https://github.com/{repo_full}.git"
-            log.info("cloning %s → %s", url, path)
+            log.info("cloning %s → %s (timeout %.0fs)", url, path, _CLONE_TIMEOUT_S)
             subprocess.run(
-                ["git", "clone", "--filter=blob:none", url, str(path)],
+                # --no-checkout: the root working tree has no consumer, and
+                # creating it is what makes its index pin objects (ADR-31 (d)).
+                ["git", "clone", "--filter=blob:none", "--no-checkout", url, str(path)],
                 check=True,
                 capture_output=True,
                 text=True,
+                timeout=_CLONE_TIMEOUT_S,
+                env=_git_env(),
             )
         _git(path, "config", "gc.auto", "0")
         _git(path, "config", "worktree.useRelativePaths", "true")
+        if _fetch(path):
+            _sync_default_branch(path)
     return path
+
+
+def _fetch(clone: Path) -> bool:
+    """ADR-31 (b)/(b′): refresh the clone; a failure warns and proceeds.
+
+    Safe to proceed because (a) verifies the base ref exists before use, so a
+    fetch that could not run leaves the base at worst as stale as the last
+    successful one.
+
+    Returns False when *either* call fails, including a ``set-head`` failure
+    after a fetch that did succeed. That skips (d) for a clone which did in fact
+    refresh — deliberate, not an oversight: (d) force-moves a shared ref, and
+    doing that off a default branch we could not confirm is the worse trade.
+    (d) is therefore best-effort on a flaky network, exactly as (b′) is.
+    """
+    for args in (
+        ("fetch", "origin", "--prune"),
+        ("remote", "set-head", "origin", "--auto"),
+    ):
+        try:
+            done = _git(clone, *args, check=False, timeout=_FETCH_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            log.warning("git %s timed out in %s — proceeding stale", args[0], clone)
+            return False
+        if done.returncode != 0:
+            log.warning(
+                "git %s failed in %s (%s) — proceeding stale",
+                args[0],
+                clone,
+                (done.stderr or "").strip()[:200],
+            )
+            return False
+    return True
+
+
+def _sync_default_branch(clone: Path) -> None:
+    """ADR-31 (d): the local default branch is a working ref — agents read it.
+
+    Order matters: re-pointing HEAD first detaches it, which is what lets
+    ``git branch -f`` touch the branch the clone root would otherwise hold.
+    """
+    base = resolve_base_ref(clone)
+    if base == "HEAD":
+        return
+    head = _git(clone, "rev-parse", base, check=False)
+    if head.returncode != 0:
+        return
+    sha = head.stdout.strip()
+    # HEAD by update-ref, never checkout: on a promisor clone checkout spawns a
+    # lazy fetch as its own child, which no timeout of ours can reach.
+    _git(clone, "update-ref", "--no-deref", "HEAD", sha, check=False, lazy_fetch=False)
+    # A stale index is a gc reachability root and pins the trees it names.
+    _git(clone, "read-tree", "--empty", check=False, lazy_fetch=False)
+    default = base.split("/", 1)[1]
+    forced = _git(clone, "branch", "-f", default, base, check=False, lazy_fetch=False)
+    if forced.returncode != 0:
+        log.warning(
+            "left %s in %s stale: %s",
+            default,
+            clone,
+            (forced.stderr or "").strip()[:200],
+        )
+
+
+def resolve_base_ref(clone: Path) -> str:
+    """ADR-31 (a): ``origin/<default>``, or ``HEAD`` when that cannot be verified.
+
+    The fallback is deliberately the local branch this ADR exists to stop
+    reading: it converges on the first successful fetch and claims nothing
+    before it. It is logged so the degraded state is visible, not inferred.
+    """
+    named = _git(
+        clone, "symbolic-ref", "--short", "refs/remotes/origin/HEAD", check=False
+    )
+    base = named.stdout.strip()
+    if (
+        base
+        and _git(clone, "rev-parse", "--verify", "-q", base, check=False).returncode
+        == 0
+    ):
+        return base
+    log.warning(
+        "cannot resolve origin/HEAD in %s (got %r) — basing on HEAD",
+        clone,
+        base,
+    )
+    return "HEAD"
 
 
 def _worktree_already_on_branch(worktree_path: Path, branch: str) -> bool:
@@ -161,6 +280,9 @@ def worktree_add(
     worktree_path.parent.mkdir(parents=True, exist_ok=True)
     with _lock_for(clone):
         t0 = time.perf_counter()
+        # Above the early return: host worktrees outlive ensure_session, so a
+        # live stale resume takes that path and would otherwise log nothing.
+        _log_staleness(clone, branch, base_ref)
         if _worktree_already_on_branch(worktree_path, branch):
             return 0.0
         # Remove stale worktree dir if present
@@ -178,6 +300,9 @@ def worktree_add(
                 clone,
                 "worktree",
                 "add",
+                # A remote-tracking start point would otherwise set an upstream
+                # that base_ref="HEAD" never set (ADR-31 (a)).
+                "--no-track",
                 "-b",
                 branch,
                 str(worktree_path),
@@ -191,6 +316,27 @@ def worktree_add(
             elapsed,
         )
         return elapsed
+
+
+def _log_staleness(clone: Path, branch: str, base_ref: str) -> None:
+    """ADR-31 (c): an existing branch is never re-based — it carries the work.
+
+    Measuring against ``HEAD`` would compare the branch with the ref it was
+    created from and always read 0, so the fallback logs itself instead.
+    """
+    if base_ref == "HEAD":
+        log.warning(
+            "staleness unknown for %s in %s: base fell back to HEAD", branch, clone
+        )
+        return
+    if not _git(clone, "branch", "--list", branch, check=False).stdout.strip():
+        return
+    counted = _git(clone, "rev-list", "--count", f"{branch}..{base_ref}", check=False)
+    if counted.returncode != 0:
+        return
+    behind = counted.stdout.strip()
+    if behind and behind != "0":
+        log.warning("%s in %s is %s commits behind %s", branch, clone, behind, base_ref)
 
 
 def local_branch_gone(clone: Path, branch: str) -> bool:
@@ -208,11 +354,19 @@ def local_branch_gone(clone: Path, branch: str) -> bool:
     return not bool((listed.stdout or "").strip())
 
 
-def _git(cwd: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+def _git(
+    cwd: Path,
+    *args: str,
+    check: bool = True,
+    timeout: float | None = None,
+    lazy_fetch: bool = True,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", *args],
         cwd=str(cwd),
         check=check,
         capture_output=True,
         text=True,
+        timeout=timeout,
+        env=_git_env(lazy_fetch=lazy_fetch),
     )

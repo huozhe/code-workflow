@@ -23,6 +23,7 @@ from agentd.gitops import (
     project_dir_name,
     project_key_from_repo,
     project_path,
+    resolve_base_ref,
     worktree_add,
 )
 from agentd.keychain import get_password
@@ -824,8 +825,9 @@ class SessionSupervisor:
         wt_arch = issue_host / "architect" / "worktrees" / f"issue-{issue_num}"
         wt_dev = issue_host / "developer" / "worktrees" / f"issue-{issue_num}"
         branch_prefix = f"agentd/{project_dir_name(repo)}/{issue_num}"
-        worktree_add(clone, wt_arch, f"{branch_prefix}/architect")
-        worktree_add(clone, wt_dev, f"{branch_prefix}/developer")
+        base_ref = resolve_base_ref(clone)
+        worktree_add(clone, wt_arch, f"{branch_prefix}/architect", base_ref=base_ref)
+        worktree_add(clone, wt_dev, f"{branch_prefix}/developer", base_ref=base_ref)
         return proj
 
     def _register_session_layout_artifacts(
