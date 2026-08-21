@@ -13,6 +13,10 @@ log = logging.getLogger("agentd.gitops")
 
 # ADR-31 (b): a fetch that hangs under admit_lock blocks every project's drain.
 _FETCH_TIMEOUT_S = 120.0
+# The clone is a different job with a different failure: it runs once, moves the
+# whole history, and has no stale state to fall back on — so it gets its own
+# budget and, unlike the fetch, a timeout there refuses the session.
+_CLONE_TIMEOUT_S = 600.0
 
 
 def _git_env(*, lazy_fetch: bool = True) -> dict[str, str]:
@@ -147,7 +151,7 @@ def ensure_shared_clone(
         if not (path / ".git").exists() and not (path / "HEAD").exists():
             path.parent.mkdir(parents=True, exist_ok=True)
             url = clone_url or f"https://github.com/{repo_full}.git"
-            log.info("cloning %s → %s", url, path)
+            log.info("cloning %s → %s (timeout %.0fs)", url, path, _CLONE_TIMEOUT_S)
             subprocess.run(
                 # --no-checkout: the root working tree has no consumer, and
                 # creating it is what makes its index pin objects (ADR-31 (d)).
@@ -155,7 +159,7 @@ def ensure_shared_clone(
                 check=True,
                 capture_output=True,
                 text=True,
-                timeout=_FETCH_TIMEOUT_S,
+                timeout=_CLONE_TIMEOUT_S,
                 env=_git_env(),
             )
         _git(path, "config", "gc.auto", "0")
@@ -171,6 +175,12 @@ def _fetch(clone: Path) -> bool:
     Safe to proceed because (a) verifies the base ref exists before use, so a
     fetch that could not run leaves the base at worst as stale as the last
     successful one.
+
+    Returns False when *either* call fails, including a ``set-head`` failure
+    after a fetch that did succeed. That skips (d) for a clone which did in fact
+    refresh — deliberate, not an oversight: (d) force-moves a shared ref, and
+    doing that off a default branch we could not confirm is the worse trade.
+    (d) is therefore best-effort on a flaky network, exactly as (b′) is.
     """
     for args in (
         ("fetch", "origin", "--prune"),

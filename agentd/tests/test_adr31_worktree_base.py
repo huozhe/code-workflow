@@ -405,6 +405,31 @@ def test_update_is_skipped_when_a_worktree_holds_the_default_branch(
     assert (root / "wt").exists(), "a refused branch update must not refuse the session"
 
 
+def test_new_clone_keeps_the_blob_filter_and_creates_no_working_tree(
+    tmp_path: Path,
+) -> None:
+    """(8) ``--no-checkout`` is not cosmetic — a checkout defeats the filter.
+
+    A clone that checks out materialises **every** blob, so ``--filter=blob:none``
+    buys nothing and the root gains a working tree with no consumer. Measured on
+    this fixture: with a checkout ``missing=0``, without one ``missing=3``.
+
+    ``read-tree --empty`` empties the index either way, so the index assertion in
+    the item below cannot tell the two apart — the missing-object count is the
+    half that proves the filter still holds.
+    """
+    src = _source(tmp_path, bare_for_filter=True)
+    _advance(src, "three")
+    root = tmp_path / "root"
+
+    clone = ensure_shared_clone(root, REPO, clone_url=f"file://{src}")
+
+    assert _missing(clone) > 0, "clone materialised every blob — the filter is defeated"
+    assert not [p for p in clone.iterdir() if p.name != ".git"], (
+        "root has a working tree"
+    )
+
+
 # ------------------------------------------------------------------- item 9
 
 
