@@ -95,8 +95,9 @@ _AUTHOR_PR_EVENTS = frozenset(
 )
 _VERDICT_REVIEW_STATES = frozenset({"APPROVED", "CHANGES_REQUESTED"})
 _MERGE_KINDS = frozenset({"design_merged", "feature_merged"})
-# ADR-30 (c): spent is a one-way door. Remember (repo, pr) already seen
-# merged/closed so a delivery behind a busy role does not re-GET every tick.
+# ADR-30 (c): merged is a one-way door. Remember (repo, pr) already seen
+# merged so a delivery behind a busy role does not re-GET every tick.
+# Closed is not cached — a closed PR can reopen.
 _spent_prs: set[tuple[str, int]] = set()
 
 # §8.4 merge-auth transient retries (PR #54 B1): delivery_id → attempt count.
@@ -1381,7 +1382,10 @@ class DesignLoop:
         return True
 
     def _pr_is_spent(self, repo: str, pr_number: int) -> bool:
-        """True when the forge says the PR is merged or closed (ADR-30 (c))."""
+        """True when the forge says the PR is merged or closed (ADR-30 (c)).
+
+        Only ``merged`` is cached. ``closed`` is re-read: a closed PR can reopen.
+        """
         key = (repo, int(pr_number))
         if key in _spent_prs:
             return True
@@ -1398,10 +1402,11 @@ class DesignLoop:
             return False
         if not isinstance(pr, dict):
             return False
-        spent = bool(pr.get("merged")) or str(pr.get("state") or "") == "closed"
-        if spent:
+        merged = bool(pr.get("merged"))
+        if merged:
             _spent_prs.add(key)
-        return spent
+            return True
+        return str(pr.get("state") or "") == "closed"
 
     def _github_api_token(self) -> str | None:
         """Token for gateway-initiated GitHub *reads* (stall observation).

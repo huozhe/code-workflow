@@ -454,8 +454,8 @@ def test_owner_comment_and_review_on_owner_authored_pr_still_route(
     store.close()
 
 
-def test_spent_pr_fetch_skipped_once_already_closed(tmp_path: Path) -> None:
-    """Spent is a one-way door: do not re-GET a PR already seen merged/closed."""
+def test_spent_pr_fetch_skipped_once_already_merged(tmp_path: Path) -> None:
+    """Merged is a one-way door: do not re-GET a PR already seen merged."""
     store = Store(tmp_path / "state.db")
     _seed(store, state="DESIGN_REWORK")
     calls: list[int] = []
@@ -487,6 +487,59 @@ def test_spent_pr_fetch_skipped_once_already_closed(tmp_path: Path) -> None:
         )
         loop.process_deferred_batch(limit=5)
     assert calls == [170]
+    store.close()
+
+
+def test_closed_then_reopened_pr_is_not_spent_forever(tmp_path: Path) -> None:
+    """Closed is not a one-way door — a closed PR can reopen; re-GET it."""
+    store = Store(tmp_path / "state.db")
+    _seed(store, state="DESIGN_REWORK")
+    calls: list[int] = []
+    pr_state: dict[str, str | bool] = {"merged": False, "state": "closed"}
+
+    def fetch(**kw: Any) -> dict[str, str | bool]:
+        calls.append(1)
+        return dict(pr_state)
+
+    loop = _loop(store, tmp_path, fetch_pr=fetch)
+    payload = {
+        "action": "synchronize",
+        "pull_request": {
+            "number": 170,
+            "user": {"login": "huozheclaude"},
+            "head": {"sha": "abc", "ref": _design_ref(169)},
+            "merged": False,
+        },
+        "sender": {"login": "huozheclaude"},
+        "repository": {"full_name": "huozhe/code-workflow"},
+    }
+    _insert(
+        store,
+        did="d-closed",
+        event="pull_request",
+        action="synchronize",
+        sender="huozheclaude",
+        issue=170,
+        payload=payload,
+    )
+    loop.process_deferred_batch(limit=5)
+    assert loop.dispatched == []  # type: ignore[attr-defined]
+    assert calls == [1]
+
+    pr_state.update({"merged": False, "state": "open"})
+    _insert(
+        store,
+        did="d-reopened",
+        event="pull_request",
+        action="synchronize",
+        sender="huozheclaude",
+        issue=170,
+        payload=payload,
+    )
+    loop.process_deferred_batch(limit=5)
+    assert len(loop.dispatched) == 1  # type: ignore[attr-defined]
+    assert loop.dispatched[0]["delivery_id"] == "d-reopened"  # type: ignore[attr-defined]
+    assert calls == [1, 1]
     store.close()
 
 
