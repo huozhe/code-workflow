@@ -83,6 +83,23 @@ _REVIEW_PART_EVENTS = frozenset(
     }
 )
 
+# ADR-30 / #173: author-sent events about their own PR are not the counterpart's cue.
+# pull_request_review_comment is listed so the enum is closed; _REVIEW_PART_EVENTS
+# already returns done for it one block above, so that arm is unreachable here.
+_AUTHOR_PR_EVENTS = frozenset(
+    {
+        "pull_request_review",
+        "pull_request_review_comment",
+        "issue_comment",
+    }
+)
+_VERDICT_REVIEW_STATES = frozenset({"APPROVED", "CHANGES_REQUESTED"})
+_MERGE_KINDS = frozenset({"design_merged", "feature_merged"})
+# ADR-30 (c): merged is a one-way door. Remember (repo, pr) already seen
+# merged so a delivery behind a busy role does not re-GET every tick.
+# Closed is not cached — a closed PR can reopen.
+_spent_prs: set[tuple[str, int]] = set()
+
 # §8.4 merge-auth transient retries (PR #54 B1): delivery_id → attempt count.
 # In-memory is enough — restart resets the counter (more retries, not less).
 _merge_auth_attempts: dict[str, int] = {}
@@ -270,6 +287,48 @@ def _payload_dict(raw: bytes) -> dict[str, Any]:
         return {}
 
 
+def _pr_author_login(event: str, data: dict[str, Any]) -> str | None:
+    """PR author for ADR-30. issue_comment carries it on issue.user, not pull_request.user."""
+    if event in ("pull_request_review", "pull_request_review_comment"):
+        login = str(json_obj(json_obj(data.get("pull_request")).get("user")).get("login") or "")
+        return login or None
+    if event == "issue_comment":
+        issue = json_obj(data.get("issue"))
+        if not isinstance(issue.get("pull_request"), dict):
+            return None
+        login = str(json_obj(issue.get("user")).get("login") or "")
+        return login or None
+    return None
+
+
+def _pr_number_from_payload(
+    event: str, data: dict[str, Any], issue_num: int
+) -> int | None:
+    """PR number for a PR-scoped event, or None (session-issue comments, issues.*)."""
+    if event in (
+        "pull_request",
+        "pull_request_review",
+        "pull_request_review_comment",
+        "pull_request_review_thread",
+    ):
+        try:
+            return int(json_obj(data.get("pull_request")).get("number") or issue_num)
+        except (TypeError, ValueError):
+            return None
+    if event == "issue_comment":
+        issue = json_obj(data.get("issue"))
+        if not isinstance(issue.get("pull_request"), dict):
+            return None
+        raw_n = issue.get("number")
+        if raw_n is None:
+            return None
+        try:
+            return int(raw_n)
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
 class DesignLoop:
     """Processes deferred deliveries into session turns for the design half."""
 
@@ -285,6 +344,7 @@ class DesignLoop:
         gateway_token: str | None = None,
         fetch_threads: Any | None = None,
         fetch_diff: Any | None = None,
+        fetch_pr: Any | None = None,
         github_token: str | None = None,
         get_issue_body_fn: Any | None = None,
         get_issue_fn: Any | None = None,
@@ -300,6 +360,7 @@ class DesignLoop:
         self._gateway_token = gateway_token
         self._fetch_threads = fetch_threads
         self._fetch_diff = fetch_diff
+        self._fetch_pr = fetch_pr
         self._github_token = github_token
         self._get_issue_body = get_issue_body_fn
         self._get_issue = get_issue_fn
@@ -450,6 +511,41 @@ class DesignLoop:
                 action,
             )
             return
+
+        # ADR-30 / #173: ahead of paused defer and _event_kind. Verdicts alarm
+        # and fall through — GitHub forbids author APPROVE/REQUEST_CHANGES today.
+        # (a⁗): owner is a precondition, not a drop. §9.1 rule 2 (owner → Route,
+        # reset consec) never runs if we mark done here. Sender == author is also
+        # true when @owner comments on an owner-authored PR (#177).
+        if event in _AUTHOR_PR_EVENTS:
+            pr_author = _pr_author_login(event, data)
+            owner = str(self.config.owner or "")
+            if (
+                pr_author
+                and sender.lower() == pr_author.lower()
+                and sender.lower() != owner.lower()
+            ):
+                review_st = str(json_obj(data.get("review")).get("state") or "").upper()
+                if event == "pull_request_review" and review_st in _VERDICT_REVIEW_STATES:
+                    log.warning(
+                        "author-sent verdict routed id=%s event=%s action=%s "
+                        "state=%s pr_author=%s — drop would swallow an FSM kind",
+                        delivery_id,
+                        event,
+                        action,
+                        review_st,
+                        pr_author,
+                    )
+                else:
+                    self.store.set_delivery_status(delivery_id, "done")
+                    log.info(
+                        "delivery done id=%s event=%s action=%s — author-sent PR "
+                        "event, no turn (#173)",
+                        delivery_id,
+                        event,
+                        action,
+                    )
+                    return
 
         architect = str(sess.get("architect") or default_arch)
         developer = str(sess.get("developer") or default_dev)
@@ -784,6 +880,21 @@ class DesignLoop:
                 kind,
             )
             return
+
+        # ADR-30 (c): sibling of the terminal gate, not a widening of it.
+        # After FSM so P1 records; before stall / DROP / dispatch.
+        if kind not in _MERGE_KINDS:
+            pr_n = _pr_number_from_payload(event, data, int(issue_num))
+            if pr_n is not None and self._pr_is_spent(repo, pr_n):
+                self.store.set_delivery_status(delivery_id, "done")
+                log.info(
+                    "no turn id=%s session=%s — PR %s spent (%s) (#173)",
+                    delivery_id,
+                    session_key,
+                    pr_n,
+                    kind,
+                )
+                return
 
         # ADR-17: hold blocks every ordinary turn (reopen included).
         if _close_reconcile_held(state, sess):
@@ -1269,6 +1380,33 @@ class DesignLoop:
             session_key,
         )
         return True
+
+    def _pr_is_spent(self, repo: str, pr_number: int) -> bool:
+        """True when the forge says the PR is merged or closed (ADR-30 (c)).
+
+        Only ``merged`` is cached. ``closed`` is re-read: a closed PR can reopen.
+        """
+        key = (repo, int(pr_number))
+        if key in _spent_prs:
+            return True
+        fetch = self._fetch_pr
+        if fetch is None:
+            return False
+        token = self._github_api_token()
+        if not token:
+            return False
+        try:
+            pr = fetch(repo=repo, pr_number=pr_number, token=token)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("spent-PR fetch failed repo=%s pr=%s: %s", repo, pr_number, exc)
+            return False
+        if not isinstance(pr, dict):
+            return False
+        merged = bool(pr.get("merged"))
+        if merged:
+            _spent_prs.add(key)
+            return True
+        return str(pr.get("state") or "") == "closed"
 
     def _github_api_token(self) -> str | None:
         """Token for gateway-initiated GitHub *reads* (stall observation).
