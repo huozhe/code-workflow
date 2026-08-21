@@ -84,6 +84,8 @@ _REVIEW_PART_EVENTS = frozenset(
 )
 
 # ADR-30 / #173: author-sent events about their own PR are not the counterpart's cue.
+# pull_request_review_comment is listed so the enum is closed; _REVIEW_PART_EVENTS
+# already returns done for it one block above, so that arm is unreachable here.
 _AUTHOR_PR_EVENTS = frozenset(
     {
         "pull_request_review",
@@ -93,6 +95,9 @@ _AUTHOR_PR_EVENTS = frozenset(
 )
 _VERDICT_REVIEW_STATES = frozenset({"APPROVED", "CHANGES_REQUESTED"})
 _MERGE_KINDS = frozenset({"design_merged", "feature_merged"})
+# ADR-30 (c): spent is a one-way door. Remember (repo, pr) already seen
+# merged/closed so a delivery behind a busy role does not re-GET every tick.
+_spent_prs: set[tuple[str, int]] = set()
 
 # §8.4 merge-auth transient retries (PR #54 B1): delivery_id → attempt count.
 # In-memory is enough — restart resets the counter (more retries, not less).
@@ -508,9 +513,17 @@ class DesignLoop:
 
         # ADR-30 / #173: ahead of paused defer and _event_kind. Verdicts alarm
         # and fall through — GitHub forbids author APPROVE/REQUEST_CHANGES today.
+        # (a⁗): owner is a precondition, not a drop. §9.1 rule 2 (owner → Route,
+        # reset consec) never runs if we mark done here. Sender == author is also
+        # true when @owner comments on an owner-authored PR (#177).
         if event in _AUTHOR_PR_EVENTS:
             pr_author = _pr_author_login(event, data)
-            if pr_author and sender.lower() == pr_author.lower():
+            owner = str(self.config.owner or "")
+            if (
+                pr_author
+                and sender.lower() == pr_author.lower()
+                and sender.lower() != owner.lower()
+            ):
                 review_st = str(json_obj(data.get("review")).get("state") or "").upper()
                 if event == "pull_request_review" and review_st in _VERDICT_REVIEW_STATES:
                     log.warning(
@@ -1369,6 +1382,9 @@ class DesignLoop:
 
     def _pr_is_spent(self, repo: str, pr_number: int) -> bool:
         """True when the forge says the PR is merged or closed (ADR-30 (c))."""
+        key = (repo, int(pr_number))
+        if key in _spent_prs:
+            return True
         fetch = self._fetch_pr
         if fetch is None:
             return False
@@ -1382,7 +1398,10 @@ class DesignLoop:
             return False
         if not isinstance(pr, dict):
             return False
-        return bool(pr.get("merged")) or str(pr.get("state") or "") == "closed"
+        spent = bool(pr.get("merged")) or str(pr.get("state") or "") == "closed"
+        if spent:
+            _spent_prs.add(key)
+        return spent
 
     def _github_api_token(self) -> str | None:
         """Token for gateway-initiated GitHub *reads* (stall observation).

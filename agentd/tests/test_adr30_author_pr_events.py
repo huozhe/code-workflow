@@ -6,6 +6,9 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
+import agentd.design_loop as design_loop_mod
 from agentd.config import Config
 from agentd.db import Store
 from agentd.design_loop import DesignLoop
@@ -15,6 +18,13 @@ from agentd.gitops import role_branch_name
 _FIXTURE = (
     Path(__file__).resolve().parent / "fixtures" / "adr30_author_review.json"
 )
+
+
+@pytest.fixture(autouse=True)
+def _clear_spent_prs() -> None:
+    design_loop_mod._spent_prs.clear()
+    yield
+    design_loop_mod._spent_prs.clear()
 
 
 def _cfg(tmp: Path) -> Config:
@@ -383,6 +393,100 @@ def test_spent_synchronize_records_fsm_and_dispatches_no_turn(
     assert sess["state"] == "DESIGN_REVIEW"
     assert sess["state"] not in TERMINAL_STATES
     assert loop.dispatched == []  # type: ignore[attr-defined]
+    store.close()
+
+
+def test_owner_comment_and_review_on_owner_authored_pr_still_route(
+    tmp_path: Path,
+) -> None:
+    """ADR-30 (a⁗) / acceptance (6): owner is not dropped.
+
+    sender == author == owner. Both events dispatch one turn. The unpause
+    path never reaches this gate (session issue has no issue.pull_request).
+    """
+    store = Store(tmp_path / "state.db")
+    _seed(store)
+    loop = _loop(store, tmp_path)
+    _insert(
+        store,
+        did="d-owner-cmt",
+        event="issue_comment",
+        action="created",
+        sender="huozhe",
+        issue=170,
+        payload={
+            "action": "created",
+            "issue": {
+                "number": 170,
+                "user": {"login": "huozhe"},
+                "pull_request": {"url": "https://api.github.com/repos/x/pulls/170"},
+            },
+            "comment": {"id": 9, "body": "please proceed"},
+            "sender": {"login": "huozhe"},
+            "repository": {"full_name": "huozhe/code-workflow"},
+        },
+    )
+    _insert(
+        store,
+        did="d-owner-rev",
+        event="pull_request_review",
+        action="submitted",
+        sender="huozhe",
+        issue=170,
+        payload={
+            "action": "submitted",
+            "review": {"id": 8, "state": "commented", "body": None},
+            "pull_request": {
+                "number": 170,
+                "user": {"login": "huozhe"},
+                "head": {"sha": "abc", "ref": _design_ref(169)},
+            },
+            "sender": {"login": "huozhe"},
+            "repository": {"full_name": "huozhe/code-workflow"},
+        },
+    )
+    loop.process_deferred_batch(limit=10)
+    ids = [c["delivery_id"] for c in loop.dispatched]  # type: ignore[attr-defined]
+    assert ids == ["d-owner-cmt", "d-owner-rev"] or set(ids) == {
+        "d-owner-cmt",
+        "d-owner-rev",
+    }
+    store.close()
+
+
+def test_spent_pr_fetch_skipped_once_already_closed(tmp_path: Path) -> None:
+    """Spent is a one-way door: do not re-GET a PR already seen merged/closed."""
+    store = Store(tmp_path / "state.db")
+    _seed(store, state="DESIGN_REWORK")
+    calls: list[int] = []
+
+    def fetch(**kw: Any) -> dict[str, str | bool]:
+        calls.append(int(kw["pr_number"]))
+        return {"merged": True, "state": "closed"}
+
+    loop = _loop(store, tmp_path, fetch_pr=fetch)
+    for i in range(2):
+        _insert(
+            store,
+            did=f"d-spent-sync-{i}",
+            event="pull_request",
+            action="synchronize",
+            sender="huozheclaude",
+            issue=170,
+            payload={
+                "action": "synchronize",
+                "pull_request": {
+                    "number": 170,
+                    "user": {"login": "huozheclaude"},
+                    "head": {"sha": "abc", "ref": _design_ref(169)},
+                    "merged": False,
+                },
+                "sender": {"login": "huozheclaude"},
+                "repository": {"full_name": "huozhe/code-workflow"},
+            },
+        )
+        loop.process_deferred_batch(limit=5)
+    assert calls == [170]
     store.close()
 
 
