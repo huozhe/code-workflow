@@ -284,6 +284,30 @@ def fetch_session_snapshot(
     }
 
 
+def fetch_pull(
+    *,
+    repo: str,
+    pr_number: int,
+    token: str | None,
+    http_get: Callable[..., Any] | None = None,
+) -> dict[str, Any] | None:
+    """REST GET /repos/{repo}/pulls/{n} — merged/state for ADR-30 (c)."""
+    if not token or not repo or not pr_number:
+        return None
+    get = http_get or _gh_get
+    try:
+        pr = get(f"https://api.github.com/repos/{repo}/pulls/{int(pr_number)}", token=token)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("pull fetch failed repo=%s pr=%s: %s", repo, pr_number, exc)
+        return None
+    if not isinstance(pr, dict):
+        return None
+    return {
+        "merged": bool(pr.get("merged")),
+        "state": str(pr.get("state") or ""),
+    }
+
+
 def _gh_get(url: str, *, token: str) -> Any:
     with httpx.Client(timeout=30.0) as client:
         r = client.get(

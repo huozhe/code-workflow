@@ -1,0 +1,26 @@
+{
+  "action": "submitted",
+  "review": {
+    "id": 4985719958,
+    "state": "commented",
+    "body": null,
+    "commit_id": "15144080f7467ef1838932560d0f1d7995bb79b0"
+  },
+  "pull_request": {
+    "number": 170,
+    "user": {
+      "login": "huozheclaude"
+    },
+    "head": {
+      "sha": "15144080f7467ef1838932560d0f1d7995bb79b0",
+      "ref": "agentd/huozhe__code-workflow/169/architect"
+    },
+    "title": "Design: RFC 169 \u2014 implementation binding for ADR-29 (held pipe turn boundary)"
+  },
+  "repository": {
+    "full_name": "huozhe/code-workflow"
+  },
+  "sender": {
+    "login": "huozheclaude"
+  }
+}

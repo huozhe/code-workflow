@@ -83,11 +83,16 @@ def create_app(
             sup = None
             try:
                 from agentd.design_loop import DesignLoop
+                from agentd.github_fetch import fetch_pull
                 from agentd.supervisor import SessionSupervisor, image_present
 
                 sup = SessionSupervisor(store, config) if image_present() else None
                 design_loop = DesignLoop(
-                    store, config, sup, dispatch_turns=sup is not None
+                    store,
+                    config,
+                    sup,
+                    dispatch_turns=sup is not None,
+                    fetch_pr=fetch_pull,
                 )
             except Exception:
                 log.exception("design_loop init failed; deferred deliveries stay parked")
