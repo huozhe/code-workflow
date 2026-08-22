@@ -387,21 +387,48 @@ class GarbageCollector:
         return False
 
     def _sweep_containers(self, report: dict[str, Any]) -> None:
-        """Report managed containers only. Reconciler owns removal (ADR-20 / #116)."""
+        """Report managed containers only. Reconciler owns removal (ADR-20 / #116).
+
+        §12.3 as amended by ADR-34: a **stopped** managed container whose
+        project has a `runners` row and a non-terminal session is live COLD
+        state, not debris — COLD *is* a deliberately stopped container (§6.5).
+        §12.3's "prune stopped containers carrying `label=agentd.managed=true`"
+        would delete exactly that, which is ADR-25's delayed rebuild recreated
+        in a second component. This sweep removes nothing today; it carries the project
+        label so the distinction has a name — and a test — before any component
+        writes `tier='cold'`.
+        """
         try:
             raw = self.list_containers()
         except Exception:
             log.exception("gc container inventory failed")
             return
+        live = self.store.live_project_keys()
         for c in raw:
             if not _is_managed(c):
                 continue
             name = str(c.get("name") or "")
+            labels = c.get("labels") or {}
+            project = str(labels.get("agentd.project") or "")
+            running = bool(c.get("running"))
+            owned = bool(
+                project
+                and project in live
+                and self.store.get_runner(project) is not None
+            )
+            if not owned:
+                owner = "unowned"
+            elif running:
+                owner = "live"
+            else:
+                owner = "live-cold"
             report["containers"].append(
                 {
                     "name": name,
                     "id": str(c.get("id") or ""),
-                    "running": bool(c.get("running")),
+                    "project": project,
+                    "running": running,
+                    "owner": owner,
                 }
             )
 

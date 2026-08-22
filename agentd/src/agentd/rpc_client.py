@@ -6,6 +6,8 @@ import itertools
 import json
 import logging
 import socket
+from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import IO, Any, Self
 
 # ADR-29 (c): process-unique request ids. Per-instance counters reset on every
@@ -121,3 +123,73 @@ class RunnerClient:
                 err = resp["error"]
                 raise RpcError(int(err.get("code", -1)), str(err.get("message", "")))
             return resp.get("result")
+
+
+@dataclass(frozen=True)
+class ProbeResult:
+    """One probe, three answers: serviceable, why not, and the reply (ADR-34)."""
+
+    serviceable: bool
+    reason: str
+    payload: dict[str, Any] | None = None
+
+
+def probe_runner(
+    runner: Mapping[str, Any],
+    *,
+    timeout_s: float = 2.0,
+    client_cls: type[RunnerClient] | None = None,
+) -> ProbeResult:
+    """Serviceable ping — answering is not enough (ADR-25), shared by both callers.
+
+    The reason is derived from *where* the probe failed, not from a flag, because
+    a stale ``runners.endpoint`` (which does not survive stop/start — ADR-25) is a
+    running, initialised runner that fails at connect and would otherwise log
+    identically to one that answered ``initialized: false``:
+
+    ``attached``      serviceable.
+    ``no_endpoint``   the row cannot address a runner. No connect attempted; an
+                      unparseable row must not read as a container in trouble.
+    ``unreachable``   the transport failed — stale endpoint, or a dead process
+                      behind a live port mapping.
+    ``unauthorized``  it is alive and answering, but rejected our bearer. Kept
+                      apart from ``unreachable`` because it is the one cause
+                      lazy promotion does **not** repair: ``promote_hot``
+                      reuses ``runners.token``, so the ping fails again inside
+                      ``_ensure_session_locked`` and the adopt branch recreates
+                      — `docker rm -f` on a healthy runner holding both roles'
+                      conversation.
+    ``uninitialised`` it answered but cannot serve a turn (the post-reboot case).
+
+    ``stopped`` is the caller's to report and must be reached without a socket;
+    see ``Reconciler._probe_attachments`` (ADR-34 acceptance (11)).
+
+    ``client_cls`` is the transport seam. Callers pass their own module's
+    ``RunnerClient`` so a test that patches it there keeps intercepting this
+    probe as well as that module's other RPC — the predicate moved modules, the
+    seams did not.
+    """
+    endpoint = str(runner.get("endpoint") or "")
+    host, _, port_s = endpoint.partition(":")
+    token = str(runner.get("token") or runner.get("runner_token") or "")
+    if not host or not port_s or not token:
+        return ProbeResult(False, "no_endpoint")
+    try:
+        port = int(port_s)
+    except ValueError:
+        return ProbeResult(False, "no_endpoint")
+    try:
+        cls = client_cls or RunnerClient
+        with cls(host, port, token, timeout_s=timeout_s) as cli:
+            ping = cli.call("health.ping")
+    except RpcError as exc:
+        # Typed code, never the message text (#35). `-32001` also spells "not
+        # attached" and "first frame must be session.attach" in the runner, so
+        # the code is unambiguous *here* only because this probe's first frame
+        # is always `session.attach` — it is not unambiguous in general.
+        return ProbeResult(False, "unauthorized" if exc.code == -32001 else "unreachable")
+    except Exception:  # noqa: BLE001 — ping probe
+        return ProbeResult(False, "unreachable")
+    if isinstance(ping, dict) and ping.get("initialized") is True:
+        return ProbeResult(True, "attached", ping)
+    return ProbeResult(False, "uninitialised", ping if isinstance(ping, dict) else None)

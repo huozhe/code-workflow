@@ -60,7 +60,7 @@ from agentd.routing import (
     provenance_footer,
     route_for_recipient,
 )
-from agentd.rpc_client import RunnerClient
+from agentd.rpc_client import RunnerClient, probe_runner
 from agentd.supervisor import SessionSupervisor
 from agentd.verification import (
     checkbox_is_checked,
@@ -1084,22 +1084,13 @@ class DesignLoop:
         )
 
     def _runner_reachable(self, runner: dict[str, Any]) -> bool:
-        """Serviceable ping — answering is not enough (ADR-25)."""
-        endpoint = str(runner.get("endpoint") or "")
-        host, _, port_s = endpoint.partition(":")
-        token = str(runner.get("token") or runner.get("runner_token") or "")
-        if not host or not port_s or not token:
-            return False
-        try:
-            port = int(port_s)
-        except ValueError:
-            return False
-        try:
-            with RunnerClient(host, port, token, timeout_s=2.0) as cli:
-                ping = cli.call("health.ping")
-            return isinstance(ping, dict) and ping.get("initialized") is True
-        except Exception:  # noqa: BLE001 — ping probe
-            return False
+        """Serviceable ping — answering is not enough (ADR-25).
+
+        One call site's convenience over the shared predicate, not a second
+        implementation (ADR-34): this path needs only the verdict, the
+        reconciler needs the reason and the payload.
+        """
+        return probe_runner(runner, client_cls=RunnerClient).serviceable
 
     def _observed_progress(
         self,
