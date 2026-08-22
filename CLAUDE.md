@@ -33,3 +33,10 @@ Every real defect on this project was found by **running** the code, not reading
 entry point, verify inside the image when the change is in the runner, and confirm a new test fails
 with its fix reverted. `--help` lies. Expect the counterpart's review to find a real defect, and expect
 your own ADR to be wrong somewhere.
+
+**A null or green result is only as good as its fixture.** Before believing "cannot reproduce" — or a
+passing test — prove the fixture reproduces the property first. A stub that bypasses the mechanism under
+test, a query that crosses sessions, a git fixture that is not a promisor repo, a poll loop whose filter
+errors, and a test named for a case it does not cover all look exactly like good news. Each of those has
+produced a confident wrong answer here, several on the same day. Assert the property in the fixture, then
+assert the behaviour.
