@@ -1403,6 +1403,23 @@ class Store:
             )
             self._conn.commit()
 
+    def touch_runner_seen(self, project_key: str, *, now: int | None = None) -> int:
+        """Stamp `last_seen_at` alone (ADR-34 step 7).
+
+        Deliberately not `upsert_runner`: that rewrites `tier`, `endpoint` and
+        `token` from whatever the caller happens to hold, and the reconciler
+        holds a row it read at the top of the pass. A probe must never be able
+        to move `tier`.
+        """
+        ts = int(time.time()) if now is None else int(now)
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE runners SET last_seen_at = ? WHERE project_key = ?",
+                (ts, project_key),
+            )
+            self._conn.commit()
+            return int(cur.rowcount or 0)
+
     def open_project_block(
         self,
         *,

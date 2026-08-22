@@ -20,6 +20,8 @@ from agentd.design_loop import (
     _inflight_turn_ids,
 )
 from agentd.fsm import transition
+from agentd.rpc_client import ProbeResult
+from agentd.rpc_client import probe_runner as _probe_runner_default
 from agentd.verification import checkbox_is_checked
 
 log = logging.getLogger("agentd.reconciler")
@@ -36,6 +38,7 @@ NON_RUNNING_STATES = frozenset({"PAUSED_HUMAN", "TEARDOWN", "CLOSED"})
 RESUME_MAX_ATTEMPTS = 2
 
 ListContainers = Callable[[], list[dict[str, Any]]]
+ProbeFn = Callable[[dict[str, Any]], ProbeResult]
 RemoveContainer = Callable[[str], None]
 NudgeFn = Callable[[], None]
 FetchSnapshot = Callable[[dict[str, Any]], dict[str, Any] | None]
@@ -113,13 +116,17 @@ def list_managed_containers() -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for obj in data:
         labels = (obj.get("Config") or {}).get("Labels") or {}
+        state = obj.get("State") or {}
         out.append(
             {
                 "id": str(obj.get("Id") or ""),
                 "project": str(labels.get("agentd.project") or ""),
-                "started_at": _parse_started_at(
-                    str((obj.get("State") or {}).get("StartedAt") or "")
-                ),
+                "started_at": _parse_started_at(str(state.get("StartedAt") or "")),
+                # ADR-34: not the trigger — the probe is. It buys the `stopped`
+                # reason without a socket, and `--restart unless-stopped` means
+                # a rebooted container is running, so this is never a proxy for
+                # serviceable.
+                "running": bool(state.get("Running")),
             }
         )
     return out
@@ -143,6 +150,7 @@ class Reconciler:
         *,
         list_containers: ListContainers | None = None,
         remove_container: RemoveContainer | None = None,
+        probe_runner: ProbeFn | None = None,
         nudge: NudgeFn | None = None,
         fetch_snapshot: FetchSnapshot | None = None,
         escalate: EscalateFn | None = None,
@@ -155,6 +163,7 @@ class Reconciler:
         self.store = store
         self.list_containers = list_containers or list_managed_containers
         self.remove_container = remove_container or _docker_rm
+        self.probe_runner = probe_runner or _probe_runner_default
         self.nudge = nudge
         self.fetch_snapshot = fetch_snapshot
         self.escalate = escalate
@@ -194,7 +203,8 @@ class Reconciler:
         log.info(
             "reconcile pass containers=%d kept=%d spared=%d removed=%d cleared=%d "
             "open_turns=%d closed_live=%d nodes=%d synthesized=%d capped=%d "
-            "adopted=%d escalated=%d retired=%d resumed=%d in %dms",
+            "adopted=%d escalated=%d retired=%d resumed=%d "
+            "attached=%d unattached=%d probe_skipped=%d in %dms",
             containers,
             kept,
             len(report["spared"]),
@@ -209,6 +219,9 @@ class Reconciler:
             int(report.get("escalated") or 0),
             int(report.get("retired") or 0),
             int(report.get("resumed") or 0),
+            len(report.get("attached") or []),
+            len(report.get("unattached") or []),
+            len(report.get("probe_skipped") or []),
             ms,
         )
 
@@ -231,6 +244,9 @@ class Reconciler:
             "holds_lifted": 0,
             "retired": 0,
             "resumed": 0,
+            "attached": [],
+            "unattached": [],
+            "probe_skipped": [],
         }
         for row in report["closed_live"]:
             sk = str(row.get("session_key") or "")
@@ -256,6 +272,7 @@ class Reconciler:
         )
         runners = {str(r["project_key"]): r for r in self.store.list_runners()}
         seen_ids = [str(c.get("id") or "") for c in containers]
+        probe_targets: dict[str, dict[str, Any]] = {}
         n_kept = 0
 
         for c in containers:
@@ -281,6 +298,12 @@ class Reconciler:
             }
             if decision["action"] == "keep":
                 n_kept += 1
+                # One probe per *project* per pass (ADR-34 acceptance (10)).
+                # `_decide` only returns `keep` for the container the runners
+                # row names, so today this dict never collides — dedupe here
+                # anyway rather than depend on that staying true.
+                if pk:
+                    probe_targets.setdefault(pk, c)
             elif decision["action"] == "spare":
                 report["spared"].append(entry)
             elif decision["action"] == "remove":
@@ -315,12 +338,97 @@ class Reconciler:
                     report["cleared_rows"].append(stale)
                     log.info("reconcile cleared stale runner project=%s", pk)
 
+        self._probe_attachments(
+            report,
+            probe_targets,
+            runners=runners,
+            inflight=inflight,
+            now=now,
+            dry_run=dry_run,
+        )
         self._sweep_github(report, dry_run=dry_run)
         self._handle_open_turns(report, dry_run=dry_run)
         if not dry_run and self.nudge:
             self.nudge()
         self._log_pass(report, containers=len(containers), kept=n_kept, started=t0)
         return report
+
+    def _probe_attachments(
+        self,
+        report: dict[str, Any],
+        targets: dict[str, dict[str, Any]],
+        *,
+        runners: dict[str, dict[str, Any]],
+        inflight: Any,
+        now: int,
+        dry_run: bool,
+    ) -> None:
+        """§11.2 step 7: attach and record. Never repair, never remove (ADR-34).
+
+        The probe writes one column and one log line. It does not touch `tier`
+        — recording COLD for a container that is still running would free a
+        §6.6 admission slot whose RAM is still resident — and removal never
+        learns about it, because an unreachable runner is the ordinary state of
+        a container that was stopped on purpose and is repairable on demand by
+        the next `ensure_session` (ADR-25).
+        """
+        for pk, c in targets.items():
+            cid = str(c.get("id") or "")
+            if pk in inflight:
+                # The turn *is* the attachment evidence, and a runner busy
+                # inside one can miss a 2 s timeout and produce a WARNING that
+                # lies. A false negative is worse than no sample here.
+                report["probe_skipped"].append(
+                    {"project": pk, "id": cid, "reason": "open turn"}
+                )
+                continue
+            row = runners.get(pk)
+            if row is None:
+                continue
+            if not bool(c.get("running")):
+                # `stopped` is reached without a socket: connecting to a stopped
+                # container is a certain failure, so paying for it is noise, and
+                # the reason must not arrive by relabelling a connect error.
+                self._record_unattached(report, pk, cid, "stopped")
+                continue
+            try:
+                res = self.probe_runner(row)
+            except Exception:
+                # One project's probe must not abort the pass.
+                log.exception("probe raised project=%s container=%s", pk, cid)
+                self._record_unattached(report, pk, cid, "probe_error")
+                continue
+            if not res.serviceable:
+                self._record_unattached(report, pk, cid, res.reason)
+                continue
+            payload = res.payload or {}
+            report["attached"].append(
+                {
+                    "project": pk,
+                    "id": cid,
+                    "reason": res.reason,
+                    # §12.1 has no sampler; this is the measurement M6-3's
+                    # memory rule can be written against (ADR-34).
+                    "rss_bytes": payload.get("rss_bytes"),
+                    "cli_rss_kb": payload.get("cli_rss_kb"),
+                }
+            )
+            if not dry_run:
+                self.store.touch_runner_seen(pk, now=now)
+
+    def _record_unattached(
+        self, report: dict[str, Any], project: str, container_id: str, reason: str
+    ) -> None:
+        report["unattached"].append(
+            {"project": project, "id": container_id, "reason": reason}
+        )
+        log.warning(
+            "reconcile runner unattached project=%s container=%s reason=%s "
+            "(no repair here — next ensure_session promotes; ADR-25/ADR-34)",
+            project,
+            container_id,
+            reason,
+        )
 
     def _handle_open_turns(self, report: dict[str, Any], *, dry_run: bool) -> None:
         now = int(self._now())
