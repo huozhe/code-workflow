@@ -138,6 +138,17 @@ def test_claude_spawn_uses_continue_flag(tmp_path: Path) -> None:
         patch("agentd_runner.cli_session.os.geteuid", return_value=501),
         patch.object(cli_session.LiveCliSession, "_sample_rss"),
         patch.object(cli_session.LiveCliSession, "_acp_initialize_unlocked"),
+        # Not a kill test: a MagicMock pid is a real pid belonging to something
+        # else on this machine, and the kill path signals its group (ADR-35).
+        patch.object(
+            cli_session.LiveCliSession, "_kill_group_unlocked", return_value=None
+        ),
+        # This test is about argv, not about killing. The real kill path
+        # derives a process group from proc.pid, and a MagicMock's pid is a
+        # real pid belonging to something else on this machine (ADR-35).
+        patch.object(
+            cli_session.LiveCliSession, "_kill_group_unlocked", return_value=None
+        ),
     ):
         sess = cli_session.LiveCliSession(
             role="architect",
@@ -407,7 +418,8 @@ def test_id_collision_request_not_accepted_as_response() -> None:
     assert cli_session._is_jsonrpc_response(resp) is True
 
 
-def test_deadline_kills_child_and_role_usable(tmp_path: Path) -> None:
+def test_deadline_kill_success_clears_state(tmp_path: Path) -> None:
+    """Deadline path, kill works: the turn fails and the role is reusable."""
     import queue as qmod
 
     sess = cli_session.LiveCliSession(
@@ -419,7 +431,46 @@ def test_deadline_kills_child_and_role_usable(tmp_path: Path) -> None:
         xdg=tmp_path / "x",
         spawn_cwd=tmp_path,
     )
-    # Empty queue → timeouts
+    sess._stdout_q = qmod.Queue()  # empty → timeout
+    proc = MagicMock()
+    proc.poll.return_value = None
+    proc.pid = 9
+    proc.stdin = MagicMock()
+    sess.proc = proc
+
+    with (
+        patch.object(cli_session.LiveCliSession, "_sample_rss"),
+        patch.object(
+            cli_session.LiveCliSession, "_kill_group_unlocked", return_value=None
+        ) as killed,
+    ):
+        result = sess.turn("slow", deadline_s=0)
+
+    killed.assert_called_once()
+    assert result["status"] == "failed"
+    assert "deadline" in result["summary"]
+    assert "COULD NOT BE KILLED" not in result["summary"]
+    assert not sess.is_alive()
+    assert sess.proc is None
+
+
+def test_deadline_kill_failure_keeps_state_and_spawns_no_second_cli(
+    tmp_path: Path,
+) -> None:
+    """ADR-35 acceptance (4). The old code cleared state before the kill, so a
+    kill that raised EPERM left is_alive() False and the next turn started a
+    second CLI against the same durable home/<role>. That is the leak."""
+    import queue as qmod
+
+    sess = cli_session.LiveCliSession(
+        role="architect",
+        adapter="claude-code",
+        uid=1001,
+        home=tmp_path / "h",
+        tmp=tmp_path / "t",
+        xdg=tmp_path / "x",
+        spawn_cwd=tmp_path,
+    )
     sess._stdout_q = qmod.Queue()
     proc = MagicMock()
     proc.poll.return_value = None
@@ -427,14 +478,26 @@ def test_deadline_kills_child_and_role_usable(tmp_path: Path) -> None:
     proc.stdin = MagicMock()
     sess.proc = proc
 
-    with patch.object(cli_session.LiveCliSession, "_sample_rss"):
+    with (
+        patch.object(cli_session.LiveCliSession, "_sample_rss"),
+        patch.object(
+            cli_session.LiveCliSession,
+            "_kill_group_unlocked",
+            return_value="killpg(9, 15) as uid 1001 failed: errno 1 (EPERM)",
+        ),
+        patch.object(cli_session.LiveCliSession, "_spawn_unlocked") as spawn,
+    ):
         result = sess.turn("slow", deadline_s=0)
-
-    assert result["status"] == "failed"
-    assert "deadline" in result["summary"]
-    assert not sess.is_alive()
-    assert sess.proc is None
-    proc.send_signal.assert_called()
+        # the caller sees the failure...
+        assert result["status"] == "failed"
+        assert "COULD NOT BE KILLED" in result["summary"]
+        assert "EPERM" in result["summary"]
+        # ...the runner has NOT forgotten the process it failed to kill...
+        assert sess.proc is proc
+        assert sess.is_alive()
+        # ...so nothing spawns a second CLI for this role.
+        sess.ensure_spawned()
+        spawn.assert_not_called()
 
 
 def test_stderr_redirected_to_role_log_not_pipe(tmp_path: Path) -> None:
@@ -456,6 +519,11 @@ def test_stderr_redirected_to_role_log_not_pipe(tmp_path: Path) -> None:
         patch("agentd_runner.cli_session.os.geteuid", return_value=501),
         patch.object(cli_session.LiveCliSession, "_sample_rss"),
         patch.object(cli_session.LiveCliSession, "_acp_initialize_unlocked"),
+        # Not a kill test: a MagicMock pid is a real pid belonging to something
+        # else on this machine, and the kill path signals its group (ADR-35).
+        patch.object(
+            cli_session.LiveCliSession, "_kill_group_unlocked", return_value=None
+        ),
     ):
         sess = cli_session.LiveCliSession(
             role="architect",
@@ -482,6 +550,11 @@ def test_registry_one_session_per_role(tmp_path: Path) -> None:
         patch("agentd_runner.cli_session.os.geteuid", return_value=501),
         patch.object(cli_session.LiveCliSession, "_sample_rss"),
         patch.object(cli_session.LiveCliSession, "_acp_initialize_unlocked"),
+        # Not a kill test: a MagicMock pid is a real pid belonging to something
+        # else on this machine, and the kill path signals its group (ADR-35).
+        patch.object(
+            cli_session.LiveCliSession, "_kill_group_unlocked", return_value=None
+        ),
     ):
         fake = MagicMock()
         fake.poll.return_value = None

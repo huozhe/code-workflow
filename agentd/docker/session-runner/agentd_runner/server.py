@@ -414,7 +414,7 @@ def handle_request(req: dict[str, Any], authed: bool) -> dict[str, Any]:
     if method == "session.teardown":
         from agentd_runner import cli_session as _cli
 
-        _cli.shutdown_all()
+        kill_failures = _cli.shutdown_all()
         # Best-effort: wipe secrets from tmpfs
         for role in ROLE_UIDS:
             role_dir = TOKEN_ROOT / role
@@ -426,6 +426,14 @@ def handle_request(req: dict[str, Any], authed: bool) -> dict[str, Any]:
                 except OSError:
                     pass
         STATE.initialized = False
+        if kill_failures:
+            # FR-4.3's "kill held CLI children" is a claim about the container,
+            # so teardown must not report success when a CLI is still running.
+            # The gateway escalates through its existing teardown retry path
+            # (ADR-35).
+            return err(
+                -32003, "teardown could not kill held CLIs: " + "; ".join(kill_failures)
+            )
         return ok({"torn_down": True})
 
     if method in ("turn.dispatch", "turn.resume"):
