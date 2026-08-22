@@ -12,7 +12,7 @@ from typing import Any
 
 from agentd.config import Config
 from agentd.db import Store
-from agentd.gitops import project_dir_name, shared_clone_path
+from agentd.gitops import local_branch_gone, project_dir_name, shared_clone_path
 
 log = logging.getLogger("agentd.gc")
 
@@ -328,13 +328,12 @@ class GarbageCollector:
             sk = str(sess.get("session_key") or "")
             if not sk:
                 continue
+            repo = str(sess.get("repo") or "")
+            clone = shared_clone_path(Path(self.config.root), repo) if repo else None
             for art in self.store.list_artifacts(sk, open_only=True):
                 ref = str(art.get("ref") or "")
                 kind = str(art.get("kind") or "")
-                if kind not in ("worktree", "scratch"):
-                    continue
-                p = Path(ref)
-                if p.exists():
+                if not self._ledger_row_is_stale(kind, ref, clone):
                     continue
                 created = int(art.get("created_at") or 0)
                 if created <= 0 or now - created < ARTIFACT_AGE_FLOOR_S:
@@ -344,6 +343,24 @@ class GarbageCollector:
                     self.store.mark_artifact_removed(
                         session_key=sk, ref=ref, kind=kind, removed_at=now
                     )
+
+    @staticmethod
+    def _ledger_row_is_stale(kind: str, ref: str, clone: Path | None) -> bool:
+        """Is this open ledger row's artifact gone? (#167)
+
+        A ``branch`` ref is a branch *name*, not a path, so ``Path(ref).exists()``
+        is False for every branch row whether the branch is there or not —
+        widening the kind tuple alone would sweep every live branch on the first
+        pass. Branches ask the clone instead, via the same predicate the teardown
+        confirm path uses. ``local_branch_gone`` answers False for a missing or
+        non-git clone, so an unreadable clone leaves the row open rather than
+        clearing it on no evidence.
+        """
+        if kind == "branch":
+            return clone is not None and local_branch_gone(clone, ref)
+        if kind in ("worktree", "scratch"):
+            return not Path(ref).exists()
+        return False
 
     def _sweep_containers(self, report: dict[str, Any]) -> None:
         """Report managed containers only. Reconciler owns removal (ADR-20 / #116)."""

@@ -4,13 +4,19 @@ from __future__ import annotations
 
 import json
 import logging
+import subprocess
 import time
 from pathlib import Path
 
 from agentd.config import Config
 from agentd.db import Store
 from agentd.gc import ARTIFACT_AGE_FLOOR_S, GarbageCollector
-from agentd.gitops import project_dir_name, project_path
+from agentd.gitops import (
+    local_branch_gone,
+    project_dir_name,
+    project_path,
+    shared_clone_path,
+)
 
 
 def _cfg(tmp: Path, *, archive_days: int = 30) -> Config:
@@ -442,3 +448,153 @@ def test_reconciler_does_not_run_gc() -> None:
     src = inspect.getsource(Reconciler.reconcile_once)
     assert "collect_once" not in src
     assert "GarbageCollector" not in src
+
+
+# --- #167: branch rows are reclaimable, and not by Path.exists() -------------
+
+
+def _clone_with_branches(tmp: Path, *branches: str, project: str) -> Path:
+    """A real shared clone, because `local_branch_gone` shells out to git.
+
+    A fake directory would make `local_branch_gone` return False for every ref —
+    the safe answer — so every one of these tests would pass for the wrong
+    reason. The fixture is asserted in `test_branch_fixture_reproduces_the_property`.
+    """
+    clone = shared_clone_path(tmp, project)
+    clone.mkdir(parents=True, exist_ok=True)
+
+    def run(*a: str) -> None:
+        subprocess.run(a, cwd=clone, check=True, capture_output=True)
+    run("git", "init", "-q")
+    run("git", "config", "user.email", "t@t")
+    run("git", "config", "user.name", "t")
+    (clone / "f").write_text("x\n", encoding="utf-8")
+    run("git", "add", ".")
+    run("git", "commit", "-qm", "i")
+    for b in branches:
+        run("git", "branch", b)
+    return clone
+
+
+_ARCH = "agentd/huozhe__code-workflow/32/architect"
+_DEV = "agentd/huozhe__code-workflow/32/developer"
+
+
+def test_branch_fixture_reproduces_the_property(tmp_path: Path) -> None:
+    """Fixture check first: the clone must actually distinguish the two cases.
+
+    `local_branch_gone` returns False for a missing or non-git clone, so a bad
+    fixture is indistinguishable from "the branch is still there" — which is the
+    answer every other test here expects in its negative case.
+    """
+    clone = _clone_with_branches(tmp_path, _ARCH, project="huozhe/code-workflow")
+    assert local_branch_gone(clone, _DEV) is True
+    assert local_branch_gone(clone, _ARCH) is False
+
+
+def test_stale_branch_row_is_swept(tmp_path: Path) -> None:
+    """Exit condition, positive half: branch absent from the clone → removed."""
+    store = Store(tmp_path / "state.db")
+    sk = _sess(store)
+    _clone_with_branches(tmp_path, _ARCH, project="huozhe/code-workflow")
+    now = 10_000_000
+    store.register_artifact(
+        session_key=sk,
+        role="developer",
+        kind="branch",
+        ref=_DEV,
+        created_at=now - ARTIFACT_AGE_FLOOR_S - 1,
+    )
+    report = _gc(store, tmp_path, now=now).collect_once()
+
+    assert {"ref": _DEV, "kind": "branch"} in report["ledger_stale"]
+    assert store.list_artifacts(sk, open_only=True) == []
+    store.close()
+
+
+def test_live_branch_row_is_left_open(tmp_path: Path) -> None:
+    """The assertion that matters.
+
+    Widening the kind tuple alone passes the positive test above while clearing
+    every live branch row too, because `Path(<branch name>).exists()` is False
+    for a branch that is present.
+    """
+    store = Store(tmp_path / "state.db")
+    sk = _sess(store)
+    _clone_with_branches(tmp_path, _ARCH, project="huozhe/code-workflow")
+    now = 10_000_000
+    store.register_artifact(
+        session_key=sk,
+        role="architect",
+        kind="branch",
+        ref=_ARCH,
+        created_at=now - ARTIFACT_AGE_FLOOR_S - 1,
+    )
+    report = _gc(store, tmp_path, now=now).collect_once()
+
+    assert report["ledger_stale"] == []
+    assert [a["ref"] for a in store.list_artifacts(sk, open_only=True)] == [_ARCH]
+    store.close()
+
+
+def test_young_stale_branch_row_survives_the_age_floor(tmp_path: Path) -> None:
+    """ADR-20's floor still applies on the branch path."""
+    store = Store(tmp_path / "state.db")
+    sk = _sess(store)
+    _clone_with_branches(tmp_path, _ARCH, project="huozhe/code-workflow")
+    now = 10_000_000
+    store.register_artifact(
+        session_key=sk,
+        role="developer",
+        kind="branch",
+        ref=_DEV,
+        created_at=now - 5,
+    )
+    report = _gc(store, tmp_path, now=now).collect_once()
+
+    assert report["ledger_stale"] == []
+    assert len(store.list_artifacts(sk, open_only=True)) == 1
+    store.close()
+
+
+def test_branch_row_survives_an_unreadable_clone(tmp_path: Path) -> None:
+    """No clone is not confirmation (gitops: "a missing clone is *not* confirmation").
+
+    Without this the first GC pass after a clone is moved or not yet created
+    would clear every branch row on no evidence at all.
+    """
+    store = Store(tmp_path / "state.db")
+    sk = _sess(store)  # no clone created
+    now = 10_000_000
+    store.register_artifact(
+        session_key=sk,
+        role="developer",
+        kind="branch",
+        ref=_DEV,
+        created_at=now - ARTIFACT_AGE_FLOOR_S - 1,
+    )
+    report = _gc(store, tmp_path, now=now).collect_once()
+
+    assert report["ledger_stale"] == []
+    assert len(store.list_artifacts(sk, open_only=True)) == 1
+    store.close()
+
+
+def test_dry_run_reports_the_branch_row_without_clearing_it(tmp_path: Path) -> None:
+    """Checklist item: a dry run shows what would be cleared, and clears nothing."""
+    store = Store(tmp_path / "state.db")
+    sk = _sess(store)
+    _clone_with_branches(tmp_path, _ARCH, project="huozhe/code-workflow")
+    now = 10_000_000
+    store.register_artifact(
+        session_key=sk,
+        role="developer",
+        kind="branch",
+        ref=_DEV,
+        created_at=now - ARTIFACT_AGE_FLOOR_S - 1,
+    )
+    report = _gc(store, tmp_path, now=now).collect_once(dry_run=True)
+
+    assert {"ref": _DEV, "kind": "branch"} in report["ledger_stale"]
+    assert len(store.list_artifacts(sk, open_only=True)) == 1
+    store.close()
