@@ -32,7 +32,7 @@ from agentd.rpc_client import RunnerClient
 
 log = logging.getLogger("agentd.supervisor")
 
-DEFAULT_IMAGE = "agentd/session-runner:1.2.0"
+DEFAULT_IMAGE = "agentd/session-runner:1.3.0"
 
 
 def runner_image() -> str:

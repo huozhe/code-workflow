@@ -10,6 +10,7 @@ the vendor conversation without rebinding the process cwd.
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import os
@@ -186,6 +187,169 @@ def _frame_fields(line: str) -> str:
     return " ".join(parts) if parts else "type=absent"
 
 
+def _killpg_as_role(pgid: int, uid: int, sig: int) -> int:
+    """Signal a process group from a forked helper that has become the role uid.
+
+    Pid 1 is root, and §7.2's ``--cap-drop ALL`` removes ``CAP_KILL``; signal
+    permission needs a matching uid, which uid 0 does not bypass. So the runner
+    cannot signal its own CLIs directly and must borrow the role's identity to
+    do it (ADR-35). Returns 0 on success, otherwise an errno.
+
+    Inside the fork, nothing that is not async-signal-safe, and **no logging**:
+    the fork happens in a threaded process and another thread may hold the
+    logging lock. ``_run_as_role`` (``server.py``) avoids it for the same reason.
+    """
+    pid = os.fork()
+    if pid == 0:
+        try:
+            os.setgid(uid)
+            os.setuid(uid)
+            os.killpg(pgid, sig)
+            os._exit(0)
+        except OSError as exc:
+            os._exit(exc.errno or 1)
+        except BaseException:
+            os._exit(1)
+    _, status = os.waitpid(pid, 0)
+    return os.WEXITSTATUS(status) if os.WIFEXITED(status) else 1
+
+
+def _is_our_child(pid: int) -> bool | None:
+    """Does ``/proc`` say we are this pid's parent? ``None`` when unknowable.
+
+    Tri-state on purpose. In the container ``/proc`` is always there and the
+    runner is the parent by construction, so a ``False`` is a real answer worth
+    refusing on. On a dev host without ``/proc`` there is no answer at all, and
+    treating that as ``False`` would make the kill path refuse everywhere off
+    Linux — divergence between host and container being the very thing that let
+    this defect live since M2.
+    """
+    if not os.path.isdir("/proc"):
+        return None
+    try:
+        with open(f"/proc/{pid}/status", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("PPid:"):
+                    return line.split()[1] == str(os.getpid())
+    except OSError:
+        return False
+    return False
+
+
+def _live_pgid_members(pgid: int) -> list[int]:
+    """Non-zombie processes still in ``pgid``, from ``/proc``. ``[]`` off Linux.
+
+    The direct child exiting is **not** the group being gone: a descendant that
+    ignores ``SIGTERM`` survives it, and the leader's status says nothing about
+    that. Enumerating is also what makes escalation safe — ``proc.wait()`` has
+    just reaped the leader, so if it was the last member the pgid is free to be
+    recycled, and a blind second ``killpg`` could signal a stranger. A live
+    member found here is the proof the pgid still means what we think.
+    """
+    out: list[int] = []
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return out
+    want = str(pgid)
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        state = gid = ""
+        try:
+            with open(f"/proc/{pid}/status", encoding="utf-8") as fh:
+                for line in fh:
+                    if line.startswith("State:"):
+                        state = line.split(None, 2)[1]
+                    elif line.startswith("NSpgid:"):
+                        gid = line.split()[1]
+                    if state and gid:
+                        break
+        except OSError:
+            continue
+        if gid == want and state != "Z":
+            out.append(pid)
+    return out
+
+
+def _kill_group_direct(pgid: int, sig: int) -> int:
+    """killpg without the helper — correct only when we share the target's uid."""
+    try:
+        os.killpg(pgid, sig)
+        return 0
+    except OSError as exc:
+        return exc.errno or 1
+
+
+def _tracked_pids() -> set[int]:
+    """Pids the runner owns a ``Popen`` for — the reaper must never take these.
+
+    Deliberately without ``_REGISTRY_LOCK``: ``shutdown_all`` holds it and then
+    takes a session's ``_lock``, so a caller holding ``_lock`` that reached for
+    it would invert the order and deadlock.
+
+    The race the snapshot leaves is harmless in both directions. A **stale
+    extra** pid only means we decline to reap something its owner will reap. A
+    **missing** pid — a session registered after the snapshot — would be the
+    dangerous one, except that such a ``Popen`` is alive, and the reaper only
+    takes processes in ``State: Z``. Written down rather than left to be
+    re-derived (PR #199 review).
+    """
+    return {s.proc.pid for s in list(_SESSIONS.values()) if s.proc is not None}
+
+
+def reap_orphans(tracked: set[int]) -> list[int]:
+    """Reap untracked zombies reparented to us. Enumerated, never peeked (ADR-35).
+
+    ``waitid(..., WNOWAIT)`` does not consume, so a peek returns the *same*
+    child forever: whenever a tracked CLI is a reapable-but-unpolled zombie —
+    the state immediately after a kill — the orphans starve and the reaper is a
+    no-op. A blanket ``waitpid(-1)`` is worse than useless: it consumes the
+    sibling role's status, and CPython's ``Popen._try_wait`` then treats
+    ``ECHILD`` as already-reaped and reports that CLI's exit code as **0**, so
+    a failed turn reads as a successful one.
+
+    Must not run between the SIGTERM and the SIGKILL: a process group stays
+    addressable through its zombie members, and reaping them frees the pgid to
+    be recycled onto something else.
+    """
+    reaped: list[int] = []
+    me = str(os.getpid())
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return reaped  # not Linux; production always is
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        if pid in tracked:
+            continue
+        state = ppid = ""
+        try:
+            with open(f"/proc/{pid}/status", encoding="utf-8") as fh:
+                for line in fh:
+                    if line.startswith("State:"):
+                        state = line.split(None, 2)[1]
+                    elif line.startswith("PPid:"):
+                        ppid = line.split()[1]
+                    if state and ppid:
+                        break
+        except OSError:
+            continue
+        if state != "Z" or ppid != me:
+            continue
+        try:
+            os.waitpid(pid, os.WNOHANG)
+        except (ChildProcessError, OSError):
+            continue
+        reaped.append(pid)
+    if reaped:
+        log.info("reaped orphaned cli descendants: %s", reaped)
+    return reaped
+
+
 @dataclass
 class LiveCliSession:
     """One long-lived vendor CLI process for a role."""
@@ -226,31 +390,157 @@ class LiveCliSession:
 
     def respawn(self, *, continue_session: bool = True) -> None:
         with self._lock:
-            self._kill_unlocked()
+            reason = self._kill_unlocked()
+            if reason is not None:
+                # ADR-29 (b) never depended on the old process dying — the
+                # fresh _stdout_q is what delivers stream freshness — but it
+                # was described as if it did. Proceed, loudly (ADR-35).
+                log.error("respawn %s: previous cli not killed: %s", self.role, reason)
             self._spawn_unlocked(continue_session=continue_session)
 
-    def shutdown(self) -> None:
+    def shutdown(self) -> str | None:
+        """FR-4.3 is a claim about the container, so a failed kill is reported."""
         with self._lock:
-            self._kill_unlocked()
+            return self._kill_unlocked()
 
-    def _kill_unlocked(self) -> None:
+    def _kill_unlocked(self) -> str | None:
+        """Kill the CLI's process group as the role. ``None`` on success.
+
+        State is cleared **only once the process is actually dead** (ADR-35).
+        Clearing first made the runner forget a process it had not killed:
+        ``is_alive()`` went ``False`` and the next turn spawned a second CLI
+        against the same durable ``home/<role>`` (1.25.0). On failure the
+        bookkeeping is left intact so that cannot happen, and the reason is
+        returned to the caller instead of being swallowed at WARNING.
+        """
         proc = self.proc
+        if proc is None:
+            self._close_stderr()
+            return None
+        if proc.poll() is not None:
+            # The CLI exited on its own. That is not the group being gone — a
+            # tool subprocess it left behind is still running, and the leader's
+            # status says nothing about it. Same defect as trusting proc.wait()
+            # below, reached by a different door. The leader is already reaped,
+            # so getpgid(its pid) would fail; the pgid == pid invariant enforced
+            # in _kill_group_unlocked is what lets us name the group anyway.
+            leftovers = _live_pgid_members(proc.pid)
+            reason = None
+            if leftovers:
+                log.warning(
+                    "%s cli exited on its own, leaving %d group member(s): %s",
+                    self.role,
+                    len(leftovers),
+                    leftovers,
+                )
+                rc = (
+                    _killpg_as_role(proc.pid, self.uid, signal.SIGKILL)
+                    if os.geteuid() == 0
+                    else _kill_group_direct(proc.pid, signal.SIGKILL)
+                )
+                time.sleep(0.1)
+                still = _live_pgid_members(proc.pid)
+                if still:
+                    reason = (
+                        f"cli exited leaving group {proc.pid} alive "
+                        f"(errno {rc}): {still}"
+                    )
+            self._forget_dead_unlocked()
+            if reason is None:
+                reap_orphans(_tracked_pids())
+            return reason
+        reason = self._kill_group_unlocked(proc)
+        if reason is not None:
+            log.error("kill %s cli failed: %s", self.role, reason)
+            return reason
+        self._forget_dead_unlocked()
+        # After the escalation completes, never inside it.
+        reap_orphans(_tracked_pids())
+        return None
+
+    def _kill_group_unlocked(self, proc: subprocess.Popen[str]) -> str | None:
+        """SIGTERM then SIGKILL to the CLI's group, signalled as the role uid."""
+        try:
+            pgid = os.getpgid(proc.pid)
+        except ProcessLookupError:
+            # Exited and was reaped between our poll() and here. Nothing to
+            # kill — a benign race, and it must not log like a guard refusal.
+            return None
+        except OSError as exc:
+            return f"getpgid({proc.pid}): {exc}"
+        # start_new_session=True makes the CLI *lead* its own group, so
+        # pgid == pid is the invariant acceptance (3) asserts — enforced here at
+        # runtime, because the cost of it being false is signalling a group we
+        # do not own, up to and including the runner's own.
+        if pgid != proc.pid:
+            return (
+                f"refusing killpg({pgid}): cli pid {proc.pid} does not lead its "
+                f"own group — spawn lost start_new_session=True"
+            )
+        if pgid <= 1 or pgid == os.getpgid(0):
+            # In the container the runner is pid 1, so its own group *is* 1 and
+            # the second test would catch it — but only there. Naming pgid <= 1
+            # outright also holds off Linux, where getpgid(0) is something else
+            # and a stray pid 1 resolves to the host's init group. No CLI ever
+            # leads group 1: start_new_session makes it lead its own.
+            return (
+                f"refusing killpg({pgid}): that is the runner's or init's group "
+                f"— killing it would signal the runner"
+            )
+        owned = _is_our_child(proc.pid)
+        if owned is False:
+            # A different bug from the two above, with a different fix: the pid
+            # is real and leads a group, but it is not ours to signal.
+            return (
+                f"refusing killpg({pgid}): pid {proc.pid} is not our child "
+                f"(/proc says its parent is not {os.getpid()})"
+            )
+        if owned is None:
+            log.debug(
+                "kill %s: no /proc, parent of pid %s unverifiable — "
+                "guard inactive off Linux",
+                self.role,
+                proc.pid,
+            )
+        for sig, timeout in ((signal.SIGTERM, 5.0), (signal.SIGKILL, 3.0)):
+            # The helper exists because root cannot signal the role's uid
+            # without CAP_KILL. When we are not root the CLI already shares our
+            # uid and a direct killpg is both permitted and correct — the same
+            # condition _popen_unlocked uses to decide the privilege drop. The
+            # group semantics are identical on both paths; only the privilege
+            # step differs, and that half is provable only inside the image.
+            if os.geteuid() == 0:
+                rc = _killpg_as_role(pgid, self.uid, sig)
+            else:
+                rc = _kill_group_direct(pgid, sig)
+            if rc not in (0, errno.ESRCH):
+                return (
+                    f"killpg({pgid}, {sig}) as uid {self.uid} failed: "
+                    f"errno {rc} ({errno.errorcode.get(rc, '?')})"
+                )
+            try:
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                continue
+            survivors = _live_pgid_members(pgid)
+            if not survivors:
+                return None
+            log.warning(
+                "kill %s: direct child gone but %d group member(s) survive %s: %s",
+                self.role,
+                len(survivors),
+                sig.name,
+                survivors,
+            )
+        survivors = _live_pgid_members(pgid)
+        if survivors:
+            return f"group {pgid} still has live members after SIGKILL: {survivors}"
+        return None
+
+    def _forget_dead_unlocked(self) -> None:
         self.proc = None
         self._stdout_q = None
         self._reader_thread = None
-        if proc is None:
-            self._close_stderr()
-            return
-        try:
-            if proc.poll() is None:
-                proc.send_signal(signal.SIGTERM)
-                try:
-                    proc.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait(timeout=3)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("kill %s cli: %s", self.role, exc)
         self._close_stderr()
 
     def _close_stderr(self) -> None:
@@ -336,6 +626,7 @@ class LiveCliSession:
             else:
                 raise RuntimeError(f"cli died {_SPAWN_LIVENESS_S}s after spawn: {tail}")
 
+        reap_orphans(_tracked_pids())  # before each spawn (ADR-35)
         self._start_stdout_reader()
         if self.adapter in ("grok-cli", "grok"):
             self._acp_initialize_unlocked()
@@ -353,6 +644,10 @@ class LiveCliSession:
             "bufsize": 1,
             "cwd": str(self.spawn_cwd),
             "env": env,
+            # ADR-35: the CLI must lead its own process group, or the group
+            # kill below is killpg(1) — the runner itself. Lands with or before
+            # the kill change, never after.
+            "start_new_session": True,
         }
         # Prefer C-level drop (safe in threaded parent) over preexec_fn (NB2).
         if os.geteuid() == 0:
@@ -428,7 +723,13 @@ class LiveCliSession:
             None if self.proc is None else self.proc.pid,
         )
         try:
-            self._kill_unlocked()
+            reason = self._kill_unlocked()
+            if reason is not None:
+                log.error(
+                    "respawn after is_error role=%s: previous cli not killed: %s",
+                    self.role,
+                    reason,
+                )
             self._spawn_unlocked(continue_session=True)
         except Exception as exc:  # noqa: BLE001
             log.error("respawn after is_error failed role=%s: %s", self.role, exc)
@@ -639,10 +940,24 @@ class LiveCliSession:
                     )
             except TimeoutError:
                 log.warning("turn deadline exceeded role=%s; killing cli", self.role)
-                self._kill_unlocked()
+                reason = self._kill_unlocked()
+                if reason is None:
+                    summary = (
+                        f"turn deadline exceeded after {deadline_s}s; cli killed"
+                    )
+                else:
+                    # The role is deliberately left un-reusable: is_alive() stays
+                    # True, so ensure_spawned will not start a second CLI beside
+                    # a live one against the same durable home/<role>. The
+                    # gateway sees the failure instead of a silent leak (ADR-35).
+                    summary = (
+                        f"turn deadline exceeded after {deadline_s}s; "
+                        f"CLI COULD NOT BE KILLED: {reason}"
+                    )
+                    log.error("deadline kill failed role=%s: %s", self.role, reason)
                 return {
                     "status": "failed",
-                    "summary": f"turn deadline exceeded after {deadline_s}s; cli killed",
+                    "summary": summary,
                     "public_actions": [],
                     "artifacts": [],
                 }
@@ -1020,11 +1335,21 @@ def get_or_create_session(
         return sess
 
 
-def shutdown_all() -> None:
+def shutdown_all() -> list[str]:
+    """Returns the roles whose CLI could not be killed (empty on success).
+
+    FR-4.3's "kill held CLI children" is a claim about the container, so
+    ``session.teardown`` fails the RPC rather than reporting success when this
+    is non-empty (ADR-35).
+    """
+    failed: list[str] = []
     with _REGISTRY_LOCK:
         for s in list(_SESSIONS.values()):
-            s.shutdown()
+            reason = s.shutdown()
+            if reason is not None:
+                failed.append(f"{s.role}: {reason}")
         _SESSIONS.clear()
+    return failed
 
 
 def rss_snapshot() -> dict[str, int]:
