@@ -207,17 +207,27 @@ def test_repicks_under_a_hold_are_inert(tmp_path: Path) -> None:
 def test_expired_hold_lets_the_delivery_through(tmp_path: Path) -> None:
     """(6), other side: the hold is a delay, not a drop.
 
-    Fails if (f) is implemented as an unconditional skip rather than a
-    time-bounded one — the delivery would never be retried at all.
+    Fails if (f) skips whenever an entry exists instead of comparing the
+    timestamp — an implementation that would strand the delivery until the
+    process restarts, since nothing else removes the entry.
+
+    The hold is **expired in place**, not cleared. That is the whole point: a
+    `clear()` is indistinguishable, because both implementations dispatch once
+    the entry is gone. Set rather than slept so the test stays deterministic;
+    the state asserted below — present and in the past — is exactly what a real
+    lapse leaves behind.
     """
     store = Store(tmp_path / "state.db")
     _seed(store)
-    loop = _loop(store, tmp_path, retry_after=time.time() + 0.2)
+    loop = _loop(store, tmp_path)
     _insert_review(store, did="d-quota")
     loop.process_deferred_batch(limit=5)
     assert len(loop.dispatched) == 1  # type: ignore[attr-defined]
 
-    design_loop_mod._role_busy_until.clear()  # stand in for the reset arriving
+    key = design_loop_mod._role_key(REPO, "architect")
+    design_loop_mod._role_busy_until[key] = time.time() - 1.0
+    assert design_loop_mod._role_busy_until[key]  # present, merely expired
+
     loop.process_deferred_batch(limit=5)
     assert len(loop.dispatched) == 2  # type: ignore[attr-defined]
     store.close()
