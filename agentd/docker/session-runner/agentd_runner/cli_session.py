@@ -758,13 +758,14 @@ class LiveCliSession:
             )
             # ADR-29 (b): keyed on is_error, before either return path.
             self._respawn_after_error_unlocked()
-            # Vendor refusal produces no assistant text and no tool use.
-            # A turn that *talked about* a limit still has both (#94 B1).
-            quota = (
-                classify_quota(text=str(summary))
-                if not texts and not public_actions
-                else None
-            )
+            # ADR-33 (a): a refusal can land *after* real work — the session
+            # limit is hit mid-turn, so `texts` is non-empty and the old
+            # emptiness condition made the limit invisible. `is_error` plus
+            # _LIMIT_PHRASES is the whole signal: #94 B1's counter-examples are
+            # kept out by the phrase list, which excludes bare "quota" and
+            # "rate limit", and a turn that merely *talks about* a limit ends
+            # is_error: false and never reaches this branch at all.
+            quota = classify_quota(text=str(summary))
             if quota is not None:
                 return {
                     **quota,

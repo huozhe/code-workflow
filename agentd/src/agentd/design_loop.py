@@ -929,6 +929,32 @@ class DesignLoop:
             )
             return
 
+        # ADR-33 (f): the role hold is checked at the top of _dispatch_turn,
+        # which is *below* the stall observer. A delivery held for quota is
+        # re-picked every 5 s, and for design_changes_requested the observer
+        # fetches review threads uncached and advances zero_thread_rounds and
+        # review_rounds each time — three passes pause the session on a stall
+        # signal describing the drain, not the agents. Return above it, and
+        # below the FSM, so P1 still records exactly as on any other re-pick.
+        # Covers role_busy after a gateway timeout too: same line, same shape.
+        held_until = _role_busy_until.get(
+            _role_key(
+                str(sess.get("project_key") or project_key_from_repo(repo)),
+                recipient_role,
+            ),
+            0.0,
+        )
+        if held_until > time.time():
+            log.info(
+                "role held id=%s session=%s role=%s retry_in=%.0fs — "
+                "delivery left deferred, no stall observation",
+                delivery_id,
+                session_key,
+                recipient_role,
+                held_until - time.time(),
+            )
+            return
+
         # Stall only when a turn would be routed — self-echo under §5.3 adapter
         # swap must not advance zero-thread (M3-D NB1).
         if (
