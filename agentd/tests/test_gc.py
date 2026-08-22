@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -686,3 +687,75 @@ def test_scratch_dir_with_contents_is_left_open(tmp_path: Path) -> None:
     assert report["ledger_stale"] == []
     assert len(store.list_artifacts(sk, open_only=True)) == 1
     store.close()
+
+
+# --- #125: a trip raised during a pass must not be dropped -------------------
+
+
+def test_signal_during_a_pass_causes_one_more_pass(tmp_path: Path) -> None:
+    """#125: `governor.on_trip = gc.signal` is worthless if the signal dies.
+
+    The interval is 30 s, so a second pass inside a second is only possible if
+    the nudge survived `collect_once` and made `wait` return at once. Against
+    the old ordering — clear *after* the pass — the signal is discarded and this
+    times out on `passes == 1`.
+    """
+    store = Store(tmp_path / "state.db")
+    gc = _gc(store, tmp_path, now=10_000_000)
+    gc.interval_s = 30.0
+
+    passes = threading.Semaphore(0)
+    calls: list[int] = []
+
+    def fake_collect(*, dry_run: bool = False) -> dict:
+        calls.append(1)
+        if len(calls) == 1:
+            gc.signal()  # the trip lands mid-pass
+        passes.release()
+        return {}
+
+    gc.collect_once = fake_collect  # type: ignore[method-assign]
+    gc.start()
+    try:
+        assert passes.acquire(timeout=5), "first pass never ran"
+        assert passes.acquire(timeout=5), (
+            "signal raised during the pass was dropped — no second pass "
+            "before the 30 s interval"
+        )
+    finally:
+        gc.stop()
+    assert len(calls) >= 2
+    store.close()
+
+
+def test_signal_between_passes_still_wakes_the_loop(tmp_path: Path) -> None:
+    """The ordinary path, so the fix is not just moving the bug.
+
+    Signal while the loop is parked in `wait`, not during a pass.
+    """
+    store = Store(tmp_path / "state.db")
+    gc = _gc(store, tmp_path, now=10_000_000)
+    gc.interval_s = 30.0
+
+    passes = threading.Semaphore(0)
+    calls: list[int] = []
+
+    def fake_collect(*, dry_run: bool = False) -> dict:
+        calls.append(1)
+        passes.release()
+        return {}
+
+    gc.collect_once = fake_collect  # type: ignore[method-assign]
+    gc.start()
+    try:
+        assert passes.acquire(timeout=5), "first pass never ran"
+        gc.signal()  # loop is in wait() by now, or gets there and returns at once
+        assert passes.acquire(timeout=5), "signal between passes did not wake the loop"
+    finally:
+        gc.stop()
+    store.close()
+
+# Dispatcher._loop's opposite ordering is pinned in test_dispatcher.py, beside
+# its subject — see test_loop_does_not_drop_a_nudge_raised_during_a_drain. It
+# lives there rather than here because its whole value is being found by whoever
+# edits that loop (#125).

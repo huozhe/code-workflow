@@ -137,11 +137,18 @@ class GarbageCollector:
 
     def _loop(self) -> None:
         while not self._stop.is_set():
+            # #125: clear *before* the pass, never after. A trip raised while
+            # collect_once() is running must still be set when we reach the wait
+            # below, or the request is dropped and the next pass is up to
+            # GC_INTERVAL_S away — the one moment §12.3's "hourly and on breaker
+            # trip" wiring exists for. Clearing here also leaves no lost-wakeup
+            # window: every signal either survives to the wait, or is cleared by
+            # a clear() that a pass immediately follows.
+            self._nudge.clear()
             try:
                 self.collect_once()
             except Exception:
                 log.exception("gc collect_once failed")
-            self._nudge.clear()
             self._nudge.wait(self.interval_s)
             if self._stop.is_set():
                 return
