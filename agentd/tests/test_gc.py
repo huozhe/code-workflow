@@ -615,12 +615,70 @@ def test_branch_row_survives_a_broken_clone(tmp_path: Path) -> None:
     sk = _sess(store)
     clone = shared_clone_path(tmp_path, "huozhe/code-workflow")
     (clone / ".git").mkdir(parents=True)  # present, unusable
+    # Fixture check, same convention as test_branch_fixture_reproduces_the_property
+    # and for a sharper reason: git discovery walks *up*, so if this tmp dir ever
+    # sits inside a checkout, git answers rc=0 from the ancestor and the row is
+    # swept on an answer about a different repository. Fail here, not there.
+    assert local_branch_gone(clone, _DEV) is False, (
+        "broken-clone fixture is not broken here — git answered from an ancestor "
+        "repository; see #190"
+    )
     now = 10_000_000
     store.register_artifact(
         session_key=sk,
         role="developer",
         kind="branch",
         ref=_DEV,
+        created_at=now - ARTIFACT_AGE_FLOOR_S - 1,
+    )
+    report = _gc(store, tmp_path, now=now).collect_once()
+
+    assert report["ledger_stale"] == []
+    assert len(store.list_artifacts(sk, open_only=True)) == 1
+    store.close()
+
+
+def test_emptied_scratch_dir_is_swept(tmp_path: Path) -> None:
+    """#167, second kind: GC and the teardown confirm path now agree on scratch.
+
+    Agents are told to delete a scratch dir's *contents*; the dir itself often
+    remains. `_confirm_teardown_artifacts` has always counted that as done, but
+    the sweep asked `Path(ref).exists()`, so an emptied scratch row was never
+    reclaimed — the same gap as `branch`, one kind over.
+    """
+    store = Store(tmp_path / "state.db")
+    sk = _sess(store)
+    scratch = tmp_path / "scratch-emptied"
+    scratch.mkdir()
+    now = 10_000_000
+    store.register_artifact(
+        session_key=sk,
+        role="developer",
+        kind="scratch",
+        ref=str(scratch),
+        created_at=now - ARTIFACT_AGE_FLOOR_S - 1,
+    )
+    report = _gc(store, tmp_path, now=now).collect_once()
+
+    assert {"ref": str(scratch), "kind": "scratch"} in report["ledger_stale"]
+    assert store.list_artifacts(sk, open_only=True) == []
+    assert scratch.exists(), "the sweep reclaims the row, it deletes nothing"
+    store.close()
+
+
+def test_scratch_dir_with_contents_is_left_open(tmp_path: Path) -> None:
+    """The negative half: work still on disk is not reclaimed."""
+    store = Store(tmp_path / "state.db")
+    sk = _sess(store)
+    scratch = tmp_path / "scratch-busy"
+    scratch.mkdir()
+    (scratch / "notes.md").write_text("wip\n", encoding="utf-8")
+    now = 10_000_000
+    store.register_artifact(
+        session_key=sk,
+        role="developer",
+        kind="scratch",
+        ref=str(scratch),
         created_at=now - ARTIFACT_AGE_FLOOR_S - 1,
     )
     report = _gc(store, tmp_path, now=now).collect_once()
