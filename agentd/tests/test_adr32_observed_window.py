@@ -542,6 +542,30 @@ def test_uncountable_status_does_not_escalate_at_the_limit(tmp_path: Path) -> No
     store.close()
 
 
+def test_uncountable_status_does_not_query_the_window(tmp_path: Path) -> None:
+    """The window query is the only expensive term; skip it when it cannot count.
+
+    A turn whose status cannot move the counter discards the answer, so paying
+    for a scan of ``deliveries`` on the drain thread buys nothing.
+    """
+    store = Store(tmp_path / "state.db")
+    _seed(store)
+    loop = _loop(store, tmp_path, plant=_MID_FEATURE_SYNC, status="failed")
+
+    calls: list[int] = []
+    real = store.deliveries_in_window
+
+    def _count(**kwargs: Any) -> Any:
+        calls.append(1)
+        return real(**kwargs)
+
+    store.deliveries_in_window = _count  # type: ignore[method-assign]
+    _drive(loop, store, did="d-failed-window", sender="huozheclaude")
+
+    assert calls == []
+    store.close()
+
+
 def _verification_block(*, checked: bool) -> str:
     return render_verification_block(
         steps=["pull", "test"], merged_prs=[FEATURE_PR], checked=checked

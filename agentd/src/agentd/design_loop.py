@@ -1021,18 +1021,25 @@ class DesignLoop:
                 actions = (turn_result or {}).get("public_actions") or []
                 if not isinstance(actions, list):
                     actions = []
-                observed, window_examined = self._observed_progress(
-                    session_key=session_key,
-                    repo=repo,
-                    kind=kind,
-                    turn_id=turn_id,
-                    state_before_turn=state_before_turn,
-                )
+                status_s = str(status) if status else None
+                # The window query is the only expensive term. A turn whose
+                # status cannot move the counter discards the answer, so do not
+                # pay for it: silent_turn_mode is "keep" for those regardless of
+                # what was observed.
+                observed, window_examined = False, False
+                if silent_turn_mode(observed_progress=False, status=status_s) != "keep":
+                    observed, window_examined = self._observed_progress(
+                        session_key=session_key,
+                        repo=repo,
+                        kind=kind,
+                        turn_id=turn_id,
+                        state_before_turn=state_before_turn,
+                    )
                 # ADR-32 (b): one SQL statement for all three counters. The
                 # snapshot this used to read back is older than the whole turn.
                 mode = silent_turn_mode(
                     observed_progress=observed,
-                    status=str(status) if status else None,
+                    status=status_s,
                 )
                 counters = self.store.bump_turn_counters(session_key, silent=mode)
                 # Escalation means "the counter reached the limit *this turn*",
