@@ -339,6 +339,23 @@ def _log_staleness(clone: Path, branch: str, base_ref: str) -> None:
         log.warning("%s in %s is %s commits behind %s", branch, clone, behind, base_ref)
 
 
+def scratch_dir_cleared(ref: str) -> bool:
+    """Scratch ledger refs are directories. Empty (or missing) counts as gone.
+
+    Agents are told to delete contents; the dir itself may remain. M5's exit
+    metric is ``removed_at IS NULL`` → 0, so an empty scratch dir is done.
+
+    #167: lives here, beside :func:`local_branch_gone`, because the teardown
+    confirm path and GC's ledger sweep must answer this the same way. They did
+    not — GC used a bare ``Path(ref).exists()``, so an emptied-but-present
+    scratch dir was never reclaimed.
+    """
+    path = Path(ref)
+    if not path.exists():
+        return True
+    return bool(path.is_dir() and not any(path.iterdir()))
+
+
 def local_branch_gone(clone: Path, branch: str) -> bool:
     """True only after we listed the clone and the branch is absent.
 

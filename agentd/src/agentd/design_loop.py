@@ -41,6 +41,7 @@ from agentd.gitops import (
     project_key_from_repo,
     project_path,
     role_branch_name,
+    scratch_dir_cleared,
     shared_clone_path,
 )
 from agentd.intake import evaluate_intake
@@ -195,18 +196,6 @@ QUOTA_BACKOFF_S = 1800.0
 # resolve without a new commit, so they are never cached (PR #29 NB2).
 _STALL_DIFF_CACHE: dict[str, str] = {}
 
-
-
-def _scratch_dir_cleared(ref: str) -> bool:
-    """Scratch ledger refs are directories. Empty (or missing) counts as gone.
-
-    Agents are told to delete contents; the dir itself may remain. M5's exit
-    metric is ``removed_at IS NULL`` → 0, so an empty scratch dir is done.
-    """
-    path = Path(ref)
-    if not path.exists():
-        return True
-    return bool(path.is_dir() and not any(path.iterdir()))
 
 
 def _lock_for_project_role(project_key: str, role: str) -> threading.Lock:
@@ -3085,7 +3074,7 @@ class DesignLoop:
             if kind == "branch":
                 gone = local_branch_gone(clone, ref)
             elif kind == "scratch":
-                gone = _scratch_dir_cleared(ref)
+                gone = scratch_dir_cleared(ref)
             else:
                 gone = not Path(ref).exists()
             if not gone:

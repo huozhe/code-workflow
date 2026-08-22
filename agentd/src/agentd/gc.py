@@ -12,7 +12,12 @@ from typing import Any
 
 from agentd.config import Config
 from agentd.db import Store
-from agentd.gitops import local_branch_gone, project_dir_name, shared_clone_path
+from agentd.gitops import (
+    local_branch_gone,
+    project_dir_name,
+    scratch_dir_cleared,
+    shared_clone_path,
+)
 
 log = logging.getLogger("agentd.gc")
 
@@ -348,17 +353,23 @@ class GarbageCollector:
     def _ledger_row_is_stale(kind: str, ref: str, clone: Path | None) -> bool:
         """Is this open ledger row's artifact gone? (#167)
 
+        Each kind is asked the same question the teardown confirm path asks it,
+        which is the point: the two used to disagree on two of the three kinds.
         A ``branch`` ref is a branch *name*, not a path, so ``Path(ref).exists()``
         is False for every branch row whether the branch is there or not —
         widening the kind tuple alone would sweep every live branch on the first
         pass. Branches ask the clone instead, via the same predicate the teardown
         confirm path uses. ``local_branch_gone`` answers False for a missing or
         non-git clone, so an unreadable clone leaves the row open rather than
-        clearing it on no evidence.
+        clearing it on no evidence. A ``scratch`` ref is a directory the agent
+        was told to empty rather than remove, so an emptied-but-present one is
+        done — a bare existence check never reclaimed those either.
         """
         if kind == "branch":
             return clone is not None and local_branch_gone(clone, ref)
-        if kind in ("worktree", "scratch"):
+        if kind == "scratch":
+            return scratch_dir_cleared(ref)
+        if kind == "worktree":
             return not Path(ref).exists()
         return False
 

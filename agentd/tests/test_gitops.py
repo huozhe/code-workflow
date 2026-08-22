@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+import logging
 import subprocess
 from pathlib import Path
 
-from agentd.gitops import ensure_shared_clone, local_branch_gone, worktree_add
+import pytest
+
+from agentd.gitops import (
+    ensure_shared_clone,
+    local_branch_gone,
+    scratch_dir_cleared,
+    worktree_add,
+)
 
 
 def _init_bare_source(tmp: Path) -> Path:
@@ -72,7 +80,9 @@ def test_worktree_add_keeps_uncommitted_when_already_on_branch(tmp_path: Path) -
     assert dirty.read_text(encoding="utf-8") == "keep\n"
 
 
-def test_local_branch_gone_does_not_confirm_when_git_fails(tmp_path: Path) -> None:
+def test_local_branch_gone_does_not_confirm_when_git_fails(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     """#167: rc != 0 is "asked and could not read", not "gone".
 
     A failing git writes nothing to stdout, so a stdout-only decision reads a
@@ -81,7 +91,15 @@ def test_local_branch_gone_does_not_confirm_when_git_fails(tmp_path: Path) -> No
     """
     clone = tmp_path / "repo"
     (clone / ".git").mkdir(parents=True)
-    assert local_branch_gone(clone, "agentd/p/32/architect") is False
+    with caplog.at_level(logging.WARNING, logger="agentd.gitops"):
+        assert local_branch_gone(clone, "agentd/p/32/architect") is False
+    # The severity is the assertion, not just the text: a clone that stays
+    # unreadable must be visible rather than silently inert, and an INFO line
+    # is not. Same shape as #188's override log.
+    assert any(
+        r.levelno == logging.WARNING and "not confirming absence" in r.getMessage()
+        for r in caplog.records
+    ), [r.getMessage() for r in caplog.records]
 
     real = tmp_path / "real"
     real.mkdir()
@@ -103,3 +121,18 @@ def test_local_branch_gone_does_not_confirm_when_git_fails(tmp_path: Path) -> No
 
     (real / ".git" / "HEAD").write_text("garbage\n", encoding="utf-8")
     assert local_branch_gone(real, "agentd/p/32/developer") is False
+
+
+def test_scratch_dir_cleared_counts_empty_as_gone(tmp_path: Path) -> None:
+    """#167: shared by the teardown confirm path and GC's ledger sweep."""
+    missing = tmp_path / "gone"
+    assert scratch_dir_cleared(str(missing)) is True
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert scratch_dir_cleared(str(empty)) is True
+
+    busy = tmp_path / "busy"
+    busy.mkdir()
+    (busy / "f").write_text("x\n", encoding="utf-8")
+    assert scratch_dir_cleared(str(busy)) is False
