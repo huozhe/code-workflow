@@ -287,8 +287,14 @@ def _tracked_pids() -> set[int]:
 
     Deliberately without ``_REGISTRY_LOCK``: ``shutdown_all`` holds it and then
     takes a session's ``_lock``, so a caller holding ``_lock`` that reached for
-    it would invert the order and deadlock. A snapshot is enough — a stale
-    extra pid only means we decline to reap something its owner will reap.
+    it would invert the order and deadlock.
+
+    The race the snapshot leaves is harmless in both directions. A **stale
+    extra** pid only means we decline to reap something its owner will reap. A
+    **missing** pid — a session registered after the snapshot — would be the
+    dangerous one, except that such a ``Popen`` is alive, and the reaper only
+    takes processes in ``State: Z``. Written down rather than left to be
+    re-derived (PR #199 review).
     """
     return {s.proc.pid for s in list(_SESSIONS.values()) if s.proc is not None}
 
