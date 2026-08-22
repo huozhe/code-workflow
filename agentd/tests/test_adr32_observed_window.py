@@ -153,6 +153,7 @@ def _loop(
     plant: dict[str, Any] | None = None,
     turn_len: int = 98,
     public_actions: list | None = None,
+    status: str = "done",
 ) -> DesignLoop:
     """DesignLoop whose dispatch stub writes a real turn row.
 
@@ -161,6 +162,7 @@ def _loop(
     ``t-a9044e280f21`` and ``t-797b18feee34``). Acceptance (3) needs that
     collision, so every test here has it.
     """
+    posted: list[dict[str, Any]] = []
     loop = DesignLoop(
         store,
         _cfg(tmp),
@@ -169,6 +171,10 @@ def _loop(
         github_token="tok",
         fetch_threads=lambda **k: None,
         fetch_diff=lambda **k: None,
+        # Without this, _escalate falls back to the real post_issue_comment with
+        # the gateway's Keychain token — (5) escalates by design, so every green
+        # run posted a comment to live issue #63 as huozhegateway.
+        post_comment=lambda **k: (posted.append(k), len(posted))[1],
     )
     dispatched: list[str] = []
 
@@ -213,13 +219,13 @@ def _loop(
         store.finish_turn(
             turn_id,
             ended_at=started + turn_len,
-            status="done",
+            status=status,
             summary="ok",
             public_actions="[]",
         )
         dispatched.append(turn_id)
         return {
-            "status": "done",
+            "status": status,
             "summary": "ok",
             "public_actions": (
                 [{"kind": "comment"}] if public_actions is None else public_actions
@@ -228,6 +234,7 @@ def _loop(
 
     loop._dispatch_turn = _spy  # type: ignore[method-assign]
     loop.dispatched = dispatched  # type: ignore[attr-defined]
+    loop.posted = posted  # type: ignore[attr-defined]
     return loop
 
 
@@ -468,6 +475,70 @@ def test_terminal_gate_still_runs_for_a_delivery_that_does_not_defer(
     assert loop.dispatched == []  # type: ignore[attr-defined]
     assert store.count_by_status().get("done", 0) == 1
     assert store.count_by_status().get("deferred", 0) == 0
+    store.close()
+
+
+def test_entering_teardown_clears_paused_reason(tmp_path: Path) -> None:
+    """(8), TEARDOWN half — and it is a different write from the close.
+
+    The ADR names ``:2675`` and the re-assert inside ``_run_teardown_turns``.
+    Neither is where a session *enters* TEARDOWN: that is the ``issues_closed``
+    transition in ``_handle_session_issue_closed``, which runs for every close.
+    A session with no archive target stops in TEARDOWN, which is how this is
+    observable at all.
+    """
+    store = Store(tmp_path / "state.db")
+    sk = _seed(store, state="IMPLEMENTING", paused_reason="stall: silent_turns — 3 …")
+    loop = _loop(store, tmp_path)
+    _insert(
+        store,
+        did="d-close-to-teardown",
+        event="issues",
+        action="closed",
+        sender="huozhe",
+        issue=ISSUE,
+        payload={
+            "action": "closed",
+            "issue": {
+                "number": ISSUE,
+                "state": "closed",
+                "state_reason": "completed",
+                "title": "session work",
+                "user": {"login": "huozhe"},
+                "body": "",
+            },
+            "sender": {"login": "huozhe"},
+            "repository": {"full_name": REPO},
+        },
+    )
+    loop.process_deferred_batch(limit=1)
+
+    sess = store.get_session(sk)
+    assert sess is not None
+    assert sess["state"] == "TEARDOWN"
+    assert not sess["paused_reason"]
+    store.close()
+
+
+def test_uncountable_status_does_not_escalate_at_the_limit(tmp_path: Path) -> None:
+    """The counter write is atomic; the escalation still means "reached, now".
+
+    ``after_turn`` used to return before touching anything when the status was
+    not countable. Splitting the mode from the message put ``breach_message`` on
+    that path too, so a session already at the limit escalated again on a turn
+    that moved nothing. Fails if the ``mode == "inc"`` guard is dropped.
+    """
+    store = Store(tmp_path / "state.db")
+    sk = _seed(store, silent_turns=3)
+    loop = _loop(store, tmp_path, plant=None, status="failed")
+    _drive(loop, store, did="d-failed", sender="huozheclaude")
+
+    sess = store.get_session(sk)
+    assert sess is not None
+    assert int(sess["silent_turns"]) == 3  # unmoved
+    assert sess["state"] != "PAUSED_HUMAN"
+    assert not sess["paused_reason"]
+    assert loop.posted == []  # type: ignore[attr-defined]
     store.close()
 
 

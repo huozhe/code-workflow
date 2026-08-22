@@ -441,7 +441,9 @@ def test_transient_exhausted_retries_escalate(tmp_path: Path) -> None:
     store.close()
 
 
-def test_merge_auth_uses_gateway_token(tmp_path: Path) -> None:
+def test_merge_auth_uses_gateway_token(
+    tmp_path: Path, allows_github_post: list
+) -> None:
     """PR #54 NB: privileged verify reads use gateway credential, not agent PAT."""
     store = Store(tmp_path / "state.db")
     cfg = _cfg(tmp_path, required_checks=[])

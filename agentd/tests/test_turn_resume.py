@@ -382,7 +382,9 @@ def test_inflight_check_prevents_retire_finish_turn(tmp_path: Path) -> None:
     store.close()
 
 
-def test_resume_fails_twice_then_retires(tmp_path: Path) -> None:
+def test_resume_fails_twice_then_retires(
+    tmp_path: Path, allows_github_post: list
+) -> None:
     from agentd.config import Config
     from agentd.design_loop import DesignLoop
 

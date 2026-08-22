@@ -1035,12 +1035,18 @@ class DesignLoop:
                     status=str(status) if status else None,
                 )
                 counters = self.store.bump_turn_counters(session_key, silent=mode)
-                breach = SilentTurnTracker(
-                    silent_count=counters["silent_turns"],
-                    threshold=int(self.config.silent_turn_limit),
-                ).breach_message(
-                    public_actions=actions, window_examined=window_examined
-                )
+                # Escalation means "the counter reached the limit *this turn*",
+                # which is what the old read-modify-write said by returning
+                # early. A turn whose status is not countable moves nothing and
+                # must not re-escalate a session already at the limit.
+                breach = None
+                if mode == "inc":
+                    breach = SilentTurnTracker(
+                        silent_count=counters["silent_turns"],
+                        threshold=int(self.config.silent_turn_limit),
+                    ).breach_message(
+                        public_actions=actions, window_examined=window_examined
+                    )
                 if breach:
                     self._escalate(session_key, "system", breach)
                     self.store.set_delivery_status(delivery_id, "done")
@@ -2476,7 +2482,13 @@ class DesignLoop:
         if state != "TEARDOWN":
             tr = transition(state, "issues_closed")
             if tr:
-                self.store.update_session_fields(session_key, state=tr.new_state)
+                # ADR-32 (d): the entry into TEARDOWN, and the write the ADR
+                # should have named. :2886 is a conditional re-assert after
+                # ensure_session — a session that never needs one would carry
+                # the stale reason through the whole teardown.
+                self.store.update_session_fields(
+                    session_key, state=tr.new_state, paused_reason=None
+                )
                 log.info(
                     "fsm %s → %s (%s) class=%s",
                     session_key,
