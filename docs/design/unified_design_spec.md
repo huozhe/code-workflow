@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | **Status** | Proposed for formal approval (Phase 3 exit) |
-| **Version** | 1.32.1 — see [Revision history](#revision-history) |
+| **Version** | 1.33.0 — see [Revision history](#revision-history) |
 | **Implements** | [`docs/requirements/SRS_async_multiagent_ai_coding_system.md`](../requirements/SRS_async_multiagent_ai_coding_system.md) **v1.3** |
 | **Supersedes** | [`proposals/claude_design_spec.md`](proposals/claude_design_spec.md) (#4) · [`proposals/grok_design_spec.md`](proposals/grok_design_spec.md) (#2) · [`proposals/gemini_design_spec.md`](proposals/gemini_design_spec.md) (#3) |
 | **Ref** | Issue #1 |
@@ -18,6 +18,7 @@ Amendments are also marked inline at the point they apply, which is where an imp
 
 | Version | Date | Change |
 |---|---|---|
+| **1.33.0** | 2026-08-22 | **A quota refusal that lands after real work is invisible, and the delivery pays for it** (#168, ADR-33). `cli_session.py:763` only calls `classify_quota` when the turn produced no assistant text and no tool use, so a session limit hit mid-turn is recorded `failed`; `_process_one` returns early only for `role_busy`/`quota_exhausted`, so `failed` falls through to `set_delivery_status(…, "routed")`, and `routed` is terminal — the dispatcher scans `queued` and promotes `deferred`, and the only other reader of `routed` is a read-only reconcile helper scoped to `issues`/`closed`. Live: `t-a2c3e6ebe3ae` (#151) and `t-690b8db01e8b` (#169), both `failed` with the limit copy as their summary and `public_actions=[]`; `classify_quota` returns `quota_exhausted` with a parseable `retry_after` for both strings, and delivery `2e2e5a1e…` is still `routed` today. **#168's premise is corrected**: the gate does not defend #94 B1 — `_LIMIT_PHRASES` does, by excluding bare "quota" and "rate limit". Deleting the condition leaves the whole suite green except `test_claude_quota_with_assistant_text_is_failed`, whose fixture is frame-for-frame the live defect and whose docstring states the false premise; it is replaced, not amended. The whole-string refinement #168 proposes is refused on the ground offered for it, since that fixture's `result` already *is* the limit copy entire. Binding: drop the emptiness condition and keep `is_error` plus `_LIMIT_PHRASES`; the delivery stays retryable; the hold short-circuits the next dispatch before any spawn; and a refusal spends no `turn_count` or `consec_agent_turns`. |
 | **1.32.1** | 2026-08-22 | **ADR-32 corrected by its own implementation** (#184). Four things the ADR asserts are wrong, each found by running a revert rather than by reading. (i) Acceptance **(3) cannot fail on an inclusive lower bound**: the triggering delivery observing itself is harmless, because the retained trigger term already resets on a progress-kind trigger. What the strict bound protects is a *different* delivery that arrived in the same whole second **before** the turn — queued backlog counted as this turn's work — and that is what the item now asserts. (ii) Acceptance **(7)'s failure mode is unreachable**: `issues`/`closed` returns from `_handle_session_issue_closed` above the FSM and no other webhook kind transitions a live session into `TERMINAL_STATES`, so the post-FSM state is terminal exactly when the pre-FSM state already was; hoisting the gate changes nothing observable. (7) now asserts that a terminal session with **no** `paused_reason` — which never reaches the defer branch — is still stopped by the gate, which does fail if the gate is moved rather than duplicated. (c) stays a second check; only its justification was wrong. (iii) **(d) named the wrong write for TEARDOWN**: `:2775` is a conditional re-assert inside `_run_teardown_turns`; a session *enters* TEARDOWN at the `issues_closed` transition in `_handle_session_issue_closed`, which is where the clear belongs. (iv) The **escalation must stay gated on the counter having moved**: splitting the mode from the message put `breach_message` on the uncountable-status path, where the old early return had protected it, so a session already at the limit re-escalated on a turn that changed nothing. Also **measured**, since the draft note was a worry rather than a number: `deliveries_in_window` is repo-scoped and takes a full table scan (`deliveries` has no index whose leading column is `repo`, and nothing purges the table). On this host — 1,844 deliveries, fifteen days — a real seven-row window costs **0.85 ms** end to end, and the worst historical window, a turn whose `ended_at` landed four days after `started_at`, is 331 rows at **~20 ms**. Against a drain thread that has just been blocked for minutes by the turn itself, neither is worth an index migration. What *is* worth having is not asking: a turn whose status cannot move the counter discards the answer, so the query is skipped for those outright. Separately, and outside ADR-32: `_escalate` falls back to the real `post_issue_comment` with the gateway's Keychain token whenever `post_comment=` is not injected, so three unit tests were posting comments to live issues as `huozhegateway` — the §5.5 rule appearing as a defect. `tests/conftest.py` now fails any test that would post; the assertion is at teardown because `_escalate` swallows the exception, which is why CI never noticed. |
 | **1.32.0** | 2026-08-21 | **Both loop-safety questions are asked of the wrong subject** (#156, #147, ADR-32). `observed` (`design_loop.py:1011`) is computed from the delivery that *woke* the turn, so a webhook the turn produced cannot count; ingress is accept-and-queue and writes `deliveries` from the request path, so that webhook is already in the table. `observed` becomes **three terms, widening only** — the trigger kind (retained), FSM state compared across dispatch, or a progress-kind delivery in the turn's window under a **strict** lower bound, since `received_at` and `started_at` are both whole seconds and collide in practice. `public_actions` still never reset (PR #42 B1). The whole post-turn counter write becomes atomic — `turn_count` and `consec_agent_turns` share the same read-modify-write off a snapshot taken at `:497`, so making only `silent_turns` atomic would not deliver the justification. Separately, `paused` (`:603`) is checked and the DEFER branch returns at `:810` before the `TERMINAL_STATES` gate at `:873`, and neither the close (`:2675`) nor the teardown (`:2775`) clears `paused_reason` (cleared only on unpause, `:3093`) — so a session closed while paused re-defers every delivery forever (#147: 5,918 log lines from two ids). **The gate is not moved**: `:855` reassigns `state`, so `:873` deliberately tests the post-transition state and moving it would regress #85; instead the defer branch is gated on liveness as a second check. **Evidence corrected in review**: session #84, named in the draft, has zero `pull_request` deliveries ever, so (a) would not have prevented it — #84 is a different instance of the same wrong subject, reachable only by widening `_OBSERVED_PROGRESS_KINDS`, which is refused. One confirmed live instance supports (a): `t-9e31cfd2f1f1` (#63). **The quiet #147 log is a manual `quarantine_deferred`, not a fix.** |
 | **1.31.0** | 2026-08-21 | **ADR-31's `GIT_NO_LAZY_FETCH` scope, and an acceptance item for `--no-checkout`** (#171, #180). 1.30.0 asked for `GIT_NO_LAZY_FETCH=1` on "the gateway's git invocations". Read literally that breaks the loop: `worktree add` on a promisor clone **must** lazy-fetch, because it materialises the blobs the agent is about to edit — `fatal: could not fetch … from promisor remote`, reproduced on a `file://` fixture, where the same command without the guard succeeds. Scoped to the three clone-root maintenance calls (`update-ref`, `read-tree`, `branch -f`) and explicitly never `worktree add`. Found by the implementer running `ensure_shared_clone` against a copy of the live clone; **no fixture caught it**, which is acceptance (3)'s recorded blind spot arriving where that item predicted. Separately, `--no-checkout` had no acceptance item and reverts clean — all fifteen of #180's tests pass without it, because (d)'s `read-tree --empty` empties the index either way and masks it. New item 10 asserts the **missing-object count**, not the index: a clone that checks out materialises every blob and defeats `--filter=blob:none` outright (`missing=0` with a checkout, `missing=5` without). Same failure mode as `read-tree --empty` having had no item until the fifth review round — a binding whose only visible effect is the absence of work needs an assertion about that absence. Live item renumbers to 11. |
@@ -2242,6 +2243,85 @@ A session closed while paused therefore reads as paused forever and re-defers ev
 9. **Atomicity across all three counters**, asserted as *"the write is a single SQL statement"* rather than as a race — a threading test would be flaky and prove less. `turn_count` and `consec_agent_turns` included, or (b)'s justification is not met.
 10. **Live, before sign-off.** No unit test proves the wiring: a real turn that opens a Design PR must leave `silent_turns` at 0, and it is also the only thing that can observe the late-webhook residual above. **Gateway-only**: no image rebuild, no `docker rm -f`; verify by daemon restart time.
 11. **Data repair, recorded rather than performed by code.** `#84` and `#32` carry stale `paused_reason` values today. Clearing them is an owner action; a migration that rewrites session state is a larger decision than this ADR makes.
+
+---
+
+### ADR-33: The Quota Gate Assumes a Refusal Arrives Before Any Output, and the Delivery Pays for It
+
+*Fixes #168.* **A vendor session limit that lands *after* the turn has produced output is recorded `failed`, and `failed` consumes the delivery.** The classification defect is one condition in the runner; the stall is the gateway treating `failed` as a routed outcome. The second is what makes the first permanent.
+
+**The gate.**
+
+```python
+# cli_session.py:761-767, inside `if is_err:`
+# Vendor refusal produces no assistant text and no tool use.
+# A turn that *talked about* a limit still has both (#94 B1).
+quota = (
+    classify_quota(text=str(summary))
+    if not texts and not public_actions
+    else None
+)
+```
+
+The comment states the assumption plainly: a refusal arrives before any output. A turn that runs for minutes, streams assistant text, and *then* hits the session limit has `texts` non-empty, so `classify_quota` is never called and the limit is invisible to the gateway.
+
+**The evidence, re-derived from the database rather than taken from the issue.**
+
+```
+t-a2c3e6ebe3ae   #151, architect, 340 s   status=failed
+t-690b8db01e8b   #169, architect, 195 s   status=failed
+   both summaries  "You've hit your session limit · resets <hh:mm> (UTC)"
+   both public_actions  []
+```
+
+`classify_quota` returns `{'status': 'quota_exhausted', 'retry_after': …}` for both strings — run, not read — and `parse_reset_epoch` resolves each to a real instant. `public_actions` is empty on both, so the only term that can have suppressed the call is `texts`. Delivery `2e2e5a1e-9c64-11f1-9ae0-99eb3acd4373` (`pull_request_review.submitted`, the `CHANGES_REQUESTED` on PR #170) is still `routed` on disk today.
+
+**#168's central premise is wrong, and correcting it is what decides the binding.**
+
+The issue asks that #94 B1's counter-example be reconstructed as a fixture "so the regression this gate exists to prevent is pinned before the gate moves". It does not need reconstructing: it exists, as `test_claude_mentions_of_limits_are_not_quota`, and **it does not depend on this gate.** Its three cases are GitHub rate-limit prose, a test-failure summary that mentions "vendor quota refusal", and a `gh api rate limit exceeded` traceback. None contains `session limit` or `usage limit`, so `_LIMIT_PHRASES` — which deliberately excludes bare "quota" and "rate limit", for exactly this reason — refuses all three whether the gate runs or not.
+
+Deleting the condition outright and running the whole suite:
+
+```
+1 failed, 562 passed, 1 skipped
+FAILED tests/test_cli_session.py::test_claude_quota_with_assistant_text_is_failed
+```
+
+**One test holds this gate, and its fixture is the live defect.** `test_claude_quota_with_assistant_text_is_failed` scripts an assistant frame followed by `is_error: true` whose `result` is the limit copy — which is, frame for frame, what `t-a2c3e6ebe3ae` and `t-690b8db01e8b` produced. Its docstring, *"Vendor refusal has no agent output"*, is the false premise stated as a fact. It was written to encode the assumption, not to record an observation, and it must be replaced rather than preserved.
+
+**The refinement the issue proposes does not do the work it is offered for.** #168 suggests additionally requiring the limit copy to be the entire `result` string rather than a substring. Against the only counter-example that exists, that changes nothing: in that fixture the `result` *is* entirely the limit copy. Whole-string matching may still be worth having against a future envelope that wraps the copy in a longer error, but it has to be argued on that ground; it does not rescue #94 B1, because #94 B1 was never at risk.
+
+**What actually separates the two cases is already in scope.** The branch is `if is_err:`. A turn that merely discusses a limit finishes successfully and ends `is_error: false`, so it never reaches the gate at all. `is_error: true` plus `_LIMIT_PHRASES` plus `_RESET_PHRASE` is the whole signal, and the output-emptiness test adds nothing to it.
+
+**The delivery is the larger half.** `_process_one` returns early for `("role_busy", "quota_exhausted")` at `:1014`, leaving the delivery in its prior state for the drain to re-pick. `failed` falls through to `:1062`, `set_delivery_status(delivery_id, "routed")`. `routed` is terminal: the dispatcher scans `status='queued'` and promotes `deferred`, and the only other reader of `routed` in the tree is `list_live_sessions_with_closed_delivery`, a read-only reconcile helper scoped to `issues`/`closed`. Nothing re-delivers a `pull_request_review`. One misclassification therefore decides between *"wait for the reset and continue"* and *"the session is over"*, which is why #169 sat in `DESIGN_REWORK` for 10.5 hours with `open_turns=0`.
+
+**The decision.**
+
+- **(a) The gate drops the output-emptiness condition.** Classification is `is_error: true` and vendor limit copy. `_LIMIT_PHRASES` remains the thing that keeps model prose out, because that is the thing that has always been doing it.
+- **(b) `test_claude_quota_with_assistant_text_is_failed` is replaced, not amended.** Its shape is the defect; keeping it under a new assertion would preserve the fixture that taught the wrong lesson. The #94 B1 test stands unchanged and is the regression guard.
+- **(c) A quota-refused turn leaves its delivery retryable.** This follows from (a) via the existing `:1014` early return, but it is the item that prevents the stall and it is asserted directly, on the delivery status, not on the turn's.
+- **(d) `retry_after` reaches `_hold_role_for_quota`.** The hold is enforced at `:1187` before any spawn, so the drain re-picking the delivery every 5 s costs a dict lookup and never a vendor call.
+- **(e) The turn counters are not charged for a refusal.** `bump_turn_counters` runs for every status except `gateway_timeout`, so a refused turn increments `turn_count` and `consec_agent_turns` today. `silent_turns` is already safe — ADR-32's `silent_turn_mode` returns `"keep"` for an uncountable status — but the other two are not, and a turn that did no work must not spend budget.
+
+**Deliberately out of scope.**
+
+- **Whole-string matching of the limit copy.** Argued above: it does not decide the case it is usually offered for. If a wrapped envelope shows up, it gets its own item and its own sample.
+- **Persisting the role hold.** `_role_busy_until` is a module-level dict, already annotated *"In-memory; forgotten on restart"* (`:191`). A restart inside a hold re-dispatches and burns one more refusal. Bounded, recorded, and a schema change is a larger decision than this ADR makes.
+- **Whether a `failed` turn should reach `routed` at all.** #168 raises it and it is a real question — consuming a delivery on the first failure with no bounded retry is what makes any bad turn terminal, not just this one. It is a broader change than the misclassification, and folding it in would let a green quota test read as evidence for it.
+- **Grok's path.** `_GROK_STOP_QUOTA` classifies from `stopReason` and never reaches this gate.
+- **Repairing `t-a2c3e6ebe3ae`'s recorded status.** Historical row.
+
+**Acceptance — (1) and (5) are where today's defects are proven, and both must fail first.**
+
+1. **A limit that follows real work is `quota_exhausted`.** Script an assistant text frame, then `is_error: true` with the limit copy as `result`. Assert `status == "quota_exhausted"` and `retry_after` equal to the parsed instant. Today this is `failed` with no `retry_after`. **Assert `retry_after`, not just the status** — a status-only assertion passes against a classification that loses the reset.
+2. **Tool use before the limit is the same case.** Same shape with a non-empty `public_actions` and no assistant text. The gate has two terms and (1) exercises one of them.
+3. **#94 B1 still returns `failed`.** `test_claude_mentions_of_limits_are_not_quota` unchanged and passing, with `retry_after` absent. This item is satisfied by an existing test surviving, which is the point — it was never held by the gate.
+4. **A turn that ends `is_error: false` is never quota, whatever it says.** A successful turn whose text is the limit copy verbatim returns `done`. This is the item that fails if (a) is implemented by dropping the `is_err` guard rather than the emptiness condition.
+5. **The delivery survives.** Drive a quota-refused turn through `_process_one` and assert the delivery is **not** `routed` — it stays retryable and the drain re-picks it. Assert the delivery status; "no escalation" and "the session is not closed" both pass against the bug.
+6. **The hold is taken and short-circuits the next dispatch.** `_role_busy_until` is set to the parsed reset, and the next attempt returns `role_busy` **without spawning** — assert the spawn did not happen, not merely that the status is `role_busy`.
+7. **A refusal spends no budget.** `turn_count` and `consec_agent_turns` are unchanged across a quota-refused turn; `silent_turns` likewise.
+8. **Verified inside the image.** This is runner code. The gateway suite imports `agentd_runner` from the source tree, so a green unit run proves the logic and not the deployment — rebuild and drive one turn in the container before sign-off.
+9. **Live, before sign-off.** The next real quota refusal is recorded `quota_exhausted`, its delivery is re-picked after the hold, and the session continues. **Runner change**: image rebuild plus `docker rm -f` on the project container, since `ensure_session` adopts a running container regardless of image.
 
 ---
 
