@@ -394,7 +394,11 @@ class Reconciler:
             try:
                 res = self.probe_runner(row)
             except Exception:
-                # One project's probe must not abort the pass.
+                # One project's probe must not abort the pass. Unreachable with
+                # the default `probe_runner`, which converts every transport and
+                # protocol failure into a ProbeResult and raises nothing — this
+                # guards an *injected* seam from killing the reconcile thread.
+                # `probe_error` is in ADR-34's reason list for that reason.
                 log.exception("probe raised project=%s container=%s", pk, cid)
                 self._record_unattached(report, pk, cid, "probe_error")
                 continue

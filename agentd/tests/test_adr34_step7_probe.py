@@ -316,6 +316,40 @@ def test_5_one_projects_failure_does_not_abort_the_pass(
     store.close()
 
 
+def test_5b_a_probe_that_raises_does_not_abort_the_pass(tmp_path: Path) -> None:
+    """(5)'s other arm — the only one that could actually abort a pass.
+
+    A seam that *returns* a failed `ProbeResult` never reaches the `except`, so
+    test_5 does not cover this branch despite looking like it does. Unreachable
+    with the default probe, which raises nothing; this guards an injected seam.
+    """
+    store = Store(tmp_path / "state.db")
+    _seed(store, project="o/boom", issue=1, cid="cid-boom", last_seen_at=STALE)
+    _seed(store, project="o/fine", issue=2, cid="cid-fine", last_seen_at=STALE)
+
+    def _seam(row: dict[str, Any]) -> ProbeResult:
+        if str(row["project_key"]) == "o/boom":
+            raise RuntimeError("seam blew up")
+        return ProbeResult(True, "attached", {"rss_bytes": 1})
+
+    rep = _pass(
+        store,
+        [_container(cid="cid-boom", project="o/boom"),
+         _container(cid="cid-fine", project="o/fine")],
+        probe=_seam,
+        now=999_000,
+    )
+
+    assert [(e["project"], e["reason"]) for e in rep["unattached"]] == [
+        ("o/boom", "probe_error")
+    ]
+    assert [e["project"] for e in rep["attached"]] == ["o/fine"]
+    assert store.get_runner("o/boom")["last_seen_at"] == STALE
+    assert store.get_runner("o/boom")["tier"] == "hot"
+    assert store.get_runner("o/fine")["last_seen_at"] == 999_000
+    store.close()
+
+
 # (6) --------------------------------------------------------------------
 
 
