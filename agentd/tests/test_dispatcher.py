@@ -145,3 +145,32 @@ def test_schema_has_sessions_table(tmp_path: Path) -> None:
     assert row is not None
     assert store.list_sessions() == []
     store.close()
+
+
+def test_loop_does_not_drop_a_nudge_raised_during_a_drain(tmp_path: Path) -> None:
+    """#125's shape, one module over: wait *then* clear, so a mid-drain nudge lives.
+
+    `Dispatcher._loop` is not broken — `clear()` is the last statement in the
+    body, so a nudge set in the window between `wait` returning and `clear` is
+    honoured by the very next drain. Nothing asserted it, though, and a
+    well-meant "make these consistent" edit moving the clear above the wait
+    would reintroduce #125 here. Verified to fail when flipped.
+    """
+    nudge = threading.Event()
+    disp = Dispatcher(_store(tmp_path), _cfg(), nudge, idle_wait_s=30.0)
+    drains = threading.Semaphore(0)
+    calls: list[int] = []
+
+    def fake_drain() -> None:
+        calls.append(1)
+        if len(calls) == 1:
+            nudge.set()  # the signal lands mid-drain
+        drains.release()
+
+    disp.drain_once = fake_drain  # type: ignore[method-assign]
+    disp.start()
+    try:
+        assert drains.acquire(timeout=5), "first drain never ran"
+        assert drains.acquire(timeout=5), "nudge set during the drain was dropped"
+    finally:
+        disp.stop()

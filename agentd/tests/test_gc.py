@@ -11,7 +11,6 @@ from pathlib import Path
 
 from agentd.config import Config
 from agentd.db import Store
-from agentd.dispatcher import Dispatcher
 from agentd.gc import ARTIFACT_AGE_FLOOR_S, GarbageCollector
 from agentd.gitops import (
     local_branch_gone,
@@ -756,36 +755,7 @@ def test_signal_between_passes_still_wakes_the_loop(tmp_path: Path) -> None:
         gc.stop()
     store.close()
 
-
-def test_dispatcher_loop_does_not_drop_a_nudge_raised_during_a_drain() -> None:
-    """The shape #125 compares GC against, pinned so it cannot regress into it.
-
-    `Dispatcher._loop` waits *then* clears, so a nudge set during `drain_once`
-    survives. Nothing asserted this; a well-meant "consistency" edit moving the
-    clear above the wait would reintroduce #125 one module over.
-    """
-    nudge = threading.Event()
-    disp = Dispatcher(
-        store=None,  # type: ignore[arg-type]
-        config=None,  # type: ignore[arg-type]
-        nudge=nudge,
-        idle_wait_s=30.0,
-    )
-    drains = threading.Semaphore(0)
-    calls: list[int] = []
-
-    def fake_drain() -> None:
-        calls.append(1)
-        if len(calls) == 1:
-            nudge.set()
-        drains.release()
-
-    disp.drain_once = fake_drain  # type: ignore[method-assign]
-    disp.start()
-    try:
-        assert drains.acquire(timeout=5), "first drain never ran"
-        assert drains.acquire(timeout=5), (
-            "nudge set during the drain was dropped"
-        )
-    finally:
-        disp.stop()
+# Dispatcher._loop's opposite ordering is pinned in test_dispatcher.py, beside
+# its subject — see test_loop_does_not_drop_a_nudge_raised_during_a_drain. It
+# lives there rather than here because its whole value is being found by whoever
+# edits that loop (#125).
