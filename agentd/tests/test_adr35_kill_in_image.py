@@ -109,3 +109,43 @@ def test_7b_the_reaper_reaches_orphans_past_a_tracked_zombie(probe: dict) -> Non
     assert probe["7b_had_tracked_zombie_in_front"], "fixture must create the spin"
     assert probe["7b_orphans_created"] >= 1, "fixture must leave orphans to reap"
     assert probe["7b_untracked_zombies_left"] == [], probe["7b_untracked_zombies_left"]
+
+
+def test_8_adr29b_respawn_with_the_process_actually_dead(probe: dict) -> None:
+    """(8) ADR-29 (b) never depended on the old process dying, and was described
+    as if it did. ADR-35 corrects the wording; this asserts the corrected claim,
+    which was otherwise the only one in the ADR with nothing behind it."""
+    assert probe["8_old_pid_gone"], "the previous CLI must actually be gone"
+    assert probe["8_new_pid_differs"]
+    assert probe["8_new_is_alive"]
+    assert probe["8_fresh_queue"], "stream freshness still comes from a new _stdout_q"
+
+
+def test_9_a_term_ignoring_descendant_is_not_reported_as_success(probe: dict) -> None:
+    """The direct child exiting is not the group being gone.
+
+    `proc.wait()` returning says nothing about a descendant that ignores
+    SIGTERM, and acceptance (2) cannot reach this: its `sleep` descendants all
+    die on TERM. The fixture proves the descendant survives a plain group
+    SIGTERM *before* the remedy is asserted.
+    """
+    assert probe["9_stubborn"], "fixture must have a descendant to ignore TERM"
+    assert probe["9_descendant_ignores_term"], "fixture must actually ignore SIGTERM"
+    assert probe["9_kill_reason"] is None, probe["9_kill_reason"]
+    assert probe["9_live_members_after"] == [], probe["9_live_members_after"]
+
+
+def test_10_a_cli_that_exits_alone_does_not_leave_its_group_running(
+    probe: dict,
+) -> None:
+    """The same defect as trusting proc.wait(), reached by a different door.
+
+    When the CLI has already exited, `_kill_unlocked` used to clear state and
+    report success without looking at the group at all — so a tool subprocess
+    it left behind kept running, which is the leak this ADR exists to close.
+    Found by a revert: the enumeration fix passed every item without this one.
+    """
+    assert probe["10_leader_already_dead"], "fixture must have the leader exit alone"
+    assert probe["10_leftovers_before"], "fixture must leave a live descendant"
+    assert probe["10_kill_reason"] is None, probe["10_kill_reason"]
+    assert probe["10_live_members_after"] == [], probe["10_live_members_after"]

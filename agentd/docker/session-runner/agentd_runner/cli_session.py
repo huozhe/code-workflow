@@ -236,6 +236,52 @@ def _is_our_child(pid: int) -> bool | None:
     return False
 
 
+def _live_pgid_members(pgid: int) -> list[int]:
+    """Non-zombie processes still in ``pgid``, from ``/proc``. ``[]`` off Linux.
+
+    The direct child exiting is **not** the group being gone: a descendant that
+    ignores ``SIGTERM`` survives it, and the leader's status says nothing about
+    that. Enumerating is also what makes escalation safe — ``proc.wait()`` has
+    just reaped the leader, so if it was the last member the pgid is free to be
+    recycled, and a blind second ``killpg`` could signal a stranger. A live
+    member found here is the proof the pgid still means what we think.
+    """
+    out: list[int] = []
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return out
+    want = str(pgid)
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        state = gid = ""
+        try:
+            with open(f"/proc/{pid}/status", encoding="utf-8") as fh:
+                for line in fh:
+                    if line.startswith("State:"):
+                        state = line.split(None, 2)[1]
+                    elif line.startswith("NSpgid:"):
+                        gid = line.split()[1]
+                    if state and gid:
+                        break
+        except OSError:
+            continue
+        if gid == want and state != "Z":
+            out.append(pid)
+    return out
+
+
+def _kill_group_direct(pgid: int, sig: int) -> int:
+    """killpg without the helper — correct only when we share the target's uid."""
+    try:
+        os.killpg(pgid, sig)
+        return 0
+    except OSError as exc:
+        return exc.errno or 1
+
+
 def _tracked_pids() -> set[int]:
     """Pids the runner owns a ``Popen`` for — the reaper must never take these.
 
@@ -366,8 +412,37 @@ class LiveCliSession:
             self._close_stderr()
             return None
         if proc.poll() is not None:
+            # The CLI exited on its own. That is not the group being gone — a
+            # tool subprocess it left behind is still running, and the leader's
+            # status says nothing about it. Same defect as trusting proc.wait()
+            # below, reached by a different door. The leader is already reaped,
+            # so getpgid(its pid) would fail; the pgid == pid invariant enforced
+            # in _kill_group_unlocked is what lets us name the group anyway.
+            leftovers = _live_pgid_members(proc.pid)
+            reason = None
+            if leftovers:
+                log.warning(
+                    "%s cli exited on its own, leaving %d group member(s): %s",
+                    self.role,
+                    len(leftovers),
+                    leftovers,
+                )
+                rc = (
+                    _killpg_as_role(proc.pid, self.uid, signal.SIGKILL)
+                    if os.geteuid() == 0
+                    else _kill_group_direct(proc.pid, signal.SIGKILL)
+                )
+                time.sleep(0.1)
+                still = _live_pgid_members(proc.pid)
+                if still:
+                    reason = (
+                        f"cli exited leaving group {proc.pid} alive "
+                        f"(errno {rc}): {still}"
+                    )
             self._forget_dead_unlocked()
-            return None
+            if reason is None:
+                reap_orphans(_tracked_pids())
+            return reason
         reason = self._kill_group_unlocked(proc)
         if reason is not None:
             log.error("kill %s cli failed: %s", self.role, reason)
@@ -431,11 +506,7 @@ class LiveCliSession:
             if os.geteuid() == 0:
                 rc = _killpg_as_role(pgid, self.uid, sig)
             else:
-                try:
-                    os.killpg(pgid, sig)
-                    rc = 0
-                except OSError as exc:
-                    rc = exc.errno or 1
+                rc = _kill_group_direct(pgid, sig)
             if rc not in (0, errno.ESRCH):
                 return (
                     f"killpg({pgid}, {sig}) as uid {self.uid} failed: "
@@ -443,10 +514,22 @@ class LiveCliSession:
                 )
             try:
                 proc.wait(timeout=timeout)
-                return None
             except subprocess.TimeoutExpired:
                 continue
-        return f"cli survived SIGKILL (pid {proc.pid})"
+            survivors = _live_pgid_members(pgid)
+            if not survivors:
+                return None
+            log.warning(
+                "kill %s: direct child gone but %d group member(s) survive %s: %s",
+                self.role,
+                len(survivors),
+                sig.name,
+                survivors,
+            )
+        survivors = _live_pgid_members(pgid)
+        if survivors:
+            return f"group {pgid} still has live members after SIGKILL: {survivors}"
+        return None
 
     def _forget_dead_unlocked(self) -> None:
         self.proc = None

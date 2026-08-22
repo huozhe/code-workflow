@@ -162,4 +162,64 @@ cs.LiveCliSession._kill_group_unlocked = lambda self, proc: "forced failure"
 OUT["5_shutdown_all_failed"] = cs.shutdown_all()
 cs.LiveCliSession._kill_group_unlocked = orig
 
+# --- (8) ADR-29 (b): respawn with the process actually dead ----------------
+cs._SESSIONS.clear()
+g = make_session("architect", 1001)
+spawn(g)
+old_pid = g.proc.pid
+def _fake_spawn(self, **k):
+    self._popen_unlocked(["sh", "-c", HOLD])
+    self._start_stdout_reader()
+
+
+cs.LiveCliSession._spawn_unlocked = _fake_spawn
+g.respawn(continue_session=True)
+time.sleep(0.3)
+OUT["8_old_pid_gone"] = state(old_pid) in ("Z", "ABSENT")
+OUT["8_new_pid_differs"] = g.proc is not None and g.proc.pid != old_pid
+OUT["8_new_is_alive"] = g.proc is not None and g.proc.poll() is None
+OUT["8_fresh_queue"] = g._stdout_q is not None
+g._kill_unlocked()
+
+# --- (9) a descendant that ignores SIGTERM must not read as success --------
+h = make_session("developer", 1002)
+h._popen_unlocked(["sh", "-c", "(trap '' TERM; sleep 300) & exec sleep 300"])
+time.sleep(0.5)
+h_pg = os.getpgid(h.proc.pid)
+stubborn = [p for p in cs._live_pgid_members(h_pg) if p != h.proc.pid]
+# Fixture proof FIRST: a plain group SIGTERM must leave the descendant alive,
+# or this item is asserting nothing about ignored signals.
+for _p in stubborn:
+    _f = os.fork()
+    if _f == 0:
+        try:
+            os.setgid(1002)
+            os.setuid(1002)
+            os.kill(_p, signal.SIGTERM)
+            os._exit(0)
+        except BaseException:  # noqa: BLE001 - inside a fork; never propagate
+            os._exit(1)
+    os.waitpid(_f, 0)
+time.sleep(0.5)
+OUT["9_descendant_ignores_term"] = bool(stubborn) and all(
+    state(p) not in ("Z", "ABSENT") for p in stubborn
+)
+OUT["9_stubborn"] = stubborn
+reason_h = h._kill_unlocked()
+OUT["9_kill_reason"] = reason_h
+OUT["9_live_members_after"] = cs._live_pgid_members(h_pg)
+
+# --- (10) the CLI exits on its own, leaving a live descendant --------------
+cs._SESSIONS.clear()
+k = make_session("architect", 1001)
+# leader exits immediately; its backgrounded child keeps running
+k._popen_unlocked(["sh", "-c", "sleep 300 & exit 0"])
+time.sleep(0.5)
+k_pid = k.proc.pid
+OUT["10_leader_already_dead"] = k.proc.poll() is not None
+OUT["10_leftovers_before"] = [p for p in cs._live_pgid_members(k_pid) if p != k_pid]
+reason_k = k._kill_unlocked()
+OUT["10_kill_reason"] = reason_k
+OUT["10_live_members_after"] = cs._live_pgid_members(k_pid)
+
 print(json.dumps(OUT))
