@@ -128,6 +128,12 @@ class GarbageCollector:
         self._stop.set()
         self._nudge.set()
         if self._thread:
+            # This join may time out and return with the thread still parked:
+            # the loop's own _nudge.clear() can wipe the nudge set above, and it
+            # then waits out interval_s. #125 shrank that window from a whole
+            # pass to a few instructions but did not close it. The thread is a
+            # daemon, so it costs nothing at process exit; if a clean stop ever
+            # matters, wait on a condition of *either* event rather than _nudge.
             self._thread.join(timeout=min(self.interval_s, 5) + 1)
             self._thread = None
 
