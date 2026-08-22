@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from agentd import design_loop
-from agentd.supervisor import IMAGE
+from agentd.supervisor import DEFAULT_IMAGE, runner_image
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -24,7 +24,24 @@ def _isolate_agentd_root(tmp_path_factory: pytest.TempPathFactory) -> Path:
     else:
         os.environ["AGENTD_ROOT"] = prev
 
+# #187: never the deployed tag. Building DEFAULT_IMAGE here would make every
+# suite run a deploy — including one from a stale branch, which downgrades the
+# runner with nothing to report it.
+TEST_IMAGE = "agentd/session-runner:pytest"
+
 _RUNNER_ROOT = Path(__file__).resolve().parents[1] / "docker" / "session-runner"
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _isolate_runner_image() -> str:
+    """#187: point the whole suite at its own image tag."""
+    prev = os.environ.get("AGENTD_RUNNER_IMAGE")
+    os.environ["AGENTD_RUNNER_IMAGE"] = TEST_IMAGE
+    yield TEST_IMAGE
+    if prev is None:
+        os.environ.pop("AGENTD_RUNNER_IMAGE", None)
+    else:
+        os.environ["AGENTD_RUNNER_IMAGE"] = prev
 
 
 def _docker_ok() -> bool:
@@ -38,20 +55,22 @@ def _docker_ok() -> bool:
 
 
 @pytest.fixture(scope="session")
-def session_runner_image() -> str:
-    """Build agentd/session-runner once per test session.
+def session_runner_image(_isolate_runner_image: str) -> str:
+    """Build the *test* session-runner image once per test session.
 
     When Docker is available, a failed build **fails** the suite (#24 B3) —
     skip is only for hosts without Docker.
     """
     if not _docker_ok():
         pytest.skip("docker not available")
+    image = runner_image()
+    assert image != DEFAULT_IMAGE, "#187: the suite must not build the deployed tag"
     r = subprocess.run(
         [
             "docker",
             "build",
             "-t",
-            IMAGE,
+            image,
             "-f",
             str(_RUNNER_ROOT / "Dockerfile"),
             str(_RUNNER_ROOT),
@@ -62,10 +81,10 @@ def session_runner_image() -> str:
     )
     if r.returncode != 0:
         pytest.fail(
-            f"session-runner image build failed (tag={IMAGE}):\n"
+            f"session-runner image build failed (tag={image}):\n"
             f"{(r.stderr or r.stdout or '')[-2000:]}"
         )
-    return IMAGE
+    return image
 
 
 # --- no test may write to GitHub -------------------------------------------

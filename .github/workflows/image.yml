@@ -1,7 +1,7 @@
 # #131: image check. Path-filtered, not schedule, not label.
 #
 # Fires when the session-runner image, its pin test, the build fixture, or
-# the IMAGE tag change. A schedule runs on days nothing changed; a label
+# the image tag change. A schedule runs on days nothing changed; a label
 # relies on someone remembering. A path filter cannot be forgotten.
 #
 # This job builds the image (git from source + two agent CLIs). That is

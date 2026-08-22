@@ -12,7 +12,7 @@
 #
 # Image regressions (#130 CLI pins) are covered by image.yml, path-filtered
 # on docker/session-runner/**, the pin test, conftest.py (the build), and
-# supervisor.py (the IMAGE tag).
+# supervisor.py (the image tag).
 #
 # Check-run names are the job ids: pytest, lint, types. Those are the
 # §8.4 required_checks to set on huozhe/code-workflow in host config.
