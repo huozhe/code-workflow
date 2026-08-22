@@ -413,6 +413,8 @@ class Reconciler:
                     "cli_rss_kb": payload.get("cli_rss_kb"),
                 }
             )
+            # A dry run probes — that is how `agentctl reconcile --dry-run`
+            # shows attachment state — but stamps nothing.
             if not dry_run:
                 self.store.touch_runner_seen(pk, now=now)
 

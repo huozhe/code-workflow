@@ -152,6 +152,13 @@ def probe_runner(
                       unparseable row must not read as a container in trouble.
     ``unreachable``   the transport failed — stale endpoint, or a dead process
                       behind a live port mapping.
+    ``unauthorized``  it is alive and answering, but rejected our bearer. Kept
+                      apart from ``unreachable`` because it is the one cause
+                      lazy promotion does **not** repair: ``promote_hot``
+                      reuses ``runners.token``, so the ping fails again inside
+                      ``_ensure_session_locked`` and the adopt branch recreates
+                      — `docker rm -f` on a healthy runner holding both roles'
+                      conversation.
     ``uninitialised`` it answered but cannot serve a turn (the post-reboot case).
 
     ``stopped`` is the caller's to report and must be reached without a socket;
@@ -175,6 +182,12 @@ def probe_runner(
         cls = client_cls or RunnerClient
         with cls(host, port, token, timeout_s=timeout_s) as cli:
             ping = cli.call("health.ping")
+    except RpcError as exc:
+        # Typed code, never the message text (#35). `-32001` also spells "not
+        # attached" and "first frame must be session.attach" in the runner, so
+        # the code is unambiguous *here* only because this probe's first frame
+        # is always `session.attach` — it is not unambiguous in general.
+        return ProbeResult(False, "unauthorized" if exc.code == -32001 else "unreachable")
     except Exception:  # noqa: BLE001 — ping probe
         return ProbeResult(False, "unreachable")
     if isinstance(ping, dict) and ping.get("initialized") is True:

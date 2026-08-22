@@ -31,6 +31,8 @@ PROJECT = "o/r"
 class _StubRunner:
     """A real NDJSON runner socket. `initialized` is flippable between passes."""
 
+    BEARER = "tok"
+
     def __init__(self, *, initialized: bool = True) -> None:
         self.initialized = initialized
         self.pings = 0
@@ -60,6 +62,16 @@ class _StubRunner:
                 req = json.loads(raw.decode())
                 method = req.get("method")
                 if method == "session.attach":
+                    if str((req.get("params") or {}).get("bearer") or "") != self.BEARER:
+                        # the runner's own shape: server.py returns -32001 here
+                        f.write(
+                            (json.dumps({
+                                "jsonrpc": "2.0", "id": req.get("id"),
+                                "error": {"code": -32001, "message": "invalid bearer"},
+                            }) + "\n").encode()
+                        )
+                        f.flush()
+                        continue
                     result: dict[str, Any] = {"attached": True}
                 elif method == "health.ping":
                     self.pings += 1
@@ -404,7 +416,7 @@ def test_8_gc_sweep_removes_nothing_and_separates_live_cold_from_unowned(
     ]
     gc = GarbageCollector(
         store,
-        tg._cfg(tmp_path) if hasattr(tg, "_cfg") else _gc_cfg(tmp_path),
+        tg._cfg(tmp_path),
         list_containers=lambda: list(containers),
         now_fn=lambda: 1_000_000,
     )
@@ -417,12 +429,6 @@ def test_8_gc_sweep_removes_nothing_and_separates_live_cold_from_unowned(
     assert by_id["cid-orphan"]["owner"] == "unowned"
     assert not rep.get("removed")
     store.close()
-
-
-def _gc_cfg(tmp: Path) -> Any:
-    from agentd.config import Config
-
-    return Config(raw={"host": {"owner": "huozhe"}}, root=tmp)
 
 
 # (9) --------------------------------------------------------------------
@@ -570,3 +576,65 @@ def test_11_each_cause_has_its_own_reason_and_stopped_never_connects(
     assert "o/stopped" not in probed, "no socket for a container we know is stopped"
     assert set(probed) == {"o/noaddr", "o/unreach", "o/uninit"}
     store.close()
+
+
+# (12) -------------------------------------------------------------------
+
+
+def test_12_wrong_bearer_is_unauthorized_not_unreachable(
+    tmp_path: Path, stub: Any
+) -> None:
+    """The one cause lazy promotion does not repair — it recreates instead.
+
+    `promote_hot` reuses `runners.token` as the bearer, so a wrong-token row
+    fails its ping again inside `_ensure_session_locked` and the adopt branch
+    runs `docker rm -f` on a healthy, initialised runner. Labelling it
+    `unreachable` points the reader at the port story; the repair is the row.
+    """
+    store = Store(tmp_path / "state.db")
+    stub.initialized = True
+
+    # (2)'s rule: the same runner must be shown serviceable first, or
+    # "unauthorized" is indistinguishable from a stub that never listened.
+    _seed(store, endpoint=f"127.0.0.1:{stub.port}", last_seen_at=STALE)
+    rep = _pass(store, [_container()], now=999_000)
+    assert [e["reason"] for e in rep["attached"]] == ["attached"]
+    assert store.get_runner(PROJECT)["last_seen_at"] == 999_000
+
+    # same live, initialised runner — only the stored token is wrong
+    store.upsert_runner(
+        PROJECT,
+        container_id="cid-1",
+        endpoint=f"127.0.0.1:{stub.port}",
+        token="not-the-bearer",
+        tier="hot",
+    )
+    store.touch_runner_seen(PROJECT, now=STALE)
+    removed: list[str] = []
+    rep = _pass(store, [_container()], now=999_100, removed=removed)
+
+    assert [(e["project"], e["reason"]) for e in rep["unattached"]] == [
+        (PROJECT, "unauthorized")
+    ]
+    row = store.get_runner(PROJECT)
+    assert row["tier"] == "hot"
+    assert row["last_seen_at"] == STALE
+    assert removed == []
+    store.close()
+
+
+def test_12b_only_minus_32001_is_unauthorized(tmp_path: Path, stub: Any) -> None:
+    """Keyed on the typed code, never the message (#35)."""
+    from agentd.rpc_client import RpcError, RunnerClient
+
+    class _Erroring(RunnerClient):
+        code = -32603
+
+        def connect(self) -> None:
+            raise RpcError(type(self).code, "boom")
+
+    row = {"endpoint": f"127.0.0.1:{stub.port}", "token": "tok"}
+    _Erroring.code = -32001
+    assert probe_runner(row, client_cls=_Erroring).reason == "unauthorized"
+    _Erroring.code = -32603
+    assert probe_runner(row, client_cls=_Erroring).reason == "unreachable"

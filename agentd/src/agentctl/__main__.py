@@ -78,7 +78,12 @@ def main(argv: list[str] | None = None) -> None:
     p_rec.add_argument(
         "--dry-run",
         action="store_true",
-        help="Read-only inventory: orphans, runners, open turns, closed-live",
+        help=(
+            "Read-only inventory: orphans, runners, open turns, closed-live, "
+            "and runner attachment. Read-only is not offline — since ADR-34 "
+            "the pass opens one health.ping per kept project (2 s timeout). "
+            "It writes nothing: no removals, no last_seen_at stamp, no nudge."
+        ),
     )
     p_gc = sub.add_parser(
         "gc",
