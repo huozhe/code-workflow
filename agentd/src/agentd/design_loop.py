@@ -9,6 +9,7 @@ import sqlite3
 import threading
 import time
 import uuid
+import zlib
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -49,6 +50,7 @@ from agentd.loop_safety import (
     SilentTurnTracker,
     StallTracker,
     progress_fingerprint,
+    silent_turn_mode,
 )
 from agentd.refusals import CapacityRefusal, StructuralRefusal
 from agentd.routing import (
@@ -808,6 +810,24 @@ class DesignLoop:
         )
         # DEFER: leave queued — no FSM (session paused for non-owner).
         if decision.action == RouteAction.DEFER:
+            # ADR-32 (c): a terminal session still reads as paused, because the
+            # close never cleared paused_reason (#147). Deferring re-queues the
+            # same delivery on every 5 s tick, forever, and #85's gate is sixty
+            # lines below, so it never runs on this path. A *second* check, not
+            # a move, so the gate below still runs for a delivery that does not
+            # defer. (The ADR justifies the split by a delivery that moves a
+            # live session into TEARDOWN; that cannot reach the gate — issues/
+            # closed returns from _handle_session_issue_closed above the FSM —
+            # so the reachable reason is coverage of both paths.)
+            if state in TERMINAL_STATES:
+                self.store.set_delivery_status(delivery_id, "done")
+                log.info(
+                    "no turn id=%s session=%s — terminal state=%s (defer suppressed)",
+                    delivery_id,
+                    session_key,
+                    state,
+                )
+                return
             log.info("route defer id=%s reason=%s", delivery_id, decision.reason)
             return
 
@@ -842,7 +862,10 @@ class DesignLoop:
         # drops the turn (self-echo). Architect merge of the Design PR is sent by
         # the Architect identity — recipient is also Architect (§8.3), so without
         # this the merge never advances DESIGN_APPROVED → IMPLEMENTING (M3-D).
-        state_changed = False
+        # ADR-32 (a) term 2: compared against the post-turn state. Captured
+        # here rather than at dispatch so it also covers the transition the
+        # triggering delivery caused — the binding widens, it never narrows.
+        state_before_turn = state
         tr = transition(state, kind)
         if tr:
             fields: dict[str, Any] = {"state": tr.new_state}
@@ -854,7 +877,6 @@ class DesignLoop:
                 fields["feature_pr"] = dig["pr"]
             self.store.update_session_fields(session_key, **fields)
             state = tr.new_state
-            state_changed = True
             log.info("fsm %s → %s (%s)", session_key, tr.new_state, tr.note)
             # M5-0 / #50: structural §10.1 block so issues.closed can classify.
             # Gateway authors the scaffold (reliability); Architect may refine
@@ -994,28 +1016,44 @@ class DesignLoop:
             # Gateway timeout: runner may still finish; do not budget a phantom
             # failed turn (#34). Successful / other failed paths count once.
             if status != "gateway_timeout":
-                budget.after_agent_turn()
-                fields_upd: dict[str, Any] = {
-                    "turn_count": budget.turn_count,
-                    "consec_agent_turns": budget.consec_agent_turns,
-                }
                 # #39 / PR #42 B1: count silent turns on *observed* progress only.
                 # public_actions are claims (tool_use) — diagnostic, not a reset.
-                silent = SilentTurnTracker(
-                    silent_count=int(sess.get("silent_turns") or 0),
-                    threshold=int(self.config.silent_turn_limit),
-                )
                 actions = (turn_result or {}).get("public_actions") or []
                 if not isinstance(actions, list):
                     actions = []
-                observed = state_changed or kind in _OBSERVED_PROGRESS_KINDS
-                breach = silent.after_turn(
-                    public_actions=actions,
+                status_s = str(status) if status else None
+                # The window query is the only expensive term. A turn whose
+                # status cannot move the counter discards the answer, so do not
+                # pay for it: silent_turn_mode is "keep" for those regardless of
+                # what was observed.
+                observed, window_examined = False, False
+                if silent_turn_mode(observed_progress=False, status=status_s) != "keep":
+                    observed, window_examined = self._observed_progress(
+                        session_key=session_key,
+                        repo=repo,
+                        kind=kind,
+                        turn_id=turn_id,
+                        state_before_turn=state_before_turn,
+                    )
+                # ADR-32 (b): one SQL statement for all three counters. The
+                # snapshot this used to read back is older than the whole turn.
+                mode = silent_turn_mode(
                     observed_progress=observed,
-                    status=str(status) if status else None,
+                    status=status_s,
                 )
-                fields_upd["silent_turns"] = silent.silent_count
-                self.store.update_session_fields(session_key, **fields_upd)
+                counters = self.store.bump_turn_counters(session_key, silent=mode)
+                # Escalation means "the counter reached the limit *this turn*",
+                # which is what the old read-modify-write said by returning
+                # early. A turn whose status is not countable moves nothing and
+                # must not re-escalate a session already at the limit.
+                breach = None
+                if mode == "inc":
+                    breach = SilentTurnTracker(
+                        silent_count=counters["silent_turns"],
+                        threshold=int(self.config.silent_turn_limit),
+                    ).breach_message(
+                        public_actions=actions, window_examined=window_examined
+                    )
                 if breach:
                     self._escalate(session_key, "system", breach)
                     self.store.set_delivery_status(delivery_id, "done")
@@ -1047,6 +1085,86 @@ class DesignLoop:
             return isinstance(ping, dict) and ping.get("initialized") is True
         except Exception:  # noqa: BLE001 — ping probe
             return False
+
+    def _observed_progress(
+        self,
+        *,
+        session_key: str,
+        repo: str,
+        kind: str,
+        turn_id: str,
+        state_before_turn: str,
+    ) -> tuple[bool, bool]:
+        """§9.3's question, asked of the **turn** (ADR-32 (a)).
+
+        Three terms, widening only — returns ``(observed, window_examined)``:
+
+        1. the triggering delivery's kind, unchanged from before this ADR;
+        2. the FSM state, compared across the turn — captured before the FSM
+           runs, so the triggering delivery's own transition still counts;
+        3. a progress-kind delivery for this session inside the turn's window.
+
+        The triggering delivery cannot satisfy (3): its ``received_at`` is at or
+        before ``started_at`` and the lower bound is strict. ``window_examined``
+        is what (e) needs — the escalation may only say no event arrived once
+        the query has actually run.
+        """
+        if kind in _OBSERVED_PROGRESS_KINDS:
+            return True, False
+        sess_after = self.store.get_session(session_key) or {}
+        if str(sess_after.get("state") or state_before_turn) != state_before_turn:
+            return True, False
+
+        turn = self.store.get_turn(turn_id)
+        if not turn or turn.get("ended_at") is None:
+            return False, False
+        rows = self.store.deliveries_in_window(
+            repo=repo,
+            after=int(turn["started_at"]),
+            through=int(turn["ended_at"]),
+        )
+        for row in rows:
+            if row["issue_num"] is None:
+                continue
+            # Cheap filter first: only these events can normalise to a progress
+            # kind, and resolving a session per row is not free.
+            if str(row["event"]) not in (
+                "issues",
+                "issue_comment",
+                "pull_request",
+                "pull_request_review",
+            ):
+                continue
+            try:
+                data = _payload_dict(decompress_payload(row["payload"]))
+            except zlib.error:
+                continue
+            _, sk, _ = self._resolve_session_for_delivery(
+                event=str(row["event"]),
+                repo=repo,
+                issue_num=int(row["issue_num"]),
+                data=data,
+            )
+            if sk != session_key:
+                continue
+            row_kind = self._event_kind(
+                str(row["event"]),
+                str(row["action"]) if row["action"] is not None else None,
+                data,
+                str(row["sender"] or ""),
+                repo=repo,
+            )
+            if row_kind in _OBSERVED_PROGRESS_KINDS:
+                log.info(
+                    "observed progress in turn window turn=%s session=%s "
+                    "delivery=%s kind=%s",
+                    turn_id,
+                    session_key,
+                    row["delivery_id"],
+                    row_kind,
+                )
+                return True, True
+        return False, True
 
     def _dispatch_turn(
         self,
@@ -2371,7 +2489,13 @@ class DesignLoop:
         if state != "TEARDOWN":
             tr = transition(state, "issues_closed")
             if tr:
-                self.store.update_session_fields(session_key, state=tr.new_state)
+                # ADR-32 (d): the entry into TEARDOWN, and the write the ADR
+                # should have named. :2886 is a conditional re-assert after
+                # ensure_session — a session that never needs one would carry
+                # the stale reason through the whole teardown.
+                self.store.update_session_fields(
+                    session_key, state=tr.new_state, paused_reason=None
+                )
                 log.info(
                     "fsm %s → %s (%s) class=%s",
                     session_key,
@@ -2672,7 +2796,12 @@ class DesignLoop:
         )
         if dest is None:
             return None
-        self.store.update_session_fields(session_key, state="CLOSED")
+        # ADR-32 (d): paused_reason is load-bearing control state, not a note.
+        # Left set, a closed session reads as paused forever (escalations keeps
+        # the text). Cleared here and on TEARDOWN — both are terminal.
+        self.store.update_session_fields(
+            session_key, state="CLOSED", paused_reason=None
+        )
         log.info(
             "session CLOSED session=%s class=%s archive=%s",
             session_key,
@@ -2772,7 +2901,9 @@ class DesignLoop:
             # TEARDOWN so the runner prompt gets the teardown obligation.
             # Layout recreate (worktree add / ledger re-register) is expected
             # when the project container is absent; teardown deletes it again.
-            self.store.update_session_fields(session_key, state="TEARDOWN")
+            self.store.update_session_fields(
+                session_key, state="TEARDOWN", paused_reason=None
+            )  # ADR-32 (d)
             log.info(
                 "teardown re-asserted TEARDOWN after ensure_session session=%s",
                 session_key,
@@ -3186,35 +3317,13 @@ class DesignLoop:
             if status in ("role_busy", "quota_exhausted"):
                 return
             if status != "gateway_timeout":
-                budget = BudgetState(
-                    turn_count=int(sess.get("turn_count") or 0),
-                    consec_agent_turns=0,
-                    review_rounds=int(sess.get("review_rounds") or 0),
+                # Owner unpause is observed progress; the silent counter resets
+                # and the agent-turn counter restarts at this turn. ADR-32 (b):
+                # one statement, same as the main path — turn_count was the
+                # read-modify-write here.
+                self.store.bump_turn_counters(
+                    session_key, silent="reset", restart_consec=True
                 )
-                budget.after_agent_turn()
-                # Owner unpause is observed progress; silent counter stays 0.
-                silent = SilentTurnTracker(
-                    silent_count=0,
-                    threshold=int(self.config.silent_turn_limit),
-                )
-                actions = (turn_result or {}).get("public_actions") or []
-                if not isinstance(actions, list):
-                    actions = []
-                breach = silent.after_turn(
-                    public_actions=actions,
-                    observed_progress=True,
-                    status=str(status) if status else None,
-                )
-                self.store.update_session_fields(
-                    session_key,
-                    turn_count=budget.turn_count,
-                    consec_agent_turns=budget.consec_agent_turns,
-                    silent_turns=silent.silent_count,
-                )
-                if breach:
-                    self._escalate(session_key, "system", breach)
-                    self.store.set_delivery_status(delivery_id, "done")
-                    return
 
         self.store.set_delivery_status(delivery_id, "routed")
         log.info(

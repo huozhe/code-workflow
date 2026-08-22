@@ -788,6 +788,77 @@ class Store:
             )
             self._conn.commit()
 
+    def bump_turn_counters(
+        self,
+        session_key: str,
+        *,
+        silent: str,
+        restart_consec: bool = False,
+    ) -> dict[str, int]:
+        """ADR-32 (b): move all three turn counters in **one** SQL statement.
+
+        The old shape read ``sessions`` before dispatch and wrote the counters
+        back after, a read-modify-write spanning the whole turn. Returns the
+        post-update values, which are the only ones a caller may act on.
+
+        ``silent`` is ``"inc"`` / ``"reset"`` / ``"keep"`` (see
+        :func:`agentd.loop_safety.silent_turn_mode`); ``restart_consec`` is the
+        owner-unpause path, where the counter restarts at this turn.
+        """
+        if silent not in ("inc", "reset", "keep"):
+            raise ValueError(f"bad silent mode {silent!r}")
+        with self._lock:
+            row = self._conn.execute(
+                """
+                UPDATE sessions SET
+                  turn_count = turn_count + 1,
+                  consec_agent_turns =
+                    CASE WHEN ? THEN 1 ELSE consec_agent_turns + 1 END,
+                  silent_turns = CASE ?
+                    WHEN 'reset' THEN 0
+                    WHEN 'inc' THEN silent_turns + 1
+                    ELSE silent_turns END,
+                  updated_at = ?
+                WHERE session_key = ?
+                RETURNING turn_count, consec_agent_turns, silent_turns
+                """,
+                (1 if restart_consec else 0, silent, int(time.time()), session_key),
+            ).fetchone()
+            self._conn.commit()
+        if row is None:
+            raise KeyError(session_key)
+        return {
+            "turn_count": int(row["turn_count"]),
+            "consec_agent_turns": int(row["consec_agent_turns"]),
+            "silent_turns": int(row["silent_turns"]),
+        }
+
+    def deliveries_in_window(
+        self,
+        *,
+        repo: str,
+        after: int,
+        through: int,
+    ) -> list[dict[str, Any]]:
+        """Deliveries received inside a turn's window (ADR-32 (a)).
+
+        Bounds are **strict below, inclusive above**: ``received_at`` and
+        ``turns.started_at`` are both whole seconds and collide in practice, so
+        a ``>=`` here would let the triggering delivery observe its own turn.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT delivery_id, event, action, repo, issue_num, sender,
+                       received_at, payload
+                FROM deliveries
+                WHERE repo = ? AND received_at > ? AND received_at <= ?
+                ORDER BY received_at ASC
+                """,
+                (repo, int(after), int(through)),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
     def list_deferred(self, limit: int = 100) -> list[sqlite3.Row]:
         with self._lock:
             return list(
@@ -955,6 +1026,19 @@ class Store:
                 ),
             )
             self._conn.commit()
+
+    def get_turn(self, turn_id: str) -> dict[str, Any] | None:
+        """One turn row, or None. ADR-32 (a) reads its ``[started_at, ended_at]``."""
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT turn_id, session_key, role, delivery_id,
+                       started_at, ended_at, status, summary, public_actions
+                FROM turns WHERE turn_id = ?
+                """,
+                (turn_id,),
+            ).fetchone()
+        return dict(row) if row is not None else None
 
     def finish_turn(
         self,

@@ -44,6 +44,22 @@ class BudgetState:
         return None
 
 
+def silent_turn_mode(*, observed_progress: bool, status: str | None) -> str:
+    """Which way ``sessions.silent_turns`` moves for one finished turn.
+
+    ``"keep"`` — not countable agent work (failure / timeout paths own those).
+    ``"reset"`` — observed progress (P1).  ``"inc"`` — a silent turn.
+
+    Split out of :meth:`SilentTurnTracker.after_turn` for ADR-32 (b): the
+    decision is made here, the write is one SQL statement, and the resulting
+    count comes back from the database rather than from a stale snapshot.
+    """
+    # Only completed agent work counts; failures/timeouts are separate paths.
+    if status not in (None, "done", "changes_requested"):
+        return "keep"
+    return "reset" if observed_progress else "inc"
+
+
 @dataclass
 class SilentTurnTracker:
     """§9.3 third signal (#39): consecutive agent turns with no *observed* progress.
@@ -66,14 +82,30 @@ class SilentTurnTracker:
         public_actions: list | None,
         observed_progress: bool,
         status: str | None,
+        window_examined: bool = False,
     ) -> str | None:
-        # Only completed agent work counts; failures/timeouts are separate paths.
-        if status not in (None, "done", "changes_requested"):
+        mode = silent_turn_mode(observed_progress=observed_progress, status=status)
+        if mode == "keep":
             return None
-        if observed_progress:
+        if mode == "reset":
             self.silent_count = 0
             return None
         self.silent_count += 1
+        return self.breach_message(
+            public_actions=public_actions, window_examined=window_examined
+        )
+
+    def breach_message(
+        self,
+        *,
+        public_actions: list | None,
+        window_examined: bool,
+    ) -> str | None:
+        """Escalation text for the *current* ``silent_count``, or None.
+
+        ADR-32 (b): the counter is moved by a single SQL statement, so the
+        caller may hold a count this tracker never incremented itself.
+        """
         if self.silent_count < self.threshold:
             return None
         claimed = public_actions or []
@@ -86,10 +118,17 @@ class SilentTurnTracker:
         )
         # Distinct signal name so §8.5 text is unambiguous vs turn-budget breach.
         if claimed:
+            # ADR-32 (e): "no matching event arrived" is a claim about the
+            # turn's window. Only make it when the window was actually queried.
+            tail = (
+                "but no matching event arrived (P1)"
+                if window_examined
+                else "and the turn's event window was not examined"
+            )
             return (
                 f"stall: silent_turns — {self.silent_count} consecutive agent turns "
                 f"with no observed GitHub/FSM progress; agent claimed "
-                f"public_actions={kinds} but no matching event arrived (P1)"
+                f"public_actions={kinds} {tail}"
             )
         return (
             f"stall: silent_turns — {self.silent_count} consecutive agent turns "
