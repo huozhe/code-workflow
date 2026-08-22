@@ -43,6 +43,8 @@ def runner_image() -> str:
     rebuild — and silently redeploy — the image this host actually runs.
     """
     return os.environ.get("AGENTD_RUNNER_IMAGE") or DEFAULT_IMAGE
+
+
 RPC_CONTAINER_PORT = 7000
 # Container-local rootfs path (docker cp after create). Not bind mount, not Env.
 BEARER_IN_CONTAINER = "/etc/agentd/rpc.bearer"
@@ -398,9 +400,8 @@ class SessionSupervisor:
 
         if not image_present():
             raise StructuralRefusal(
-                f"session-runner image missing: {runner_image()}. Build/load the "
-                f"image on "
-                f"this host, then reply on the issue to retry."
+                f"session-runner image missing: {runner_image()}. Build/load "
+                f"the image on this host, then reply on the issue to retry."
             )
 
         self._prepare_project_issue_layout(
@@ -467,7 +468,19 @@ class SessionSupervisor:
         ]
         for k, v in env.items():
             create_args.extend(["-e", f"{k}={v}"])
-        create_args.append(runner_image())
+        image = runner_image()
+        # #187: the resolved image is a control surface — AGENTD_RUNNER_IMAGE is
+        # read on every call, so a daemon started from a shell that exported it
+        # creates every container from that tag while the mismatch guards, which
+        # compare against the same call, stay consistent and report nothing.
+        # Log it so "which image is this daemon on" is answerable from the log.
+        if image != DEFAULT_IMAGE:
+            log.warning(
+                "container image OVERRIDDEN %s (default %s)", image, DEFAULT_IMAGE
+            )
+        else:
+            log.info("container image %s", image)
+        create_args.append(image)
 
         if any("docker.sock" in a for a in create_args):
             raise StructuralRefusal(
