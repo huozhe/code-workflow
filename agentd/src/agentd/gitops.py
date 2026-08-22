@@ -351,6 +351,19 @@ def local_branch_gone(clone: Path, branch: str) -> bool:
     if not (clone / ".git").exists() and not (clone / "HEAD").exists():
         return False
     listed = _git(clone, "branch", "--list", branch, check=False)
+    if listed.returncode != 0:
+        # #167: a failing git writes nothing to stdout, which is indistinguishable
+        # from "no such branch" if only stdout is read. A clone that is present
+        # but unreadable — mid-construction, corrupt HEAD, .git not yet populated
+        # — passes the existence guards above and would otherwise be read as
+        # confirmation. Asked and could not read is not confirmation.
+        log.warning(
+            "branch check failed clone=%s branch=%s rc=%s — not confirming absence",
+            clone,
+            branch,
+            listed.returncode,
+        )
+        return False
     return not bool((listed.stdout or "").strip())
 
 

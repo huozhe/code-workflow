@@ -557,11 +557,12 @@ def test_young_stale_branch_row_survives_the_age_floor(tmp_path: Path) -> None:
     store.close()
 
 
-def test_branch_row_survives_an_unreadable_clone(tmp_path: Path) -> None:
+def test_branch_row_survives_a_missing_clone(tmp_path: Path) -> None:
     """No clone is not confirmation (gitops: "a missing clone is *not* confirmation").
 
     Without this the first GC pass after a clone is moved or not yet created
-    would clear every branch row on no evidence at all.
+    would clear every branch row on no evidence at all. This is the *existence*
+    guard; `test_branch_row_survives_a_broken_clone` covers the other one.
     """
     store = Store(tmp_path / "state.db")
     sk = _sess(store)  # no clone created
@@ -596,5 +597,34 @@ def test_dry_run_reports_the_branch_row_without_clearing_it(tmp_path: Path) -> N
     report = _gc(store, tmp_path, now=now).collect_once(dry_run=True)
 
     assert {"ref": _DEV, "kind": "branch"} in report["ledger_stale"]
+    assert len(store.list_artifacts(sk, open_only=True)) == 1
+    store.close()
+
+
+def test_branch_row_survives_a_broken_clone(tmp_path: Path) -> None:
+    """A clone that is present but unreadable is not confirmation either (#167).
+
+    The existence guards pass — the directory and `.git` are both there — so the
+    answer comes from git, and a failing git writes nothing to stdout. Reading
+    stdout alone makes that indistinguishable from "no such branch", which would
+    clear the whole branch ledger permanently on a clone that was merely
+    mid-construction. `mark_artifact_removed` is one-way, so there is no second
+    chance to notice.
+    """
+    store = Store(tmp_path / "state.db")
+    sk = _sess(store)
+    clone = shared_clone_path(tmp_path, "huozhe/code-workflow")
+    (clone / ".git").mkdir(parents=True)  # present, unusable
+    now = 10_000_000
+    store.register_artifact(
+        session_key=sk,
+        role="developer",
+        kind="branch",
+        ref=_DEV,
+        created_at=now - ARTIFACT_AGE_FLOOR_S - 1,
+    )
+    report = _gc(store, tmp_path, now=now).collect_once()
+
+    assert report["ledger_stale"] == []
     assert len(store.list_artifacts(sk, open_only=True)) == 1
     store.close()
