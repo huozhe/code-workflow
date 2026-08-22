@@ -14,7 +14,7 @@ from agentd.config import Config
 from agentd.db import Store
 from agentd.design_loop import DesignLoop
 from agentd.refusals import CapacityRefusal
-from agentd.supervisor import IMAGE, SessionSupervisor
+from agentd.supervisor import SessionSupervisor, runner_image
 
 
 def _cfg(tmp: Path, *, max_hot: int = 4) -> Config:
@@ -103,9 +103,12 @@ def test_runner_reachable_requires_initialized(tmp_path: Path) -> None:
 
 
 class _DockerWorld:
-    def __init__(self, *, running: bool, image: str = IMAGE, exists: bool = True):
+    def __init__(
+        self, *, running: bool, image: str | None = None, exists: bool = True
+    ):
         self.running = running
-        self.image = image
+        # default resolved at call time (#187), not frozen at import
+        self.image = runner_image() if image is None else image
         self.exists = exists
         self.removed: list[tuple] = []
         self.started: list[str] = []
@@ -143,7 +146,9 @@ class _DockerWorld:
 
 def _wire_supervisor(sup: SessionSupervisor, world: _DockerWorld, monkeypatch) -> None:
     monkeypatch.setattr("agentd.supervisor._docker", world.docker)
-    monkeypatch.setattr("agentd.supervisor.image_present", lambda image=IMAGE: True)
+    monkeypatch.setattr(
+        "agentd.supervisor.image_present", lambda image=None: True
+    )
     monkeypatch.setattr(
         "agentd.supervisor._host_port_from_inspect", lambda cid: 5555
     )
@@ -241,7 +246,7 @@ def test_ensure_plants_port_is_replaced(
 def test_ensure_stopped_wrong_image_recreates(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Acceptance (3): stopped + image != IMAGE → recreate, not start."""
+    """Acceptance (3): stopped + image != runner_image() → recreate, not start."""
     store = Store(tmp_path / "state.db")
     sk = _seed(store, cid="cid-old")
     world = _DockerWorld(running=False, image="agentd/session-runner:old")

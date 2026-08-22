@@ -32,7 +32,17 @@ from agentd.rpc_client import RunnerClient
 
 log = logging.getLogger("agentd.supervisor")
 
-IMAGE = "agentd/session-runner:1.2.0"
+DEFAULT_IMAGE = "agentd/session-runner:1.2.0"
+
+
+def runner_image() -> str:
+    """Image session-runner containers are created from.
+
+    #187: resolved on every call, never frozen at import. The test suite points
+    ``AGENTD_RUNNER_IMAGE`` at its own tag so that running the suite cannot
+    rebuild — and silently redeploy — the image this host actually runs.
+    """
+    return os.environ.get("AGENTD_RUNNER_IMAGE") or DEFAULT_IMAGE
 RPC_CONTAINER_PORT = 7000
 # Container-local rootfs path (docker cp after create). Not bind mount, not Env.
 BEARER_IN_CONTAINER = "/etc/agentd/rpc.bearer"
@@ -68,8 +78,8 @@ def _docker(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     )
 
 
-def image_present(image: str = IMAGE) -> bool:
-    r = _docker("image", "inspect", image, check=False)
+def image_present(image: str | None = None) -> bool:
+    r = _docker("image", "inspect", image or runner_image(), check=False)
     return r.returncode == 0
 
 
@@ -388,7 +398,8 @@ class SessionSupervisor:
 
         if not image_present():
             raise StructuralRefusal(
-                f"session-runner image missing: {IMAGE}. Build/load the image on "
+                f"session-runner image missing: {runner_image()}. Build/load the "
+                f"image on "
                 f"this host, then reply on the issue to retry."
             )
 
@@ -456,7 +467,7 @@ class SessionSupervisor:
         ]
         for k, v in env.items():
             create_args.extend(["-e", f"{k}={v}"])
-        create_args.append(IMAGE)
+        create_args.append(runner_image())
 
         if any("docker.sock" in a for a in create_args):
             raise StructuralRefusal(
@@ -567,7 +578,7 @@ class SessionSupervisor:
         running, image = _inspect_running_and_image(cid)
         if running is None:
             raise RuntimeError(f"container {cid} gone")
-        mismatch = bool(image) and image != IMAGE
+        mismatch = bool(image) and image != runner_image()
         self._prepare_project_issue_layout(
             repo=repo,
             issue_num=issue_num,
@@ -620,7 +631,7 @@ class SessionSupervisor:
                 )
                 return handle
             if mismatch:
-                raise RuntimeError(f"image mismatch {image} != {IMAGE}")
+                raise RuntimeError(f"image mismatch {image} != {runner_image()}")
             return self._promote_existing(
                 session_key=session_key,
                 repo=repo,
@@ -630,7 +641,7 @@ class SessionSupervisor:
                 developer=developer,
             )
         if mismatch:
-            raise RuntimeError(f"image mismatch {image} != {IMAGE}")
+            raise RuntimeError(f"image mismatch {image} != {runner_image()}")
         return self._promote_existing(
             session_key=session_key,
             repo=repo,
