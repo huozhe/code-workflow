@@ -22,6 +22,7 @@ _RUNNER_ROOT = Path(__file__).resolve().parents[1] / "docker" / "session-runner"
 sys.path.insert(0, str(_RUNNER_ROOT))
 
 from agentd_runner import cli_session  # noqa: E402
+from agentd_runner.quota import parse_reset_epoch  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -991,32 +992,53 @@ def test_claude_mentions_of_limits_are_not_quota(tmp_path: Path) -> None:
         assert result.get("retry_after") is None
 
 
-def test_claude_quota_with_assistant_text_is_failed(tmp_path: Path) -> None:
-    """Vendor refusal has no agent output. Talking about quota is not a refusal."""
-    lines = [
-        json.dumps(
-            {
-                "type": "assistant",
-                "session_id": "s-talk",
-                "message": {
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": "I will wait for the session limit.",
-                        }
-                    ]
-                },
-            }
-        ),
+def _quota_after_work_lines(*, with_text: bool, with_tool: bool) -> list[str]:
+    """The live shape: real work, then the vendor refuses mid-turn."""
+    frames: list[str] = []
+    if with_text:
+        frames.append(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "session_id": "s-work",
+                    "message": {
+                        "content": [{"type": "text", "text": "Opening the PR now."}]
+                    },
+                }
+            )
+        )
+    if with_tool:
+        frames.append(
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "session_id": "s-work",
+                    "message": {
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "name": "run_terminal_command",
+                                "input": {"command": "gh pr create"},
+                            }
+                        ]
+                    },
+                }
+            )
+        )
+    frames.append(
         json.dumps(
             {
                 "type": "result",
-                "session_id": "s-talk",
+                "session_id": "s-work",
                 "is_error": True,
-                "result": "You've hit your session limit · resets 9:30am (UTC)",
+                "result": "You've hit your session limit \u00b7 resets 9:30am (UTC)",
             }
-        ),
-    ]
+        )
+    )
+    return frames
+
+
+def _run_turn(sess_lines: list[str], tmp_path: Path) -> dict:
     sess = cli_session.LiveCliSession(
         role="architect",
         adapter="claude-code",
@@ -1026,14 +1048,84 @@ def test_claude_quota_with_assistant_text_is_failed(tmp_path: Path) -> None:
         xdg=tmp_path / "x",
         spawn_cwd=tmp_path,
     )
-    _wire_scripted_cli(sess, [lines])
+    _wire_scripted_cli(sess, [sess_lines])
     with (
         patch.object(cli_session.LiveCliSession, "_sample_rss"),
         patch.object(cli_session.LiveCliSession, "_spawn_unlocked"),
         patch.object(cli_session.LiveCliSession, "_kill_unlocked"),
     ):
-        result = sess.turn("go", deadline_s=5)
-    assert result["status"] == "failed"
+        return sess.turn("go", deadline_s=5)
+
+
+def test_quota_after_assistant_text_is_quota_exhausted(tmp_path: Path) -> None:
+    """ADR-33 (1): a limit that follows real work is a refusal, not a failure.
+
+    Replaces ``test_claude_quota_with_assistant_text_is_failed``, whose docstring
+    — "Vendor refusal has no agent output" — asserted the false premise as fact.
+    Its fixture is frame for frame what live turns ``t-a2c3e6ebe3ae`` (#151) and
+    ``t-690b8db01e8b`` (#169) produced, so it was the defect written as a test.
+
+    Assert ``retry_after``, not only the status: a status-only assertion passes
+    against a classification that loses the reset, and the reset is what the
+    role hold is built from.
+    """
+    result = _run_turn(
+        _quota_after_work_lines(with_text=True, with_tool=False), tmp_path
+    )
+    assert result["status"] == "quota_exhausted"
+    assert result["retry_after"] == parse_reset_epoch(
+        "You've hit your session limit \u00b7 resets 9:30am (UTC)"
+    )
+
+
+def test_quota_after_tool_use_is_quota_exhausted(tmp_path: Path) -> None:
+    """ADR-33 (2): the gate had two terms and (1) exercises only one."""
+    result = _run_turn(
+        _quota_after_work_lines(with_text=False, with_tool=True), tmp_path
+    )
+    assert result["status"] == "quota_exhausted"
+    assert result["public_actions"]
+
+
+def test_successful_turn_quoting_the_limit_copy_is_done(tmp_path: Path) -> None:
+    """ADR-33 (4): ``is_error`` is what separates a refusal from talk about one.
+
+    Fails if (a) is implemented by dropping the ``is_err`` guard rather than the
+    emptiness condition — the turn's text is the limit copy verbatim.
+    """
+    lines = [
+        json.dumps(
+            {
+                "type": "assistant",
+                "session_id": "s-talk",
+                "message": {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                "The error read: You've hit your session limit "
+                                "\u00b7 resets 9:30am (UTC)"
+                            ),
+                        }
+                    ]
+                },
+            }
+        ),
+        json.dumps(
+            {
+                "type": "result",
+                "session_id": "s-talk",
+                "is_error": False,
+                "result": (
+                    "The error read: You've hit your session limit "
+                    "\u00b7 resets 9:30am (UTC)"
+                ),
+            }
+        ),
+    ]
+    result = _run_turn(lines, tmp_path)
+    assert result["status"] == "done"
+    assert "retry_after" not in result
 
 
 def test_two_results_for_one_prompt_turn_two_does_not_take_leftover(
