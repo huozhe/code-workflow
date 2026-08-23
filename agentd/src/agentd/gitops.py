@@ -370,6 +370,23 @@ def _git_answers_for(clone: Path) -> bool:
     repository — and live the moment `AGENTD_ROOT` sits inside a checkout, which
     nothing prevents. The two guards are independent: this one refuses an answer
     from the wrong repository, #189's refuses an answer git could not give.
+
+    **Assumes a non-bare clone**, deliberately rather than incidentally.
+    `--show-toplevel` exits 128 on a bare repository, so a bare shared clone —
+    not fanciful, since it exists only to host worktrees and `worktree add`
+    works from one — would have every branch row refused. `--absolute-git-dir`
+    catches #190's case identically *and* answers for bare, but it has to be
+    compared against `clone/.git`, which is wrong whenever `.git` is a file.
+    The explicit question was preferred; the constraint is recorded here so a
+    future reader meeting it can tell a decision from a bug.
+
+    It asks *is this the toplevel*, not *does git answer for this tree*, so a
+    **subdirectory** of the clone is refused too. Correct, and unreachable
+    today: callers pass the clone root.
+
+    `Path.resolve()` does not canonicalise case on macOS, so a clone reached
+    through a mis-cased `AGENTD_ROOT` refuses every row. Like every other arm
+    here, that fails closed — a warning per row, and nothing reclaimed.
     """
     top = _git(clone, "rev-parse", "--show-toplevel", check=False)
     out = (top.stdout or "").strip()
