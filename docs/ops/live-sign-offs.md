@@ -71,6 +71,15 @@ result is only as good as its fixture* — earned six more instances across #116
 #172, and the shape is always the same: the fixture could not **reach** the case it
 was named for, and the result looked like evidence rather than absence.
 
+**This file has already done it once.** An earlier draft put #171 under *During*
+while the same row's advice read "watch the first `ensure_session` repair it" —
+the two columns disagreed, and the one that was wrong was the one a reader acts
+on. Someone following it would have watched a turn for something that had already
+happened, then read `behind=0` as evidence without knowing whether they saw the
+repair or arrived after it. A document whose columns disagree is the prose form of
+a suite whose fixture cannot reach its case: both fail by looking complete. Check
+the *how* against the *when* before trusting either.
+
 Three forms are worth naming because none of them looks like a fixture at all:
 
 - **A reproduction that fails.** "Cannot reproduce" is a null result. Prove the
