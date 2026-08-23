@@ -38,7 +38,7 @@ only.
 |---|---|---|---|
 | **#116** | ADR-34 | The reconciler's probe reaching a runner **inside a real container over a published port**: `attached=1` with a real `rss_bytes` in the pass report | Any unit fixture. Everything run so far is a socket stub or an in-process server |
 | **#172** | ADR-35 | A **real vendor CLI** (`claude`/`grok`) killed by the runner, with no descendant surviving | Every kill driven so far was against `sh` |
-| **#171** | ADR-31 | Both role worktrees `behind=0` on the live clone, observed on a **fresh** session with no agent action | The repair happens inside the first `ensure_session`, so start watching before the session is created — arriving later shows `behind=0` without telling you whether you observed the repair. **Do not repair it by hand**, or there is nothing left to observe |
+| **#171** | ADR-31 | Both role worktrees `behind=0` on the live clone, observed on a **fresh** session with no agent action | Arriving after the fact: the repair happens inside the first `ensure_session`, so a `behind=0` read later does not tell you whether you saw it repaired or saw it already fine. Nor by repairing it by hand — that leaves nothing to observe |
 | **#156** | ADR-32 | A real turn that opens a Design PR leaves `silent_turns` at 0 | A unit fixture trips the same log line without exercising the counter's subject |
 | **#173** | ADR-30 | A rework round logs `author-sent PR event, no turn`, and `silent_turns` never exceeds 1 | As above |
 | **#168** | ADR-33 | A real quota refusal recorded `quota_exhausted`, the delivery re-picked after the hold, the session continuing **without pausing meanwhile** | Cannot be forced; opportunistic only |
@@ -71,7 +71,7 @@ result is only as good as its fixture* — earned six more instances across #116
 #172, and the shape is always the same: the fixture could not **reach** the case it
 was named for, and the result looked like evidence rather than absence.
 
-Two forms are worth naming because they do not look like fixtures at all:
+Three forms are worth naming because none of them looks like a fixture at all:
 
 - **A reproduction that fails.** "Cannot reproduce" is a null result. Prove the
   fixture holds the property first — a leader that also traps `SIGTERM`, or a
