@@ -43,9 +43,32 @@ only.
 | **#173** | ADR-30 | A rework round logs `author-sent PR event, no turn`, and `silent_turns` never exceeds 1 | As above |
 | **#168** | ADR-33 | A real quota refusal recorded `quota_exhausted`, the delivery re-picked after the hold, the session continuing **without pausing meanwhile** | Cannot be forced; opportunistic only |
 
-**#147 must not be closed on a quiet log.** Its counters read clean only because
-`agentctl` ran a manual `quarantine_deferred`. A handoff note once said otherwise
-and was wrong.
+## What is not in this ledger, and why
+
+Two open issues are deliberately absent. Both would be plausible rows, and the
+reasons they are not differ.
+
+**#192 — a deploy with no signature is not an unproven acceptance.** Its exit
+condition is *"there is no `kind` for which GC and the teardown confirm path
+disagree"*, and that is settled deterministically by tests: both paths refuse a
+kind outside `ARTIFACT_KINDS`, and the fixtures drive the real writer. What the
+deploy lacks is a *signature* — no counter changes shape, no image to inspect, and
+its one runtime observable is a WARNING that fires only when an agent registers an
+unknown kind. Waiting to observe that WARNING is not a sign-off; it is waiting for
+a bug. A well-behaved agent never emits an unknown kind, and if none ever does,
+that is the system working rather than an acceptance going unproven. #192 appears
+in the fixture section below as an *example* of a signature-less deploy, which is
+a different thing from an item this ledger is holding open.
+
+**#147 — an owner repair, not a sign-off.** What it needs is data: sessions `#32`
+and `#84` are `CLOSED` carrying a stale `paused_reason`. Nothing is observed on a
+live session; something is corrected. It also **must not be closed on a quiet
+log** — its counters read clean only because `agentctl` ran a manual
+`quarantine_deferred`, and a handoff note once said otherwise and was wrong.
+
+The distinction the two share: this ledger holds **acceptances that no fixture can
+reach**. It is not a list of open issues, and it is not a list of things that were
+hard to verify.
 
 ## Running the exercise
 
