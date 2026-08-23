@@ -1285,23 +1285,12 @@ class DesignLoop:
                     return
                 art_role = str(params.get("role") or role)
                 kind = str(params.get("kind") or "scratch")
-                try:
-                    self.store.register_artifact(
-                        session_key=session_key,
-                        role=art_role,
-                        kind=kind,
-                        ref=ref,
-                    )
-                except ValueError as exc:
-                    # Refused, and said so: a row the ledger cannot reason about
-                    # is never reclaimable by GC (#192).
-                    log.warning(
-                        "artifact.register refused session=%s role=%s: %s",
-                        session_key,
-                        art_role,
-                        exc,
-                    )
-                    return
+                self.store.register_artifact(
+                    session_key=session_key,
+                    role=art_role,
+                    kind=kind,
+                    ref=ref,
+                )
                 log.info(
                     "artifact.register notify session=%s role=%s kind=%s ref=%s",
                     session_key,
@@ -1423,20 +1412,12 @@ class DesignLoop:
             # supervisor-observed at ensure_session (M3-C).
             for art in (result or {}).get("artifacts") or []:
                 if isinstance(art, dict) and art.get("ref"):
-                    try:
-                        self.store.register_artifact(
-                            session_key=session_key,
-                            role=role,
-                            kind=str(art.get("kind") or "scratch"),
-                            ref=str(art["ref"]),
-                        )
-                    except ValueError as exc:
-                        log.warning(
-                            "turn artifact refused session=%s role=%s: %s",
-                            session_key,
-                            role,
-                            exc,
-                        )
+                    self.store.register_artifact(
+                        session_key=session_key,
+                        role=role,
+                        kind=str(art.get("kind") or "scratch"),
+                        ref=str(art["ref"]),
+                    )
 
             if status == "needs_human":
                 if session_state == "TEARDOWN":

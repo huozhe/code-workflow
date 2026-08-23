@@ -64,34 +64,16 @@ def _seeded(tmp: Path, *, state: str = "TEARDOWN") -> tuple[Store, DesignLoop]:
     return store, loop
 
 
-def _legacy_row(store: Store, *, kind: str, ref: str) -> None:
-    """A row from before registration constrained `kind` (#192).
-
-    Written under the Store's own lock rather than through `register_artifact`,
-    which now refuses this — the point of the test is that such rows exist in
-    ledgers already and both paths must treat them the same.
-    """
-    with store._lock:  # deliberately bypassing the new guard
-        store._conn.execute(
-            "INSERT INTO artifacts(session_key, role, kind, ref, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (SESSION, "architect", kind, ref, 1_000_000),
-        )
-        store._conn.commit()
-
-
 def test_every_kind_gets_the_same_answer_from_both_paths(tmp_path: Path) -> None:
     """The exit condition: no kind for which GC and teardown disagree."""
     store, loop = _seeded(tmp_path)
     missing = str(tmp_path / "does-not-exist")
 
-    # known kinds through the real writer; unknown ones as legacy rows
-    for kind in ("scratch", "worktree"):
+    # every kind through the real writer — unknown ones are kept, not refused
+    for kind in ("scratch", "worktree", "log", "pr"):
         store.register_artifact(
             session_key=SESSION, role="architect", kind=kind, ref=missing
         )
-    for kind in ("log", "pr"):
-        _legacy_row(store, kind=kind, ref=missing)
 
     gc_answers = {
         str(r["kind"]): GarbageCollector._ledger_row_is_stale(
@@ -119,25 +101,39 @@ def test_every_kind_gets_the_same_answer_from_both_paths(tmp_path: Path) -> None
     store.close()
 
 
-def test_register_artifact_refuses_an_unknown_kind(tmp_path: Path) -> None:
-    """The refusal is the fix: an unreasonable-about row never enters the ledger."""
+def test_unknown_kind_is_kept_and_warned_not_dropped(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Refusing the write would make the artifact invisible, not safe.
+
+    Every mechanism that surfaces an unreclaimed artifact is ledger-driven, so a
+    dropped row leaves the directory on disk with `removed_at IS NULL → 0`
+    reading clean over it. `artifact.register` is a notification, so a refusal
+    never reaches the agent either — the row itself is the visibility.
+    """
     store, _ = _seeded(tmp_path)
     ref = str(tmp_path / "x")
 
-    with pytest.raises(ValueError, match="unknown artifact kind 'log'"):
+    with caplog.at_level(logging.WARNING, logger="agentd.db"):
         store.register_artifact(
             session_key=SESSION, role="architect", kind="log", ref=ref
         )
-    assert store.list_artifacts(SESSION, open_only=True) == []
+    rows = store.list_artifacts(SESSION, open_only=True)
+    assert [str(r["kind"]) for r in rows] == ["log"], "the row must be kept"
+    assert any("is not one of" in r.message for r in caplog.records)
 
-    # #167's three arms are untouched: each still registers.
-    for kind in sorted(ARTIFACT_KINDS):
-        store.register_artifact(
-            session_key=SESSION, role="architect", kind=kind, ref=f"{ref}-{kind}"
-        )
-    assert {str(r["kind"]) for r in store.list_artifacts(SESSION, open_only=True)} == set(
-        ARTIFACT_KINDS
-    )
+    # #167's three arms are untouched: each still registers, and silently.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="agentd.db"):
+        for kind in sorted(ARTIFACT_KINDS):
+            store.register_artifact(
+                session_key=SESSION, role="architect", kind=kind, ref=f"{ref}-{kind}"
+            )
+    assert {str(r["kind"]) for r in store.list_artifacts(SESSION, open_only=True)} == {
+        "log",
+        *ARTIFACT_KINDS,
+    }
+    assert caplog.records == [], "a known kind must not warn"
     store.close()
 
 
@@ -171,7 +167,7 @@ class _NotifyingClient:
         return {}
 
 
-def test_notify_path_refuses_unknown_kind_and_the_turn_survives(
+def test_notify_path_keeps_an_unknown_kind_and_the_turn_survives(
     tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Driven through the real `_on_runner_notify`, not a copy of it."""
@@ -188,7 +184,7 @@ def test_notify_path_refuses_unknown_kind_and_the_turn_survives(
     ]
     monkeypatch.setattr(dl, "RunnerClient", _NotifyingClient)
 
-    with caplog.at_level(logging.WARNING, logger="agentd.design_loop"):
+    with caplog.at_level(logging.WARNING, logger="agentd.db"):
         result = loop._dispatch_turn(
             session_key=SESSION,
             role="architect",
@@ -202,21 +198,19 @@ def test_notify_path_refuses_unknown_kind_and_the_turn_survives(
     # valid one landed. Without it, "no log row" would also be true of a
     # fixture that never delivered a notification at all.
     kinds = {str(r["kind"]) for r in store.list_artifacts(SESSION, open_only=True)}
-    assert kinds == {"scratch"}, kinds
-    assert (result or {}).get("status") == "done", "the refusal must not fail the turn"
-    assert any(
-        "artifact.register refused" in r.message and "'log'" in r.message
-        for r in caplog.records
-    ), [r.message for r in caplog.records]
+    assert kinds == {"scratch", "log"}, kinds
+    assert (result or {}).get("status") == "done", "an odd artifact must not fail a turn"
     store.close()
 
 
-def test_teardown_leaves_a_legacy_unknown_row_open_and_reports_it(
+def test_teardown_leaves_an_unknown_row_open_and_reports_it(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Refusing is visible: the row stays open and the leak is logged."""
+    """Refusing to guess is visible: the row stays open and the leak is logged."""
     store, loop = _seeded(tmp_path)
-    _legacy_row(store, kind="log", ref=str(tmp_path / "gone.log"))
+    store.register_artifact(
+        session_key=SESSION, role="architect", kind="log", ref=str(tmp_path / "gone.log")
+    )
 
     with caplog.at_level(logging.WARNING, logger="agentd.design_loop"):
         loop._confirm_teardown_artifacts(SESSION, "o/r")
