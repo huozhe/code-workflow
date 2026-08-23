@@ -3066,8 +3066,24 @@ class DesignLoop:
                 gone = local_branch_gone(clone, ref)
             elif kind == "scratch":
                 gone = scratch_dir_cleared(ref)
-            else:
+            elif kind == "worktree":
                 gone = not Path(ref).exists()
+            else:
+                # Registration constrains `kind` (#192), so this is a row that
+                # predates that or was written around it. Refuse rather than
+                # guess: the old fallback was `not Path(ref).exists()`, which is
+                # trivially true for any ref that is not a path and would clear
+                # the row on no evidence — #167's branch class, for an open set.
+                # GC already refuses these, so refusing here is what makes the
+                # two paths agree. The row stays open and is reported as a leak.
+                log.warning(
+                    "teardown: unknown artifact kind session=%s kind=%s ref=%s "
+                    "— not reclaimable by either path (#192)",
+                    session_key,
+                    kind,
+                    ref,
+                )
+                continue
             if not gone:
                 continue
             n = self.store.mark_artifact_removed(

@@ -366,8 +366,12 @@ class GarbageCollector:
     def _ledger_row_is_stale(kind: str, ref: str, clone: Path | None) -> bool:
         """Is this open ledger row's artifact gone? (#167)
 
-        Each kind is asked the same question the teardown confirm path asks it,
-        which is the point: the two used to disagree on two of the three kinds.
+        Each *known* kind is asked the same question the teardown confirm path
+        asks it, which is the point: the two used to disagree on two of the three.
+        The dispatch is total because registration constrains `kind` to
+        ``ARTIFACT_KINDS`` (#192); an unknown kind reaching here is a row that
+        predates that, and both paths refuse it rather than guessing — the tail
+        ``return False`` is that refusal, not an oversight.
         A ``branch`` ref is a branch *name*, not a path, so ``Path(ref).exists()``
         is False for every branch row whether the branch is there or not —
         widening the kind tuple alone would sweep every live branch on the first

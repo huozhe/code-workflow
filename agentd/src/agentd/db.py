@@ -17,6 +17,15 @@ log = logging.getLogger("agentd.db")
 # mismatch ⇒ wipe + recreate. GitHub remains source of truth (P1).
 SCHEMA_VERSION = 9
 
+# The kinds the cleanup ledger knows how to reason about (#192). Both reclaim
+# paths — GC's `_ledger_row_is_stale` and teardown's `_confirm_teardown_artifacts`
+# — dispatch on `kind`, and a kind neither names is answered differently by each:
+# GC refuses to guess and the row is never reclaimable, while teardown falls back
+# to a path-existence check that is trivially true for a ref that is not a path.
+# Both paths now refuse a kind outside this set rather than one guessing, and
+# registration keeps the row so the refusal is visible in the ledger (#192).
+ARTIFACT_KINDS = frozenset({"branch", "scratch", "worktree"})
+
 # Schema DDL only — connection pragmas are set separately (see Store.__init__).
 # v2 (#20): runners keyed by project (N sessions : 1 runner); sessions.project_key.
 # v3 (M3-A): sessions.resume_state for PAUSED_HUMAN → pre-pause restore (§8.5).
@@ -1115,6 +1124,25 @@ class Store:
         ref_s = str(ref or "").strip()
         if not session_key or not ref_s:
             raise ValueError("session_key and ref required for artifact.register")
+        if kind_s not in ARTIFACT_KINDS:
+            # `kind` is agent-supplied and the row is written anyway (#192).
+            # Refusing the write was the first shape of this fix and it was
+            # wrong: every mechanism that surfaces an unreclaimed artifact is
+            # ledger-driven, so dropping the row does not make the artifact
+            # safe — it makes it invisible, and M5's "removed_at IS NULL → 0"
+            # then reads clean over a real leak. `artifact.register` is a
+            # notification (`server.py:471`), so a refusal cannot reach the
+            # agent either. The row is kept, both reclaim paths refuse to
+            # guess at it, and teardown reports it as a leak: noisy and
+            # visible beats silent.
+            log.warning(
+                "artifact kind %r is not one of %s (session=%s ref=%s): the row "
+                "is kept but neither GC nor teardown can reclaim it (#192)",
+                kind_s,
+                sorted(ARTIFACT_KINDS),
+                session_key,
+                ref_s,
+            )
         role_s = str(role or "system")
         with self._lock:
             existing = self._conn.execute(
