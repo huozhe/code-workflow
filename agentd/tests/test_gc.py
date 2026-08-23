@@ -616,14 +616,54 @@ def test_branch_row_survives_a_broken_clone(tmp_path: Path) -> None:
     sk = _sess(store)
     clone = shared_clone_path(tmp_path, "huozhe/code-workflow")
     (clone / ".git").mkdir(parents=True)  # present, unusable
-    # Fixture check, same convention as test_branch_fixture_reproduces_the_property
-    # and for a sharper reason: git discovery walks *up*, so if this tmp dir ever
-    # sits inside a checkout, git answers rc=0 from the ancestor and the row is
-    # swept on an answer about a different repository. Fail here, not there.
-    assert local_branch_gone(clone, _DEV) is False, (
-        "broken-clone fixture is not broken here — git answered from an ancestor "
-        "repository; see #190"
+    # This used to carry a fixture tripwire, because git discovery walks *up*:
+    # if tmp_path sat inside a checkout, git answered rc=0 from the ancestor and
+    # the row was swept on an answer about a different repository. #190 made that
+    # a guarantee rather than a hope — `local_branch_gone` now refuses an answer
+    # whose toplevel is not this clone — so the tripwire is gone and the nested
+    # case is asserted directly in `test_nested_broken_clone_row_is_not_swept`.
+    now = 10_000_000
+    store.register_artifact(
+        session_key=sk,
+        role="developer",
+        kind="branch",
+        ref=_DEV,
+        created_at=now - ARTIFACT_AGE_FLOOR_S - 1,
     )
+    report = _gc(store, tmp_path, now=now).collect_once()
+
+    assert report["ledger_stale"] == []
+    assert len(store.list_artifacts(sk, open_only=True)) == 1
+    store.close()
+
+
+def test_nested_broken_clone_row_is_not_swept(tmp_path: Path) -> None:
+    """#190: an unusable clone inside a repository is answered by the ancestor.
+
+    The consequence is one-way — `mark_artifact_removed` cannot be undone — so
+    the sweep must refuse an answer it cannot attribute to this clone. The
+    ancestor deliberately does not carry the branch: an ancestor that had it
+    would answer non-empty, the wrong reading would never occur, and this test
+    would pass against the unfixed predicate.
+    """
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=tmp_path, check=True)
+    store = Store(tmp_path / "state.db")
+    sk = _sess(store)
+    clone = shared_clone_path(tmp_path, "huozhe/code-workflow")
+    (clone / ".git").mkdir(parents=True)  # present, unusable, nested in a repo
+
+    listed = subprocess.run(
+        ["git", "branch", "--list", _DEV],
+        cwd=clone,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert listed.returncode == 0 and not (listed.stdout or "").strip(), (
+        "fixture: the ancestor must answer, and answer empty — otherwise this is "
+        "#189's rc case and proves nothing about #190"
+    )
+
     now = 10_000_000
     store.register_artifact(
         session_key=sk,

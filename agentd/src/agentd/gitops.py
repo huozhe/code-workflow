@@ -356,6 +356,60 @@ def scratch_dir_cleared(ref: str) -> bool:
     return bool(path.is_dir() and not any(path.iterdir()))
 
 
+def _git_answers_for(clone: Path) -> bool:
+    """Did git resolve to *this* clone, or walk up to an ancestor? (#190)
+
+    Git discovery walks upward, so a clone whose own `.git` is unusable is
+    answered by any repository above it — exiting 0, about the wrong
+    repository. #189's `rc != 0` guard cannot see that: the ancestor succeeds.
+    When the ancestor happens not to carry the branch, its empty list reads as
+    confirmed absence and `_sweep_ledger` clears a row that `mark_artifact_removed`
+    can never restore.
+
+    Latent as the paths stand — nothing from `~/.agentd/projects` to `/` is a
+    repository — and live the moment `AGENTD_ROOT` sits inside a checkout, which
+    nothing prevents. The two guards are independent: this one refuses an answer
+    from the wrong repository, #189's refuses an answer git could not give.
+
+    **Assumes a non-bare clone**, deliberately rather than incidentally.
+    `--show-toplevel` exits 128 on a bare repository, so a bare shared clone —
+    not fanciful, since it exists only to host worktrees and `worktree add`
+    works from one — would have every branch row refused. `--absolute-git-dir`
+    catches #190's case identically *and* answers for bare, but it has to be
+    compared against `clone/.git`, which is wrong whenever `.git` is a file.
+    The explicit question was preferred; the constraint is recorded here so a
+    future reader meeting it can tell a decision from a bug.
+
+    It asks *is this the toplevel*, not *does git answer for this tree*, so a
+    **subdirectory** of the clone is refused too. Correct, and unreachable
+    today: callers pass the clone root.
+
+    `Path.resolve()` does not canonicalise case on macOS, so a clone reached
+    through a mis-cased `AGENTD_ROOT` refuses every row. Like every other arm
+    here, that fails closed — a warning per row, and nothing reclaimed.
+    """
+    top = _git(clone, "rev-parse", "--show-toplevel", check=False)
+    out = (top.stdout or "").strip()
+    if top.returncode != 0 or not out:
+        log.warning(
+            "clone %s did not resolve to a work tree (rc=%s) — not confirming absence",
+            clone,
+            top.returncode,
+        )
+        return False
+    # resolve() on both sides: on macOS a /tmp path answers as /private/tmp, and
+    # a string compare would refuse every healthy clone under a symlinked root.
+    if Path(out).resolve() != clone.resolve():
+        log.warning(
+            "git answered for %s, not the clone %s — discovery walked up; "
+            "not confirming absence (#190)",
+            out,
+            clone,
+        )
+        return False
+    return True
+
+
 def local_branch_gone(clone: Path, branch: str) -> bool:
     """True only after we listed the clone and the branch is absent.
 
@@ -366,6 +420,8 @@ def local_branch_gone(clone: Path, branch: str) -> bool:
     if not clone.exists():
         return False
     if not (clone / ".git").exists() and not (clone / "HEAD").exists():
+        return False
+    if not _git_answers_for(clone):
         return False
     listed = _git(clone, "branch", "--list", branch, check=False)
     if listed.returncode != 0:
