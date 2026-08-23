@@ -1285,12 +1285,23 @@ class DesignLoop:
                     return
                 art_role = str(params.get("role") or role)
                 kind = str(params.get("kind") or "scratch")
-                self.store.register_artifact(
-                    session_key=session_key,
-                    role=art_role,
-                    kind=kind,
-                    ref=ref,
-                )
+                try:
+                    self.store.register_artifact(
+                        session_key=session_key,
+                        role=art_role,
+                        kind=kind,
+                        ref=ref,
+                    )
+                except ValueError as exc:
+                    # Refused, and said so: a row the ledger cannot reason about
+                    # is never reclaimable by GC (#192).
+                    log.warning(
+                        "artifact.register refused session=%s role=%s: %s",
+                        session_key,
+                        art_role,
+                        exc,
+                    )
+                    return
                 log.info(
                     "artifact.register notify session=%s role=%s kind=%s ref=%s",
                     session_key,
@@ -1412,12 +1423,20 @@ class DesignLoop:
             # supervisor-observed at ensure_session (M3-C).
             for art in (result or {}).get("artifacts") or []:
                 if isinstance(art, dict) and art.get("ref"):
-                    self.store.register_artifact(
-                        session_key=session_key,
-                        role=role,
-                        kind=str(art.get("kind") or "scratch"),
-                        ref=str(art["ref"]),
-                    )
+                    try:
+                        self.store.register_artifact(
+                            session_key=session_key,
+                            role=role,
+                            kind=str(art.get("kind") or "scratch"),
+                            ref=str(art["ref"]),
+                        )
+                    except ValueError as exc:
+                        log.warning(
+                            "turn artifact refused session=%s role=%s: %s",
+                            session_key,
+                            role,
+                            exc,
+                        )
 
             if status == "needs_human":
                 if session_state == "TEARDOWN":
@@ -3066,8 +3085,24 @@ class DesignLoop:
                 gone = local_branch_gone(clone, ref)
             elif kind == "scratch":
                 gone = scratch_dir_cleared(ref)
-            else:
+            elif kind == "worktree":
                 gone = not Path(ref).exists()
+            else:
+                # Registration constrains `kind` (#192), so this is a row that
+                # predates that or was written around it. Refuse rather than
+                # guess: the old fallback was `not Path(ref).exists()`, which is
+                # trivially true for any ref that is not a path and would clear
+                # the row on no evidence — #167's branch class, for an open set.
+                # GC already refuses these, so refusing here is what makes the
+                # two paths agree. The row stays open and is reported as a leak.
+                log.warning(
+                    "teardown: unknown artifact kind session=%s kind=%s ref=%s "
+                    "— not reclaimable by either path (#192)",
+                    session_key,
+                    kind,
+                    ref,
+                )
+                continue
             if not gone:
                 continue
             n = self.store.mark_artifact_removed(

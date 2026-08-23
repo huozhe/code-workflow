@@ -17,6 +17,14 @@ log = logging.getLogger("agentd.db")
 # mismatch ⇒ wipe + recreate. GitHub remains source of truth (P1).
 SCHEMA_VERSION = 9
 
+# The kinds the cleanup ledger knows how to reason about (#192). Both reclaim
+# paths — GC's `_ledger_row_is_stale` and teardown's `_confirm_teardown_artifacts`
+# — dispatch on `kind`, and a kind neither names is answered differently by each:
+# GC refuses to guess and the row is never reclaimable, while teardown falls back
+# to a path-existence check that is trivially true for a ref that is not a path.
+# Constraining registration makes that dispatch total instead of documenting a gap.
+ARTIFACT_KINDS = frozenset({"branch", "scratch", "worktree"})
+
 # Schema DDL only — connection pragmas are set separately (see Store.__init__).
 # v2 (#20): runners keyed by project (N sessions : 1 runner); sessions.project_key.
 # v3 (M3-A): sessions.resume_state for PAUSED_HUMAN → pre-pause restore (§8.5).
@@ -1115,6 +1123,14 @@ class Store:
         ref_s = str(ref or "").strip()
         if not session_key or not ref_s:
             raise ValueError("session_key and ref required for artifact.register")
+        if kind_s not in ARTIFACT_KINDS:
+            # `kind` is agent-supplied. A row the ledger cannot reason about is
+            # worse than no row: GC will never reclaim it, so it counts against
+            # M5's "removed_at IS NULL → 0" forever (#192).
+            raise ValueError(
+                f"unknown artifact kind {kind_s!r} for ref {ref_s!r}; "
+                f"known kinds are {sorted(ARTIFACT_KINDS)}"
+            )
         role_s = str(role or "system")
         with self._lock:
             existing = self._conn.execute(
