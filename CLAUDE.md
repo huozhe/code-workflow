@@ -40,3 +40,14 @@ test, a query that crosses sessions, a git fixture that is not a promisor repo, 
 errors, and a test named for a case it does not cover all look exactly like good news. Each of those has
 produced a confident wrong answer here, several on the same day. Assert the property in the fixture, then
 assert the behaviour.
+
+**Swap seats between issues.** Whoever implemented last time reviews next. The defect that changed the
+design has come from the *reviewer* in every round — never from an implementer re-reading their own work —
+so the seat is doing the work, not the person. Ask the owner which seat before starting, and hand the
+counterpart the demands you want held to: chiefly that a fixture be shown to **reach** the case before any
+negative is asserted.
+
+**A green suite, a null result, a passing check and a clean status label are all summaries, and each has
+lied here.** Read the fixture, the delta, the underlying signals. Being more careful does not catch this;
+looking one level below the summary does — including in prose: a document whose columns disagree fails the
+same way a fixture that cannot reach its case does, by looking complete.
