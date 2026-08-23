@@ -20,14 +20,17 @@ It does **not** produce all of it, and the gaps are not obvious:
 
 | When | Discharges | Why it lands there |
 |---|---|---|
-| Immediately | `DEFAULT_IMAGE = 1.3.0` creates a container | The gateway's half of ADR-35's deploy has never run; nothing else exercises it |
-| During | **#171**, **#156** | Worktree base and the silent-turn counter are turn-time facts |
+| Immediately | `DEFAULT_IMAGE = 1.3.0` creates a container; **#171** | Both are `ensure_session` facts. `_prepare_project_issue_layout` (`supervisor.py:823`) runs `resolve_base_ref` + `worktree_add` for both roles, and its only callers are `_ensure_session_locked` (`:407`) and `_adopt_or_promote` (`:595`) — **before any turn is dispatched**. #171's acceptance says the same: *of a fresh session, with no agent action* |
+| During, **on the first turn that opens the Design PR** | **#156** | The counter's subject is that turn. A session whose early turns defer, hit `role_busy`, or are intake turns leaves #156 unproven while the exercise looks like it is progressing |
 | Only if it outlives a **5-minute** reconcile pass | **#116**, **#173** | The reconciler is a timer (`RECONCILE_INTERVAL_S`), not something a session triggers — a short session never shows them |
 | At close | **#172**'s kill | `session.teardown` → `shutdown_all()` → `_kill_unlocked` (`server.py:417`) is the reliable half |
 
-**Two cannot be forced and must not be counted on the plan:** #172's *deadline*
-kill needs a genuinely wedged turn — the deadline is an error path a clean session
-never enters — and **#168** needs a real quota refusal. Both are opportunistic.
+**Two cannot be forced and must not be counted on the plan.** The reasons are
+different and both are worth stating, because "run it longer" fixes neither:
+**#172's deadline kill** is an **error path** — a healthy turn never enters it, so
+no amount of session length produces one; **#168** depends on an **external**
+event, a real vendor quota refusal, which no local action triggers. Opportunistic
+only.
 
 ## The ledger
 
@@ -35,7 +38,7 @@ never enters — and **#168** needs a real quota refusal. Both are opportunistic
 |---|---|---|---|
 | **#116** | ADR-34 | The reconciler's probe reaching a runner **inside a real container over a published port**: `attached=1` with a real `rss_bytes` in the pass report | Any unit fixture. Everything run so far is a socket stub or an in-process server |
 | **#172** | ADR-35 | A **real vendor CLI** (`claude`/`grok`) killed by the runner, with no descendant surviving | Every kill driven so far was against `sh` |
-| **#171** | ADR-31 | Both role worktrees `behind=0` on the live clone | Watch the first `ensure_session` repair it — do not repair it by hand, or there is nothing to observe |
+| **#171** | ADR-31 | Both role worktrees `behind=0` on the live clone, observed on a **fresh** session with no agent action | The repair happens inside the first `ensure_session`, so start watching before the session is created — arriving later shows `behind=0` without telling you whether you observed the repair. **Do not repair it by hand**, or there is nothing left to observe |
 | **#156** | ADR-32 | A real turn that opens a Design PR leaves `silent_turns` at 0 | A unit fixture trips the same log line without exercising the counter's subject |
 | **#173** | ADR-30 | A rework round logs `author-sent PR event, no turn`, and `silent_turns` never exceeds 1 | As above |
 | **#168** | ADR-33 | A real quota refusal recorded `quota_exhausted`, the delivery re-picked after the hold, the session continuing **without pausing meanwhile** | Cannot be forced; opportunistic only |
@@ -73,6 +76,11 @@ Two forms are worth naming because they do not look like fixtures at all:
 - **A reproduction that fails.** "Cannot reproduce" is a null result. Prove the
   fixture holds the property first — a leader that also traps `SIGTERM`, or a
   polled child that has already been reaped, removes the very condition under test.
+- **A deploy with no signature at all.** #192 is the sharpest case: gateway-only,
+  no counter changes shape, no image to inspect, and its one observable — a WARNING
+  when an agent registers an unknown artifact kind — needs a live session to fire.
+  The whole evidence is *restart-after-merge on an editable install*. That is worth
+  recording as evidence, and worth never calling verification.
 - **A contaminated working tree.** A `src/` staged from the branch under review
   silently executes the fix during a "pre-fix" reproduction. *Verify what your tree
   contains before believing a reproduction,* not only what your fixture contains —
