@@ -11,6 +11,7 @@ import socket
 import socketserver
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -227,7 +228,39 @@ def ensure_role_layout(role: str, issue_num: int | None = None) -> dict[str, str
     }
 
 
+def read_vmrss(status_path: str = "/proc/self/status") -> int | None:
+    """Live RSS in bytes from ``/proc``, or ``None`` where there is no ``/proc``.
+
+    Split out so the parse is testable without a live process: comparing
+    ``rss_bytes()`` against ``rss_peak_bytes()`` cannot tell them apart — on CI
+    they sat 12 KB apart, and ``ru_maxrss`` is updated lazily enough that the
+    peak can read *below* the current ``VmRSS``.
+    """
+    try:
+        with open(status_path, encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
 def rss_bytes() -> int:
+    """Current resident set size of the runner, in bytes (#212).
+
+    ``ru_maxrss`` is the process *peak* and never falls, so a rule written
+    against it stays tripped for the container's lifetime. It was also
+    byte-identical across pings 37 minutes apart, which reads like a cached
+    value rather than a high-water mark. ``VmRSS`` is the live figure; the
+    peak is still reported separately as ``rss_peak_bytes``.
+    """
+    live = read_vmrss()
+    return live if live is not None else rss_peak_bytes()
+
+
+def rss_peak_bytes() -> int:
+    """Peak RSS of the runner, in bytes. Monotonic — never a live gauge."""
     try:
         # ru_maxrss is KB on Linux
         return int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) * 1024
@@ -309,7 +342,11 @@ def handle_request(req: dict[str, Any], authed: bool) -> dict[str, Any]:
             {
                 "ok": True,
                 "rss_bytes": rss_bytes(),
+                "rss_peak_bytes": rss_peak_bytes(),
                 "cli_rss_kb": _cli.rss_snapshot(),
+                # #212: both figures above are read at this instant. A consumer
+                # can reject a stale sample instead of assuming freshness.
+                "sampled_at": int(time.time()),
                 "session_key": STATE.session_key,
                 "initialized": STATE.initialized,
                 # #92: the record must be able to say which model did the work.
