@@ -9,6 +9,8 @@ import time
 from pathlib import Path
 from typing import ClassVar
 
+import pytest
+
 from agentd.config import Config
 from agentd.db import Store
 from agentd.design_loop import DesignLoop
@@ -1314,4 +1316,86 @@ def test_teardown_quota_exhausted_defers_without_archive(tmp_path: Path) -> None
     assert row["status"] == "deferred"
     assert "d-quota" not in dl._delivery_attempts
     assert archived == []
+    store.close()
+
+
+# --- #172: the kill path must actually be called at close ---
+
+
+class _TeardownSupervisor(_IntakeClobberSupervisor):
+    """Records ``teardown_session`` and can fail it."""
+
+    def __init__(self, store: Store, failure: str | None = None) -> None:
+        super().__init__(store)
+        self.teardown_calls: list[tuple[str, str]] = []
+        self._failure = failure
+
+    def teardown_session(self, *, session_key: str, project_key: str) -> str | None:
+        self.teardown_calls.append((session_key, project_key))
+        return self._failure
+
+
+def _drive_close(store: Store, tmp_path: Path, sup: object, did: str) -> str:
+    import agentd.design_loop as _dl
+
+    # `_role_busy_until` is module-level and nothing clears it between tests, so
+    # an earlier case in this file leaves developer busy for 1800s and the
+    # teardown turns here defer instead of running. Pre-existing, exposed here.
+    _dl._role_busy_until.clear()
+    sk = _seed(store, tmp_path, with_runner=False, with_session_dir=True)
+    _register_open(store, sk)
+    _RecordingClient.calls = []
+    _insert_close(store, did=did, payload=_closed_payload(body=_block(checked=True)))
+    loop = _loop(
+        store,
+        tmp_path,
+        dispatch=True,
+        client_factory=_RecordingClient,
+        supervisor=sup,
+    )
+    try:
+        loop.process_deferred_batch()
+    finally:
+        import agentd.design_loop as dl
+
+        dl.RunnerClient = loop._orig_client  # type: ignore[attr-defined, misc]
+    return sk
+
+
+def test_close_calls_session_teardown(tmp_path: Path) -> None:
+    """ADR-35's kill had no caller: `docker rm` ended the CLIs, not the runner."""
+    store = Store(tmp_path / "state.db")
+    sup = _TeardownSupervisor(store)
+    sk = _drive_close(store, tmp_path, sup, "d-teardown-called")
+
+    assert sup.teardown_calls == [(sk, "huozhe/code-workflow")]
+    sess = store.get_session(sk)
+    assert sess is not None and sess["state"] == "CLOSED"
+    store.close()
+
+
+def test_a_failed_kill_does_not_block_the_close(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The orphan sweep still removes the container, so refusing to close would
+    strand the session for a kill that is already best-effort. It must warn."""
+    store = Store(tmp_path / "state.db")
+    sup = _TeardownSupervisor(store, failure="teardown could not kill held CLIs: grok")
+    with caplog.at_level(logging.WARNING, logger="agentd.design_loop"):
+        sk = _drive_close(store, tmp_path, sup, "d-teardown-failed")
+
+    sess = store.get_session(sk)
+    assert sess is not None and sess["state"] == "CLOSED"
+    assert any("did not kill cleanly" in r.getMessage() for r in caplog.records)
+    store.close()
+
+
+def test_a_supervisor_without_the_method_still_closes(tmp_path: Path) -> None:
+    """Duck-typed supervisors exist in this suite; none may block a close."""
+    store = Store(tmp_path / "state.db")
+    sup = _IntakeClobberSupervisor(store)  # no teardown_session at all
+    sk = _drive_close(store, tmp_path, sup, "d-teardown-absent")
+
+    sess = store.get_session(sk)
+    assert sess is not None and sess["state"] == "CLOSED"
     store.close()

@@ -2802,6 +2802,37 @@ class DesignLoop:
         )
         if dest is None:
             return None
+        # #172: kill the held CLIs as the role, before the session stops being
+        # live and the reconciler removes the container as an orphan. Without
+        # this call ADR-35's kill path has no caller at all, and `docker rm`
+        # is what ends the CLIs — which proves nothing about the runner.
+        # Defensive on both arms: a kill that fails, or a supervisor that
+        # cannot do it at all, must never stop a session from closing.
+        _teardown = getattr(self.supervisor, "teardown_session", None)
+        if callable(_teardown):
+            try:
+                failure = _teardown(
+                    session_key=session_key,
+                    project_key=str(
+                        fresh.get("project_key") or project_key_from_repo(repo)
+                    ),
+                )
+            except Exception as exc:  # noqa: BLE001
+                failure = f"{type(exc).__name__}: {exc}"
+            log.info(
+                "session.teardown session=%s result=%s",
+                session_key,
+                failure or "killed",
+            )
+            if failure:
+                # Not fatal: the orphan sweep still removes the container. But
+                # it must be visible, or an unexercised kill path looks the
+                # same as a working one — which is how #172 survived.
+                log.warning(
+                    "session.teardown did not kill cleanly session=%s: %s",
+                    session_key,
+                    failure,
+                )
         # ADR-32 (d): paused_reason is load-bearing control state, not a note.
         # Left set, a closed session reads as paused forever (escalations keeps
         # the text). Cleared here and on TEARDOWN — both are terminal.
