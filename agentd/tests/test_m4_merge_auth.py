@@ -481,6 +481,16 @@ def test_merge_auth_uses_gateway_token(
         return real(**kwargs)
 
     vmod.verify_feature_merge = patched  # type: ignore[assignment]
+    bodies: list[dict] = []
+    patches: list[dict] = []
+
+    def fake_body(**kwargs):
+        bodies.append(kwargs)
+        return "Please merge.\n\nCloses #100\n"
+
+    def fake_patch(**kwargs):
+        patches.append(kwargs)
+
     try:
         loop = DesignLoop(
             store,
@@ -489,6 +499,8 @@ def test_merge_auth_uses_gateway_token(
             dispatch_turns=False,
             gateway_token="gw",
             github_token="gateway-read-token",
+            get_issue_body_fn=fake_body,
+            patch_issue_body_fn=fake_patch,
         )
         _insert(
             store,
@@ -513,6 +525,9 @@ def test_merge_auth_uses_gateway_token(
         vmod.verify_feature_merge = real  # type: ignore[assignment]
 
     assert "gateway-read-token" in seen_token
+    assert bodies and bodies[0]["issue_num"] == 60
+    assert patches and "Refs #100" in str(patches[0].get("body") or "")
+    assert "Closes #100" not in str(patches[0].get("body") or "")
     store.close()
 
 
