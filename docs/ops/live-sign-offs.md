@@ -79,8 +79,30 @@ hard to verify.
      s=Store(pathlib.Path.home()/'.agentd'/'state.db'); \
      print([(r['session_key'],r['state']) for r in s.list_sessions() if r['state']!='CLOSED'])"
    ```
-2. **Labelling an issue `agentd` opens a live session** (#67). That is the trigger;
-   there is no other. File anything you do not want run as unlabelled.
+2. **Labelling an issue `agentd` opens a live session** (#67) — but the label
+   alone does not start any work. Two separate things have to happen, and the
+   label is only the first:
+   - **The session comes up.** `ensure_session` fetches the clone, adds both role
+     worktrees and creates the container. This runs on the label event whoever
+     sent it — which is why #171 and the `DEFAULT_IMAGE` check land here, and why
+     they are observable with *no agent action at all*.
+   - **The first turn is dispatched** — and only by an event that **routes**.
+     `route_for_recipient` (`routing.py:74`) drops a sender equal to the
+     recipient as `self-echo` — rule 1, ahead of every other rule. An agent
+     labelling an issue whose recipient role is itself is exactly that case:
+     the session comes up complete, and no turn is ever dispatched.
+
+   So **the owner, or another human, must send the routable event** — rule 2
+   (owner) or rule 7 (other human); an issue comment is enough. An agent cannot
+   start its own session's first turn, and **#156 and #173 stay unreachable until
+   someone does**, however healthy the session looks.
+
+   Observed on session #57, 2026-08-24: the Architect's own login applied the
+   label. Worktrees, container and health ping all succeeded, then
+   `design_loop route drop after fsm … reason=self-echo kind=issue_opened
+   state=PLANNING`, and `turn_count` stayed 0 until the owner commented.
+
+   File anything you do not want run as unlabelled.
 3. Let it run **past five minutes** if #116 and #173 matter to you, and to a real
    teardown if #172 does.
 4. INFO goes to `~/.agentd/logs/agentd.log`. `gateway.err.log` is WARNING and
