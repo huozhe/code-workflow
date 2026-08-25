@@ -25,15 +25,19 @@ It does **not** produce all of it, and the gaps are not obvious:
 | Only if it outlives a **5-minute** reconcile pass — and, for #116, one that lands while **no turn is open** | **#116**, **#173** | The reconciler is a timer (`RECONCILE_INTERVAL_S`), not something a session triggers — a short session never shows them. For #116 duration is necessary and not sufficient: `_probe_attachments` (`reconciler.py:377`) skips any project in `inflight` with `reason="open turn"` and reports `probe_skipped`, never `attached`, because a runner busy in a turn can miss the 2 s timeout and emit a WARNING that lies. A continuously busy session never produces `attached=1`, however long it runs |
 | At close | **#172**'s kill | `session.teardown` → `shutdown_all()` → `_kill_unlocked` (`server.py:417`) is the reliable half |
 
-**Three cannot be forced and must not be counted on the plan.** The reasons
-are different, and "run it longer" fixes none of them: **#172's deadline kill**
-is an **error path** — a healthy turn never enters it, so no amount of session
-length produces one; **#168** depends on an **external** event, a real vendor
-quota refusal, which no local action triggers. **#57** needs a **different
-exercise**, not a longer one: the operator half of M4-A is a Feature PR opened
-by the Developer and approved by an Architect turn from inside its own
-container, with the producing `turn_id` in the review body. A single session
-run to teardown never produces that pair. Opportunistic only.
+**Two cannot be forced and must not be counted on the plan.** The reasons are
+different and both are worth stating, because "run it longer" fixes neither:
+**#172's deadline kill** is an **error path** — a healthy turn never enters it, so
+no amount of session length produces one; **#168** depends on an **external**
+event, a real vendor quota refusal, which no local action triggers. Opportunistic
+only.
+
+**#57 is a different exercise, and it is plannable.** The operator half of M4-A
+is a Feature PR opened by the Developer and approved by an Architect turn from
+inside its own container, with the producing `turn_id` in the review body. A
+session run to teardown never produces that pair; the ordinary design loop does,
+deliberately, whenever a Feature PR is reviewed. Plan that round; do not wait
+for it as if it were #168.
 
 ## The ledger
 

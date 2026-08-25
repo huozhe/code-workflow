@@ -176,6 +176,41 @@ def _github_api_url(request: httpx.Request) -> str | None:
     return None
 
 
+def _install_github_api_guard(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Refuse api.github.com at Client.send. Returns the attempts list.
+
+    Autouse and tests share this so a test can fail the shipped refusal,
+    not a copy of it.
+    """
+    attempts: list[str] = []
+    real_send = httpx.Client.send
+
+    def _refuse(self, request, *args, **kwargs):
+        url = _github_api_url(request)
+        if url is not None:
+            attempts.append(url)
+            # Fast failure where the exception propagates. Also recorded so a
+            # caller that swallows (verify.py / github_fetch.py BLE001) still
+            # fails the test after the yield — same lesson as _no_github_writes.
+            raise RuntimeError(
+                "test would talk to the GitHub API: "
+                f"{url}. Request the allows_github_api fixture if the call "
+                "is under test."
+            )
+        return real_send(self, request, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.Client, "send", _refuse)
+    return attempts
+
+
+def _assert_no_github_api(attempts: list[str]) -> None:
+    assert not attempts, (
+        "test would talk to the GitHub API at "
+        f"{', '.join(attempts)}. Request the allows_github_api fixture if "
+        "the call is under test."
+    )
+
+
 @pytest.fixture
 def allows_github_api(monkeypatch):
     """Opt-in: record GitHub API calls and let them through.
@@ -203,27 +238,6 @@ def _no_github_api(request, monkeypatch):
         yield
         return
 
-    attempts: list[str] = []
-    real_send = httpx.Client.send
-
-    def _refuse(self, request, *args, **kwargs):
-        url = _github_api_url(request)
-        if url is not None:
-            attempts.append(url)
-            # Fast failure where the exception propagates. Also recorded so a
-            # caller that swallows (verify.py / github_fetch.py BLE001) still
-            # fails the test after the yield — same lesson as _no_github_writes.
-            raise RuntimeError(
-                "test would talk to the GitHub API: "
-                f"{url}. Request the allows_github_api fixture if the call "
-                "is under test."
-            )
-        return real_send(self, request, *args, **kwargs)
-
-    monkeypatch.setattr(httpx.Client, "send", _refuse)
+    attempts = _install_github_api_guard(monkeypatch)
     yield
-    assert not attempts, (
-        "test would talk to the GitHub API at "
-        f"{', '.join(attempts)}. Request the allows_github_api fixture if "
-        "the call is under test."
-    )
+    _assert_no_github_api(attempts)

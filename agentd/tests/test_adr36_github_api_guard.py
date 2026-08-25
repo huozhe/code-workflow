@@ -6,6 +6,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from conftest import _assert_no_github_api, _install_github_api_guard
 from test_m4a_branch_protection_live import cleanup_m4a_probe
 
 from agentd.config import Config
@@ -39,27 +40,16 @@ def test_github_api_guard_reaches_env_token_path(monkeypatch: pytest.MonkeyPatch
 
 
 def test_github_api_guard_refuses_env_token_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Acceptance 4: same request, guard installed, failure names the URL.
+    """Acceptance 4: same request, shipped guard, failure names the URL.
 
-    Replaces autouse ``send`` with the same raise so this test can
-    ``pytest.raises`` without the post-yield ``assert not attempts`` also
-    firing (that half is the swallow demonstration below).
+    Re-installs via the seam so ``pytest.raises`` does not collide with
+    autouse's post-yield assert. The raise comes from ``_install_github_api_guard``,
+    not a copy of it.
     """
     monkeypatch.setenv("GH_TOKEN", "ghs_test_not_a_real_token")
     monkeypatch.delenv("AGENTD_SECRET_GROK_BOT", raising=False)
     monkeypatch.delenv("AGENTD_SECRET_CLAUDE_BOT", raising=False)
-
-    def _raise(self: httpx.Client, request: httpx.Request, *args, **kwargs):
-        url = str(request.url)
-        if (request.url.host or "") == "api.github.com":
-            raise RuntimeError(
-                "test would talk to the GitHub API: "
-                f"{url}. Request the allows_github_api fixture if the call "
-                "is under test."
-            )
-        raise AssertionError(f"unexpected send {url}")
-
-    monkeypatch.setattr(httpx.Client, "send", _raise)
+    _install_github_api_guard(monkeypatch)
     with (
         pytest.raises(RuntimeError, match="api.github.com/user") as exc,
         httpx.Client() as client,
@@ -166,34 +156,18 @@ def test_uninjected_verify_design_approval_swallowed_without_after_assert(
 def test_uninjected_verify_design_approval_fails_after_yield(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Same call, fixed guard: record + raise, then assert after the yield.
+    """Same call, shipped guard: install, drive, then ``_assert_no_github_api``.
 
     The raise is still swallowed (check.ok is False). The post-yield assert
-    is what fails the test — the bind from _no_github_writes.
+    is what fails the test — and it is the function ``_no_github_api`` calls,
+    not a replica. Deleting that function fails this test.
     """
-    attempts: list[str] = []
-
-    def _refuse(self: httpx.Client, request: httpx.Request, *args, **kwargs):
-        url = str(request.url)
-        if (request.url.host or "") == "api.github.com":
-            attempts.append(url)
-            raise RuntimeError(
-                "test would talk to the GitHub API: "
-                f"{url}. Request the allows_github_api fixture if the call "
-                "is under test."
-            )
-        raise AssertionError(f"unexpected send {url}")
-
-    monkeypatch.setattr(httpx.Client, "send", _refuse)
+    attempts = _install_github_api_guard(monkeypatch)
     check = _uninjected_verify()
     assert check.ok is False
     assert "GitHub API error" in check.reason
     with pytest.raises(AssertionError, match="api.github.com"):
-        assert not attempts, (
-            "test would talk to the GitHub API at "
-            f"{', '.join(attempts)}. Request the allows_github_api fixture "
-            "if the call is under test."
-        )
+        _assert_no_github_api(attempts)
 
 
 def test_m4a_cleanup_patch_then_delete_on_assert_fail(
