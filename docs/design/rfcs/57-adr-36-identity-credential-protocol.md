@@ -15,8 +15,9 @@
 have — because it was written to close a rescoped issue rather than from the working tree — is the set of
 things that only appear when you go looking for where the rule is already broken:
 
-- the repository ships a test that reads **both** identities' Keychain credentials in one process and posts
-  an approval under the Architect's account from whoever ran `pytest`, and the M4-A runbook advertises it as
+- the repository ships a test that acquires **both** identities' tokens in one process — from the Keychain,
+  or from `GH_TOKEN` / `AGENTD_SECRET_CLAUDE_BOT`, which is the documented path — and posts an approval
+  under the Architect's account from whoever ran `pytest`, and the M4-A runbook advertises it as
   the *"Automated re-check"* (§2). It is the most likely way an agent would try to discharge #56 step 3, and
   running it reproduces exactly the act that voided step 3 in the first place;
 - **#57's item 3 does not work as written** (§3). A clean redo of step 3 produces wire evidence
@@ -27,6 +28,18 @@ things that only appear when you go looking for where the rule is already broken
   from the database" is an absolute that a one-line stamp makes partly false — which is worth having, and
   worth bounding precisely;
 - **item 2 is simply not done** (§1), and the sentence it was meant to correct is still standing in §5.1.
+
+**Corrected in review, and the correction is the point.** The first draft's decision (e) proposed a
+credential-read guard and called it *"the precise property §5.5 names rather than a proxy for it"*. The
+Developer's review showed it to be **the same one-function-one-module defect §2 of this RFC diagnoses** —
+blind to the env arm the documented invocation actually takes, unable to rebind the test module's imported
+name, and a proxy the gateway's own code trips legitimately. It is withdrawn and replaced in (e), with the
+reasoning kept rather than smoothed over, because writing that diagnosis and then committing it four
+sections later is worth a reader knowing. Two further bindings came from the same review: the probe-PR
+cleanup is the test's own `finally` and not a one-shot on a PR that does not exist (d′), and §5.5.2's lead
+paragraph had to be rewritten **in place** rather than appended to, since as first committed it stated
+*"#56's step 3 is outstanding … unchanged by this section"* directly above the paragraph saying it is
+redirected.
 
 ## 1. The checklist, audited against the tree
 
@@ -64,10 +77,16 @@ what §5.5 says.
 | `:208–215` | `POST …/pulls/{n}/reviews` with `event: APPROVE` under the Architect token, asserting `user.login == "huozheclaude"` |
 | `:228–238` | `PUT …/merge` under the Developer token, asserting `merged_by.login == "huozhegrok"` |
 
-One process, two Keychain accounts, and a durable public artifact — an approving review — attributed to an
+One process, two identities' tokens, and a durable public artifact — an approving review — attributed to an
 identity whose operator did not decide it. Under §5.5 that is not a grey area; it is the rule's central case,
 and the rule does not exempt the owner, because `huozheclaude`'s operator is the Architect agent and not
 `@huozhe`.
+
+**The `or` in those two lines is load-bearing, and not a wording detail.** Both are
+`os.environ.get(…) or get_password(…)`, so on the documented `AGENTD_LIVE_M4A=1` run with `GH_TOKEN` set the
+Keychain is never consulted at all — and `turn.py:310` exports `GH_TOKEN` into every container turn from the
+role's token file, so the env arm is the normal arm rather than an override. This is what makes a
+credential-read guard blind to the very invocation it would exist for; see (e).
 
 **Three things make it worse than an ordinary stale test.**
 
@@ -173,11 +192,18 @@ anything the agent supplied.
 reach"*, which is precisely this one, and it already distinguishes itself from a list of open issues. The
 operator half of M4-A becomes a row there.
 
-**(vi) §5.5.2's absolute needs narrowing.** It currently says this class of claim *"cannot be re-checked
-from the database afterwards"*. With a stamp, a stamped artifact can be, partly. What remains genuinely
-uncheckable is the original case: an **unstamped** host artifact under a borrowed credential. Saying so
-keeps the section true, and keeps it from being read as licence to skip the record because nothing could
-verify it anyway.
+**(vi) §5.5.2's absolute is scoped, in its own lead paragraph.** The 1.29.0 text says this class of claim
+*"cannot be re-checked from the database afterwards"*, flat. With a stamp, a stamped artifact can be,
+partly; what remains genuinely uncheckable is the original case — an **unstamped** host artifact under a
+borrowed credential. **The lead paragraph is rewritten in place to say so, not annotated further down**, and
+that placement is the binding, not a formatting preference: as first committed, this PR appended the
+narrowing below a lead that still stated the absolute *and* still said *"#56's step 3 is outstanding … and
+is unchanged by this section"* — the sentence an implementer reads first, disagreeing with the paragraph
+under it about the one checklist item this RFC exists to settle. Two paragraphs of the same section
+contradicting each other is the **#118 / 1.18.0** shape — *"1.16.0 said … and an implementer builds what
+that says"* — and it is the prose form of a fixture that cannot reach its case: it looks complete.
+(Developer's review, which cites this precedent as #126; 1.18.0's row is #118, and #126 appears in the
+revision history only inside 1.20.0. The precedent itself is exactly right.)
 
 ## 5. Decisions (ADR-36)
 
@@ -203,21 +229,74 @@ stamp, and a row in `docs/ops/live-sign-offs.md` holds the acceptance until it i
 is to be opened for this**, and #56 step 3 is not re-run by hand.
 
 **(d) The live M4-A test loses its Architect half.** `test_m4a_branch_protection_live.py` keeps the assert
-half and steps 1 and 2 — all of which need the Developer token alone — and drops `_arch_token`, the approve
-call, and the merge. **Stated consequence, because it is a real loss and not a tidy-up:** the automated
-re-check no longer covers step 3 or step 4, and the probe PR must be **closed and its branch deleted**
-rather than merged, since without an approval it cannot merge. That is the correct outcome. Steps 3 and 4
-require a second operator, and a test process is by definition a single operator; a test that appears to
-cover them can only do so by committing the violation. The runbook's "Automated re-check" section says which
-steps it covers and which it structurally cannot.
+half and steps 1 and 2 — all of which need the Developer token alone — and drops `_arch_token` (`:60–64`),
+the approve call (`:206–226`) and the **success** merge (`:228–241`). The 405 merge attempt at `:181` is
+step 1 and stays. **Stated consequence, because it is a real loss and not a tidy-up:** the automated
+re-check no longer covers step 3 or step 4. That is the correct outcome. Steps 3 and 4 require a second
+operator, and a test process is by definition a single operator; a test that appears to cover them can only
+do so by committing the violation. The runbook's "Automated re-check" section says which steps it covers and
+which it structurally cannot.
 
-**(e) The no-writes guard is widened from one function to one credential.** `conftest.py`'s
-`_no_github_writes` covers `design_loop.post_issue_comment` and nothing else. It gains a sibling: an autouse
-fixture that wraps `agentd.keychain.get_password` and **fails any test that reads more than one distinct
-account**. That is detective and in-process — it is not the host mechanism §5.5 declined — it is cheap, and
-it fails on the precise property §5.5 names rather than on a proxy for it. Deliberately *not* attempted: a
-network-level block on GitHub writes. It would need an `httpx` transport shim across the suite, and the
-credential rule already refuses the only test that has ever crossed identities.
+**(d′) Cleanup is the test's own `finally`, not a one-shot.** The draft said "the probe PR must be closed and
+its branch deleted", listed beside the code drops, and that is wrong in a way an implementer would ship:
+there is no standing probe PR to close. PR #55 merged on 2026-08-12, and the live test **creates a fresh
+one every run** — `head = f"agentd/m4a-live-{uuid4().hex[:8]}"` at `:99`, a branch, a commit and a PR, all
+before the first assertion. Today the success merge disposes of it. Remove the merge and every
+`AGENTD_LIVE_M4A=1` run — acceptance 3 included — leaks an open PR and a branch, and a failed run leaks one
+too. Binding: the branch and PR are created inside a `try`, and a `finally` under the **Developer** token
+does `PATCH …/pulls/{n}` `state=closed` then `DELETE …/git/refs/heads/{head}`, running when steps 1 or 2
+assert-fail as well as when they pass. The cleanup must be armed from the moment the ref is created, not
+appended after the asserts, or the failure path is exactly the one that leaks.
+
+**(e) The no-writes guard moves to the egress chokepoint. The credential-read guard this RFC first
+proposed is withdrawn, and the reason is that it was the same defect it diagnosed.** The draft had
+`conftest.py` gain an autouse fixture wrapping `agentd.keychain.get_password`, failing any test that read
+more than one distinct account, and called that "the precise property §5.5 names rather than a proxy for
+it". All three clauses are wrong, and the Developer's review is what surfaced it:
+
+1. **It cannot see the advertised invocation.** `:54` and `:61` are
+   `os.environ.get(…) or get_password(…)`. The documented run is `AGENTD_LIVE_M4A=1` with `GH_TOKEN` set,
+   and `turn.py:310` exports `GH_TOKEN` into **every** container turn from the role's token file, so the
+   env arm is the normal arm. On that path `get_password` is never called and the wrapper observes nothing.
+2. **The rebinding does not reach the caller even when it is called.** `:29` is
+   `from agentd.keychain import get_password`; pytest imports the test module before fixtures run, so the
+   module-level name is already bound and `monkeypatch.setattr(agentd.keychain, "get_password", …)` does
+   not touch it.
+3. **The property is a proxy, and the repository has legitimate dual-readers.** `supervisor._load_tokens`
+   (`:898–900`) reads `claude-bot` **and** `grok-bot` on every container create — that is the gateway's
+   job. `design_loop` at `:1546–1547` and `:632` are `get_password("claude-bot") or
+   get_password("grok-bot")` fallbacks. Any test driving those on a host with a Keychain reads two
+   accounts legitimately, so a guard tuned to spare them is tuned to miss the live test, and one tuned to
+   catch the live test fails the suite on the gateway's own code.
+
+(1) and (3) are *"one function, one module, and the case it exists to catch does not go through that
+name"* — the sentence §2 of this RFC uses about `_no_github_writes`. Writing that diagnosis and then
+committing it four sections later is the thing to record, not to smooth over.
+
+**The replacement keys on the act rather than on a precursor to it.** §5.5 prohibits *producing an artifact
+under another identity*; the artifact is made by a request leaving the process, not by a credential being
+read. So: an autouse fixture that **refuses any HTTP request from the test process to the GitHub API**, with
+a named opt-in fixture (`allows_github_api`, sibling of `allows_github_post`) for tests that must talk to it.
+
+- **The chokepoint is `httpx.Client.send`.** Every `get`/`post`/`put`/`patch`/`delete` on every `httpx.Client`
+  funnels through it, and `agentd/src` and `agentd/tests` contain no `AsyncClient` and no module-level
+  `httpx.get(...)`/`httpx.post(...)` — checked, not assumed. **This is not the mistake above repeated**, and
+  the difference is worth stating because "one function, one module" is now a known failure shape here:
+  `post_issue_comment` is *one of N* ways to write to GitHub, whereas `Client.send` is *the* way an httpx
+  request leaves this process. It is route-independent — it does not care whether the token came from the
+  Keychain, from `GH_TOKEN`, or from a literal in the test.
+- **Every request, not only writes.** §5.5's prohibition covers read-only use, so a `GET` under a borrowed
+  credential is in scope. A method allowlist would be a second proxy.
+- **The opt-in is the point, and it does not stop the live test.** The retained live test must reach the API
+  — its assert half and both refusals are real calls — so it opts in and stays exempt. The guard's work is to
+  make an exemption *visible in the test's signature* and reviewable, not to prevent it. **(d) is what removes
+  the hazard; (e) is what stops the class returning silently.** Claiming more for it would repeat the
+  original error.
+- **Named residual: `urllib`, runner-side.** `agentd_runner/server.py:246` uses `urllib.request` for ADR-11's
+  identity preflight and does not pass through `httpx`. It runs **in the container**, and `supervisor.py:116`
+  / `:429` point it at a stub via `AGENTD_GITHUB_API_BASE`, so it is out of the test process's egress today.
+  A future in-process test that drives the preflight against the real API is outside this guard. Recorded
+  rather than engineered around.
 
 ## 6. Placement
 
@@ -227,7 +306,7 @@ credential rule already refuses the only test that has ever crossed identities.
 |---|---|
 | `docs/design/rfcs/57-adr-36-identity-credential-protocol.md` | this file |
 | `unified_design_spec.md` §5.1 `:256` | decision (a) — the two-context clause and the §5.5 pointer |
-| `unified_design_spec.md` §5.5.2 `:433–435` | §4 (i)–(vi): the stamp's format, its place, its bound, and the narrowing of "cannot be re-checked" |
+| `unified_design_spec.md` §5.5.2 | §4 (i)–(vi): the stamp's format, its place, its bound, and the scoping of "cannot be re-checked". The **lead paragraph is rewritten in place**, not appended to — as first committed it still read *"#56's step 3 is outstanding … unchanged by this section"* directly above the paragraph saying it is redirected, and still stated the absolute as fact. (Developer's review.) |
 | `unified_design_spec.md` §17 spike table `:2483` | decision (b) — the split claim |
 | `unified_design_spec.md` §16 | ADR-36 |
 | `unified_design_spec.md` revision history | 1.35.1 → 1.36.0 |
@@ -254,6 +333,12 @@ until this is approved).** In priority order, because the first item is actively
 3. `agentd/tests/conftest.py` — decision (e).
 4. `docs/ops/live-sign-offs.md` — decision (c): a new row in **The ledger**, with the *Not discharged by*
    column naming the live test and a hand-run probe explicitly.
+5. `CLAUDE.md` — **retire the stopgap bullet in the same PR as (d), not a later one.** Its stated reason is
+   *"it reads both machine users' Keychain entries in one process and posts an approval as `huozheclaude`"*,
+   and (d) makes that false; the runbook rewritten in item 1 will simultaneously say the test is safe to
+   run. A stopgap whose reason has expired reads as a live prohibition, and the two documents would then
+   disagree — the failure this RFC spends §2 on. The bullet's *"until then"* is not enough on its own,
+   because nothing in the file list brought a reader back to it. (Developer's review.)
 
 ## 7. Acceptance
 
@@ -262,15 +347,27 @@ until this is approved).** In priority order, because the first item is actively
    paragraph is non-zero.
 2. **The spike row states which claim is proven.** `:2483` no longer asserts the operator claim as PASS, and
    names the account claim, the evidence for it, and the outstanding half.
-3. **A fresh checkout cannot produce a cross-identity artifact from the suite.** With `AGENTD_LIVE_M4A=1` and
-   both Keychain entries present, the live test runs to completion and no review is created under
+3. **A fresh checkout cannot produce a cross-identity artifact from the suite.** With `AGENTD_LIVE_M4A=1`
+   and both Keychain entries present, the live test runs to completion and no review is created under
    `huozheclaude` — asserted by reading the probe PR's `reviews` array, which must be empty, **not** by the
    test reporting success.
-4. **The credential guard fails before it is needed.** A throwaway test that calls `get_password` twice for
-   two different accounts fails, and the failure names both accounts. Asserted with the guard reverted first,
-   so the fixture is shown to reach the case.
-5. **The guard does not fire on legitimate use.** The full suite is green with the guard installed; any test
-   that reads one account repeatedly still passes.
+3b. **The run leaves nothing behind, on the failure path as well as the success path.** After the run the
+   probe PR is `state: closed` and `GET …/git/ref/heads/agentd/m4a-live-<suffix>` is 404. Asserted **twice**:
+   once on a clean run, and once with step 1's assertion forced to fail, because per (d′) the leak this
+   binds is the failure path and a green-only check cannot reach it.
+4. **The egress guard fails on the path the withdrawn guard could not see.** A throwaway test that issues an
+   `httpx` request to `api.github.com` **with `GH_TOKEN` set and the Keychain never consulted** fails, and
+   the failure names the URL. Asserted with the guard reverted first, so the fixture is shown to reach the
+   case. The Developer's review asked that this also use the live test's `from … import` style; the
+   redesign dissolves that half of the requirement — `Client.send` is route-independent, so import style
+   cannot affect it — and the env-var path, which is the half that mattered, is what item 4 pins.
+4b. **The opt-in works and is visible.** The same request, in a test requesting `allows_github_api`, is
+   permitted and recorded. A test that talks to the API without the fixture in its signature cannot pass.
+5. **The guard does not fire on the gateway's legitimate dual-reads.** The full suite is green with the
+   guard installed, checked specifically against tests that drive `supervisor._load_tokens` (`:898–900`) and
+   the `design_loop` fallbacks (`:1546–1547`, `:632`) — the three call sites the withdrawn credential guard
+   would have failed. Naming them is the point: "the suite is green" is the kind of summary this project has
+   been burned by, so the check is against those sites, not against the total.
 6. **The stamp is checkable end to end, on one real artifact.** For the Architect approval named in (c):
    the review body contains a `turn_id`; that `turn_id` exists in `turns`; its `role` is `architect`; and the
    review's `submitted_at` lies within `[started_at, ended_at]`. All four from the live `state.db` and the
