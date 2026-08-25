@@ -9,7 +9,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from agentd import design_loop
+from agentd import design_loop, keychain
 from agentd.supervisor import DEFAULT_IMAGE, runner_image
 
 
@@ -241,3 +241,47 @@ def _no_github_api(request, monkeypatch):
     attempts = _install_github_api_guard(monkeypatch)
     yield
     _assert_no_github_api(attempts)
+
+
+# --- no test may read the real Keychain (#216) -----------------------------
+#
+# ``keychain.get_password`` returns ``AGENTD_SECRET_<ACCOUNT>`` if set and
+# otherwise shells out to ``security``. On Linux that binary is absent, so the
+# call raises and the function returns ``None``; on the owner's Mac all four
+# ``agentd`` accounts resolve. A test that ``delenv``s the variable to mean
+# *no credential* therefore gets a **real token** there and ``None`` in CI —
+# the suite was green only where there was no Keychain.
+#
+# Patched at ``keychain.subprocess`` rather than at ``get_password``, for the
+# reason the note above gives: ``design_loop`` binds the name at import
+# (``:48``), so a module-attribute patch misses it. Everything below that
+# binding goes through this one call.
+#
+# The env arm is untouched, so ``monkeypatch.setenv`` keeps working; only the
+# Keychain fallback is refused, exactly as on Linux.
+
+
+class _NoKeychainSubprocess:
+    """``keychain``'s view of ``subprocess``: ``security`` is not installed."""
+
+    CalledProcessError = subprocess.CalledProcessError
+
+    @staticmethod
+    def run(*args, **kwargs):
+        raise FileNotFoundError(
+            "test would read the real Keychain. Set AGENTD_SECRET_<ACCOUNT>, or "
+            "request the allows_keychain fixture if the read is under test (#216)."
+        )
+
+
+@pytest.fixture
+def allows_keychain() -> bool:
+    """Opt out of #216: this test genuinely reads a real Keychain secret."""
+    return True
+
+
+@pytest.fixture(autouse=True)
+def _no_keychain(request, monkeypatch):
+    if "allows_keychain" in request.fixturenames:
+        return
+    monkeypatch.setattr(keychain, "subprocess", _NoKeychainSubprocess)
