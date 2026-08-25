@@ -935,6 +935,32 @@ class SessionSupervisor:
                 time.sleep(0.3)
         raise RuntimeError(f"RPC not ready on 127.0.0.1:{port}: {last}")
 
+    def teardown_session(self, *, session_key: str, project_key: str) -> str | None:
+        """Ask the runner to kill its held CLIs (#172). ``None`` when clean.
+
+        ADR-35 gave the runner ``session.teardown`` → ``shutdown_all()`` →
+        ``_kill_unlocked``, and nothing ever called it. The CLIs were killed
+        only when the reconciler removed the container as an orphan, minutes
+        after close, which is ``docker rm`` doing it — not the runner, and not
+        as the role. So the whole path was unexercised in production.
+
+        Returns the failure text rather than raising: teardown must not be
+        blocked by an unreachable runner, whose container the orphan sweep
+        removes anyway. The caller logs it.
+        """
+        runner = self.store.get_runner(project_key)
+        if runner is None:
+            return None
+        handle = self._handle_from_runner(
+            session_key=session_key, project_key=project_key, runner=runner
+        )
+        try:
+            with RunnerClient("127.0.0.1", handle.host_port, handle.bearer) as cli:
+                cli.call("session.teardown")
+        except Exception as exc:  # noqa: BLE001
+            return f"{type(exc).__name__}: {exc}"
+        return None
+
     def _handle_from_runner(
         self,
         *,
