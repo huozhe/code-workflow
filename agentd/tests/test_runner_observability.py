@@ -78,24 +78,55 @@ def test_drain_logs_notifications_below_warning(caplog: pytest.LogCaptureFixture
 # --- #212: the probe must report what it just read ------------------------
 
 
-@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="needs /proc")
-def test_rss_bytes_is_live_not_the_peak() -> None:
-    """``rss_bytes`` must be VmRSS, not ``ru_maxrss``.
+def test_rss_bytes_parses_vmrss(tmp_path: Path) -> None:
+    """``rss_bytes`` must read ``VmRSS``, not ``ru_maxrss`` (#212).
 
-    Linux-only on purpose, and that is the whole point: off Linux there is no
-    ``/proc`` and the function falls back to the peak, so an assertion that ran
-    everywhere would pass on macOS whether or not the fix is present — the same
-    platform-blindness #216 was about. The runner only ever runs on Linux.
+    Driven through a fixture file rather than the live process on purpose. The
+    first attempt compared ``rss_bytes()`` with ``rss_peak_bytes()``; on CI the
+    two sat 12 KB apart, well inside any tolerance loose enough to be stable,
+    so the assertion would have passed with the fix reverted. It also assumed
+    peak >= live, which is false: ``ru_maxrss`` updates lazily and CI observed
+    the peak *below* the current ``VmRSS``.
     """
-    with open("/proc/self/status", encoding="utf-8") as fh:
-        vmrss = next(
-            int(line.split()[1]) * 1024
-            for line in fh
-            if line.startswith("VmRSS:")
-        )
-    # Allocation between the two reads is possible; a page of slack, not a peak.
-    assert abs(server.rss_bytes() - vmrss) < 512 * 1024
-    assert server.rss_peak_bytes() >= server.rss_bytes()
+    status = tmp_path / "status"
+    status.write_text(
+        "Name:\tpython3\nVmPeak:\t 999999 kB\nVmRSS:\t   2048 kB\nThreads:\t7\n"
+    )
+    assert server.read_vmrss(str(status)) == 2048 * 1024
+
+
+def test_rss_bytes_falls_back_where_there_is_no_proc(tmp_path: Path) -> None:
+    """No ``/proc`` (or no ``VmRSS`` line) degrades to the peak, never to zero."""
+    assert server.read_vmrss(str(tmp_path / "absent")) is None
+    (tmp_path / "no-vmrss").write_text("Name:\tpython3\n")
+    assert server.read_vmrss(str(tmp_path / "no-vmrss")) is None
+    assert server.rss_bytes() > 0
+
+
+def test_rss_bytes_prefers_the_live_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The wiring, asserted on every platform.
+
+    The ``in_situ`` check below is Linux-only, so on a developer machine it is
+    skipped and cannot catch ``rss_bytes`` reverting to the peak. This one can:
+    the two sources are stubbed to distinguishable values.
+    """
+    monkeypatch.setattr(server, "read_vmrss", lambda *a: 123 * 1024)
+    monkeypatch.setattr(server, "rss_peak_bytes", lambda: 999 * 1024)
+    assert server.rss_bytes() == 123 * 1024
+
+
+def test_rss_bytes_falls_back_to_peak_only_when_live_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(server, "read_vmrss", lambda *a: None)
+    monkeypatch.setattr(server, "rss_peak_bytes", lambda: 999 * 1024)
+    assert server.rss_bytes() == 999 * 1024
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="needs /proc")
+def test_rss_bytes_uses_the_live_read_in_situ() -> None:
+    """On the platform the runner actually runs on, the wiring holds."""
+    assert server.rss_bytes() == server.read_vmrss()
 
 
 def test_rss_snapshot_samples_now(monkeypatch: pytest.MonkeyPatch) -> None:

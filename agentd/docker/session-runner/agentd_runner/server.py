@@ -228,6 +228,24 @@ def ensure_role_layout(role: str, issue_num: int | None = None) -> dict[str, str
     }
 
 
+def read_vmrss(status_path: str = "/proc/self/status") -> int | None:
+    """Live RSS in bytes from ``/proc``, or ``None`` where there is no ``/proc``.
+
+    Split out so the parse is testable without a live process: comparing
+    ``rss_bytes()`` against ``rss_peak_bytes()`` cannot tell them apart — on CI
+    they sat 12 KB apart, and ``ru_maxrss`` is updated lazily enough that the
+    peak can read *below* the current ``VmRSS``.
+    """
+    try:
+        with open(status_path, encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
 def rss_bytes() -> int:
     """Current resident set size of the runner, in bytes (#212).
 
@@ -237,14 +255,8 @@ def rss_bytes() -> int:
     value rather than a high-water mark. ``VmRSS`` is the live figure; the
     peak is still reported separately as ``rss_peak_bytes``.
     """
-    try:
-        with open("/proc/self/status", encoding="utf-8") as fh:
-            for line in fh:
-                if line.startswith("VmRSS:"):
-                    return int(line.split()[1]) * 1024
-    except (OSError, ValueError, IndexError):
-        pass
-    return rss_peak_bytes()
+    live = read_vmrss()
+    return live if live is not None else rss_peak_bytes()
 
 
 def rss_peak_bytes() -> int:
