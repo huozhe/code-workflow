@@ -42,6 +42,7 @@ only.
 | **#156** | ADR-32 | A real turn that opens a Design PR leaves `silent_turns` at 0 | A unit fixture trips the same log line without exercising the counter's subject |
 | **#173** | ADR-30 | A rework round logs `author-sent PR event, no turn`, and `silent_turns` never exceeds 1 | As above |
 | **#168** | ADR-33 | A real quota refusal recorded `quota_exhausted`, the delivery re-picked after the hold, the session continuing **without pausing meanwhile** | Cannot be forced; opportunistic only |
+| **#57** | ADR-36 | Operator half of M4-A: a Feature PR opened by the Developer, approved by an Architect turn from inside its own container, review body carrying the producing `turn_id`, checkable against `turns` (`role=architect`, `submitted_at` inside `[started_at, ended_at]`) | The live M4-A test (Developer token only after ADR-36 (d)). A hand-run probe. PR #55. |
 
 ## What is not in this ledger, and why
 
