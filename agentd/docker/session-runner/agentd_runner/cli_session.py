@@ -187,6 +187,25 @@ def _frame_fields(line: str) -> str:
     return " ".join(parts) if parts else "type=absent"
 
 
+def _is_bare_notification(line: str) -> bool:
+    """True only for a JSON-RPC notification: a ``method`` and no reply in it.
+
+    Fails **towards** WARNING (#208). Anything unparseable, non-dict, carrying
+    ``id`` (a response someone may be waiting on) or ``type`` (a vendor frame
+    such as ``result`` — #162's defect) returns False and stays loud. A frame
+    the classifier does not understand is the case most likely to matter.
+    """
+    try:
+        obj = json.loads(line)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(obj, dict):
+        return False
+    if "id" in obj or "type" in obj:
+        return False
+    return isinstance(obj.get("method"), str)
+
+
 def _killpg_as_role(pgid: int, uid: int, sig: int) -> int:
     """Signal a process group from a forked helper that has become the role uid.
 
@@ -698,22 +717,45 @@ class LiveCliSession:
         if q is None:
             return 0
         n = 0
+        quiet = 0
         while True:
             try:
                 line = q.get_nowait()
             except queue.Empty:
-                return n
+                break
             if line is None:
                 q.put(None)  # EOF sentinel: re-put and stop
-                return n
+                break
             n += 1
-            log.warning(
+            # #208: WARNING is reserved for a frame that could be a stolen
+            # reply — #162's defect. A bare notification is routine vendor
+            # chatter and must not train the reader to skim this line.
+            if _is_bare_notification(line):
+                quiet += 1
+                level = logging.DEBUG
+            else:
+                level = logging.WARNING
+            log.log(
+                level,
                 "stale frame discarded role=%s turn_id=%s reason=%s %s",
                 self.role,
                 turn_id or "unknown",
                 reason,
                 _frame_fields(line),
             )
+        if quiet:
+            # The count stays visible even when the individual lines drop
+            # below WARNING, so a burst is never silent in aggregate.
+            log.info(
+                "stale frames discarded role=%s turn_id=%s reason=%s "
+                "notifications=%d of %d",
+                self.role,
+                turn_id or "unknown",
+                reason,
+                quiet,
+                n,
+            )
+        return n
 
     def _respawn_after_error_unlocked(self) -> None:
         """ADR-29 (b). is_error does not prove the vendor is done with the prompt."""
@@ -970,6 +1012,17 @@ class LiveCliSession:
                     "artifacts": [],
                 }
             self._sample_rss()
+            # #210: tool subprocesses orphaned during the turn reparent to pid
+            # 1 and nothing else reaps them — 175 accumulated in one session
+            # against a cgroup ``pids.max`` of 1024. Spawn-time was the only
+            # call site and spawns are rare.
+            #
+            # Safe here for the same reason it is safe after an escalation:
+            # this runs under the role's ``_lock``, so its own kill cannot be
+            # concurrent, and a *sibling* role mid-kill keeps its leader in
+            # ``_tracked_pids`` — the pgid stays addressable through the
+            # leader's own zombie, which is what the sequence relies on.
+            reap_orphans(_tracked_pids())
             result["cli_rss_kb"] = self.last_rss_kb
             result["live_session"] = True
             return result
@@ -1353,5 +1406,15 @@ def shutdown_all() -> list[str]:
 
 
 def rss_snapshot() -> dict[str, int]:
+    """Per-role RSS, sampled **now** (#212).
+
+    This used to return ``last_rss_kb``, written only at spawn and at turn end,
+    so an idle session reported the memory a CLI *used to* hold — measured 4.5x
+    the live value minutes after a turn. A probe that says ``rss`` must mean
+    the reading it just took.
+    """
     with _REGISTRY_LOCK:
-        return {role: s.last_rss_kb for role, s in _SESSIONS.items()}
+        sessions = list(_SESSIONS.items())
+    for _role, s in sessions:
+        s._sample_rss()
+    return {role: s.last_rss_kb for role, s in sessions}

@@ -411,10 +411,14 @@ class Reconciler:
                     "project": pk,
                     "id": cid,
                     "reason": res.reason,
-                    # §12.1 has no sampler; this is the measurement M6-3's
-                    # memory rule can be written against (ADR-34).
                     "rss_bytes": payload.get("rss_bytes"),
                     "cli_rss_kb": payload.get("cli_rss_kb"),
+                    # #212: rss_bytes is now the live VmRSS and cli_rss_kb is
+                    # sampled at probe time. The peak is kept but named, and
+                    # sampled_at lets a consumer reject a stale reading rather
+                    # than assume freshness.
+                    "rss_peak_bytes": payload.get("rss_peak_bytes"),
+                    "sampled_at": payload.get("sampled_at"),
                 }
             )
             # A dry run probes — that is how `agentctl reconcile --dry-run`
