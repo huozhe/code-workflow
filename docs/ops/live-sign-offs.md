@@ -22,7 +22,7 @@ It does **not** produce all of it, and the gaps are not obvious:
 |---|---|---|
 | Immediately | `DEFAULT_IMAGE = 1.3.0` creates a container; **#171** | Both are `ensure_session` facts. `_prepare_project_issue_layout` (`supervisor.py:823`) runs `resolve_base_ref` + `worktree_add` for both roles, and its only callers are `_ensure_session_locked` (`:407`) and `_adopt_or_promote` (`:595`) — **before any turn is dispatched**. #171's acceptance says the same: *of a fresh session, with no agent action* |
 | During, **on the first turn that opens the Design PR** | **#156** | The counter's subject is that turn. A session whose early turns defer, hit `role_busy`, or are intake turns leaves #156 unproven while the exercise looks like it is progressing |
-| Only if it outlives a **5-minute** reconcile pass | **#116**, **#173** | The reconciler is a timer (`RECONCILE_INTERVAL_S`), not something a session triggers — a short session never shows them |
+| Only if it outlives a **5-minute** reconcile pass — and, for #116, one that lands while **no turn is open** | **#116**, **#173** | The reconciler is a timer (`RECONCILE_INTERVAL_S`), not something a session triggers — a short session never shows them. For #116 duration is necessary and not sufficient: `_probe_attachments` (`reconciler.py:377`) skips any project in `inflight` with `reason="open turn"` and reports `probe_skipped`, never `attached`, because a runner busy in a turn can miss the 2 s timeout and emit a WARNING that lies. A continuously busy session never produces `attached=1`, however long it runs |
 | At close | **#172**'s kill | `session.teardown` → `shutdown_all()` → `_kill_unlocked` (`server.py:417`) is the reliable half |
 
 **Two cannot be forced and must not be counted on the plan.** The reasons are
@@ -104,7 +104,10 @@ hard to verify.
 
    File anything you do not want run as unlabelled.
 3. Let it run **past five minutes** if #116 and #173 matter to you, and to a real
-   teardown if #172 does.
+   teardown if #172 does. For #116, also leave it **idle across a pass** — the
+   probe is skipped while a turn is open, so a session you keep feeding never
+   produces `attached=1`. The pass line tells you which you got:
+   `probe_skipped=1` is a skip, not a sample.
 4. INFO goes to `~/.agentd/logs/agentd.log`. `gateway.err.log` is WARNING and
    above, so a pass line is not in the file the plist names as stderr.
 
