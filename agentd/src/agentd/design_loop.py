@@ -98,6 +98,13 @@ _AUTHOR_PR_EVENTS = frozenset(
 )
 _VERDICT_REVIEW_STATES = frozenset({"APPROVED", "CHANGES_REQUESTED"})
 _MERGE_KINDS = frozenset({"design_merged", "feature_merged"})
+# ADR-37: last taken head SHA column, keyed by the kind that takes it.
+_HEAD_WM = {
+    "design_pr_opened": "design_pr_head",
+    "design_revised": "design_pr_head",
+    "feature_pr_opened": "feature_pr_head",
+    "feature_revised": "feature_pr_head",
+}
 # ADR-30 (c): merged is a one-way door. Remember (repo, pr) already seen
 # merged so a delivery behind a busy role does not re-GET every tick.
 # Closed is not cached — a closed PR can reopen.
@@ -318,6 +325,11 @@ def _pr_number_from_payload(
         except (TypeError, ValueError):
             return None
     return None
+
+
+def _payload_head_sha(data: dict[str, Any]) -> str | None:
+    sha = str(json_obj(json_obj(data.get("pull_request")).get("head")).get("sha") or "")
+    return sha or None
 
 
 class DesignLoop:
@@ -847,6 +859,38 @@ class DesignLoop:
             )
             return
 
+        # ADR-37 (a″): spent-SHA before FSM. A stale synchronize must not
+        # run design_revised. Shares the GET with ADR-30 (c) below.
+        wm_field = _HEAD_WM.get(kind)
+        payload_sha = _payload_head_sha(data) if event == "pull_request" else None
+        live_pr: dict[str, Any] | None = None
+        pr_n_live = _pr_number_from_payload(event, data, int(issue_num))
+        if wm_field and payload_sha and pr_n_live is not None:
+            live_pr = self._fetch_live_pr(repo, pr_n_live)
+            stored_wm = str(sess.get(wm_field) or "")
+            if stored_wm and payload_sha == stored_wm:
+                self.store.set_delivery_status(delivery_id, "done")
+                log.info(
+                    "no turn id=%s session=%s — duplicate head %s (%s) (#211)",
+                    delivery_id,
+                    session_key,
+                    payload_sha[:12],
+                    kind,
+                )
+                return
+            live_sha = str((live_pr or {}).get("head_sha") or "")
+            if live_sha and payload_sha != live_sha:
+                self.store.set_delivery_status(delivery_id, "done")
+                log.info(
+                    "no turn id=%s session=%s — stale head %s live %s (%s) (#211)",
+                    delivery_id,
+                    session_key,
+                    payload_sha[:12],
+                    live_sha[:12],
+                    kind,
+                )
+                return
+
         # P1: gateway drives FSM from *observed* GitHub events even when routing
         # drops the turn (self-echo). Architect merge of the Design PR is sent by
         # the Architect identity — recipient is also Architect (§8.3), so without
@@ -896,7 +940,8 @@ class DesignLoop:
         # After FSM so P1 records; before stall / DROP / dispatch.
         if kind not in _MERGE_KINDS:
             pr_n = _pr_number_from_payload(event, data, int(issue_num))
-            if pr_n is not None and self._pr_is_spent(repo, pr_n):
+            prefetched = live_pr if pr_n is not None and pr_n == pr_n_live else None
+            if pr_n is not None and self._pr_is_spent(repo, pr_n, live=prefetched):
                 self.store.set_delivery_status(delivery_id, "done")
                 log.info(
                     "no turn id=%s session=%s — PR %s spent (%s) (#173)",
@@ -906,6 +951,11 @@ class DesignLoop:
                     kind,
                 )
                 return
+
+        # ADR-37 (a): stamp the taken head after both spent gates, before dispatch.
+        if wm_field and payload_sha:
+            self.store.update_session_fields(session_key, **{wm_field: payload_sha})
+            sess[wm_field] = payload_sha
 
         # ADR-17: hold blocks every ordinary turn (reopen included).
         if _close_reconcile_held(state, sess):
@@ -1505,7 +1555,43 @@ class DesignLoop:
         )
         return True
 
-    def _pr_is_spent(self, repo: str, pr_number: int) -> bool:
+    def _fetch_live_pr(self, repo: str, pr_number: int) -> dict[str, Any] | None:
+        """One GET for ADR-30 (c) and ADR-37 (a″). None on fail (fail open)."""
+        key = (repo, int(pr_number))
+        if key in _spent_prs:
+            return {"merged": True, "state": "closed", "head_sha": None}
+        fetch = self._fetch_pr
+        if fetch is None:
+            return None
+        token = self._github_api_token()
+        if not token:
+            return None
+        try:
+            pr = fetch(repo=repo, pr_number=pr_number, token=token)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("spent-PR fetch failed repo=%s pr=%s: %s", repo, pr_number, exc)
+            return None
+        if not isinstance(pr, dict):
+            return None
+        sha = str(pr.get("head_sha") or "") or str(
+            json_obj(pr.get("head")).get("sha") or ""
+        )
+        out = {
+            "merged": bool(pr.get("merged")),
+            "state": str(pr.get("state") or ""),
+            "head_sha": sha or None,
+        }
+        if out["merged"]:
+            _spent_prs.add((repo, int(pr_number)))
+        return out
+
+    def _pr_is_spent(
+        self,
+        repo: str,
+        pr_number: int,
+        *,
+        live: dict[str, Any] | None = None,
+    ) -> bool:
         """True when the forge says the PR is merged or closed (ADR-30 (c)).
 
         Only ``merged`` is cached. ``closed`` is re-read: a closed PR can reopen.
@@ -1513,21 +1599,10 @@ class DesignLoop:
         key = (repo, int(pr_number))
         if key in _spent_prs:
             return True
-        fetch = self._fetch_pr
-        if fetch is None:
+        pr = live if live is not None else self._fetch_live_pr(repo, pr_number)
+        if not pr:
             return False
-        token = self._github_api_token()
-        if not token:
-            return False
-        try:
-            pr = fetch(repo=repo, pr_number=pr_number, token=token)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("spent-PR fetch failed repo=%s pr=%s: %s", repo, pr_number, exc)
-            return False
-        if not isinstance(pr, dict):
-            return False
-        merged = bool(pr.get("merged"))
-        if merged:
+        if pr.get("merged"):
             _spent_prs.add(key)
             return True
         return str(pr.get("state") or "") == "closed"

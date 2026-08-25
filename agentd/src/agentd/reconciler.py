@@ -607,6 +607,10 @@ class Reconciler:
         if snap.get("design_merged"):
             self._adopt_forward(sess, "design_merged", report, dry_run=dry_run)
 
+        remaining = self._synth_head_drift(
+            sess, snap, report, dry_run=dry_run, remaining=remaining
+        )
+
         body = snap.get("issue_body")
         if isinstance(body, str) and body:
             box = checkbox_is_checked(body, strict=True)
@@ -667,6 +671,123 @@ class Reconciler:
                 step.new_state,
                 event_kind,
             )
+
+    def _synth_head_drift(
+        self,
+        sess: dict[str, Any],
+        snap: dict[str, Any],
+        report: dict[str, Any],
+        *,
+        dry_run: bool,
+        remaining: int,
+    ) -> int:
+        """ADR-37: enqueue pull_request.synchronize when a tracked PR head moved."""
+        state = str(sess.get("state") or "")
+        sk = str(sess.get("session_key") or "")
+        for pr_key, sha_key, merged_key, wm_key, rework in (
+            (
+                "design_pr",
+                "design_head_sha",
+                "design_merged",
+                "design_pr_head",
+                "DESIGN_REWORK",
+            ),
+            (
+                "feature_pr",
+                "feature_head_sha",
+                "feature_merged",
+                "feature_pr_head",
+                "CODE_REWORK",
+            ),
+        ):
+            if snap.get(merged_key):
+                continue
+            pr_num = sess.get(pr_key)
+            if not pr_num:
+                continue
+            live = str(snap.get(sha_key) or "")
+            if not live:
+                continue
+            stored = str(sess.get(wm_key) or "")
+            if stored == live:
+                continue
+            if not stored and state != rework:
+                if not dry_run:
+                    self.store.update_session_fields(sk, **{wm_key: live})
+                    sess[wm_key] = live
+                continue
+            if remaining <= 0:
+                report["capped"] = int(report["capped"]) + 1
+                continue
+            if dry_run:
+                report["synthesized"] = int(report["synthesized"]) + 1
+                remaining -= 1
+                continue
+            inserted = self._synthesize_synchronize(
+                sess, snap, pr_number=int(pr_num), head_sha=live
+            )
+            if inserted:
+                report["synthesized"] = int(report["synthesized"]) + 1
+                remaining -= 1
+                log.info(
+                    "reconcile head drift session=%s pr=%s %s → %s (#211)",
+                    sk,
+                    pr_num,
+                    stored or "NULL",
+                    live,
+                )
+        return remaining
+
+    def _synthesize_synchronize(
+        self,
+        sess: dict[str, Any],
+        snap: dict[str, Any],
+        *,
+        pr_number: int,
+        head_sha: str,
+    ) -> bool:
+        repo = str(sess.get("repo") or "")
+        issue_num = int(sess.get("issue_num") or 0)
+        node: dict[str, Any] = {}
+        for n in snap.get("nodes") or []:
+            if not isinstance(n, dict):
+                continue
+            if n.get("kind") != "pull_request":
+                continue
+            try:
+                if int(n.get("number") or 0) == pr_number:
+                    node = n
+                    break
+            except (TypeError, ValueError):
+                continue
+        author = str(node.get("author") or "")
+        payload = {
+            "action": "synchronize",
+            "pull_request": {
+                "node_id": str(node.get("id") or ""),
+                "number": pr_number,
+                "merged": False,
+                "title": str(node.get("title") or ""),
+                "html_url": f"https://github.com/{repo}/pull/{pr_number}",
+                "user": {"login": author},
+                "head": {
+                    "ref": str(node.get("head_ref") or ""),
+                    "sha": head_sha,
+                },
+            },
+            "sender": {"login": author},
+            "repository": {"full_name": repo},
+        }
+        return self.store.insert_delivery(
+            delivery_id=f"recon:sync:{pr_number}:{head_sha}",
+            event="pull_request",
+            action="synchronize",
+            repo=repo,
+            issue_num=issue_num,
+            sender=author,
+            payload=json.dumps(payload).encode(),
+            status="queued",
+        )
 
     def _synthesize_node(
         self, sess: dict[str, Any], snap: dict[str, Any], node: dict[str, Any]
