@@ -1,5 +1,7 @@
 # agentd/session-runner — §7.1
-# Build: docker build -t agentd/session-runner:1.1.0 -f docker/session-runner/Dockerfile .
+# Build: docker build -t agentd/session-runner:<version> docker/session-runner/
+#   The context is this directory: COPY agentd_runner/ resolves relative to it,
+#   so the -f form above failed with "/agentd_runner: not found".
 FROM debian:bookworm-slim
 
 ENV DEBIAN_FRONTEND=noninteractive

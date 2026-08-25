@@ -35,11 +35,12 @@ def test_deployed_tag_is_still_the_default_when_unset(
     a **deploy**, and it is only correct paired with a build of that exact tag
     plus `docker rm -f` on the project container (a running container is adopted
     regardless of image — ADR-25's named residual). Bumped 1.2.0 -> 1.3.0 by
-    ADR-35 (#172), whose fix is inside the image.
+    ADR-35 (#172), and 1.3.0 -> 1.4.0 by #208/#210/#212, whose fixes are all
+    inside the image.
     """
     monkeypatch.delenv("AGENTD_RUNNER_IMAGE", raising=False)
-    assert runner_image() == "agentd/session-runner:1.3.0"
-    assert DEFAULT_IMAGE == "agentd/session-runner:1.3.0"
+    assert runner_image() == "agentd/session-runner:1.4.0"
+    assert DEFAULT_IMAGE == "agentd/session-runner:1.4.0"
 
 
 def test_resolution_is_not_frozen_at_import(monkeypatch: pytest.MonkeyPatch) -> None:
