@@ -405,6 +405,10 @@ def test_fetch_snapshot_includes_reviews() -> None:
     assert review["number"] == 111
     assert review.get("head_ref")
     assert not any(n["id"] == "PRR_pending" for n in snap["nodes"])
+    # #209: the node carries the *PR's* author alongside the review's, and the
+    # two must not be conflated — the fixture's logins differ for that reason.
+    assert review["author"] == "arch"
+    assert review["pr_author"] == "dev"
 
 
 def test_synthesized_review_classifies_as_feature_approved(tmp_path: Path) -> None:
@@ -445,4 +449,65 @@ def test_synthesized_review_classifies_as_feature_approved(tmp_path: Path) -> No
         repo="huozhe/code-workflow",
     )
     assert kind == "feature_approved_unverified"
+    store.close()
+
+
+def test_synthesized_review_carries_the_pr_author(tmp_path: Path) -> None:
+    """#209: ADR-30's author-sent guard reads ``pull_request.user.login``.
+
+    The synthesized payload omitted it, so ``_pr_author_login`` returned None,
+    the guard short-circuited on ``if pr_author and ...``, and the author's own
+    review re-dispatched a turn to the counterpart — #173's symptom, reached
+    through the reconciler rather than the webhook.
+    """
+    from agentd.design_loop import _pr_author_login
+    from agentd.gitops import role_branch_name
+
+    store = Store(tmp_path / "state.db")
+    sk = _sess(store, issue=32, state="CODE_REVIEW")
+    store.update_session_fields(sk, feature_pr=111)
+    head = role_branch_name("huozhe/code-workflow", 32, "developer")
+
+    def _node(node_id: str, review_author: str, pr_author: str) -> dict:
+        return {
+            "id": node_id,
+            "kind": "review",
+            "created_at": 200,
+            "author": review_author,
+            "pr_author": pr_author,
+            "state": "COMMENTED",
+            "number": 111,
+            "head_ref": head,
+            "title": "feat: x",
+        }
+
+    _sweep_rec(
+        store,
+        {
+            "issue_state": "open",
+            "issue_body": "",
+            "nodes": [
+                # The PR's own author reviewing it — must read as author-sent.
+                _node("PRR_self", "huozheclaude", "huozheclaude"),
+                # The counterpart reviewing it — must NOT. Using the review's
+                # own author for both is the trap: it would make every
+                # synthesized review look author-sent and stall the loop.
+                _node("PRR_peer", "huozhegrok", "huozheclaude"),
+            ],
+        },
+    )
+    queued = {r["delivery_id"]: dict(r) for r in store.list_queued()}
+
+    for delivery_id, sender, expected in (
+        ("recon:PRR_self", "huozheclaude", "huozheclaude"),
+        ("recon:PRR_peer", "huozhegrok", "huozheclaude"),
+    ):
+        row = queued[delivery_id]
+        payload = json.loads(decompress_payload(row["payload"]))
+        assert _pr_author_login("pull_request_review", payload) == expected
+        # The guard fires only when the sender *is* the PR's author.
+        assert (str(row["sender"]).lower() == expected.lower()) is (
+            sender == "huozheclaude"
+        )
+
     store.close()

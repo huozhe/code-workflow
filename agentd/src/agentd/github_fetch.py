@@ -261,6 +261,10 @@ def fetch_session_snapshot(
                         "kind": "review",
                         "created_at": _iso_to_epoch(str(rev.get("submitted_at") or "")),
                         "author": str((rev.get("user") or {}).get("login") or ""),
+                        # #209: the *PR's* author, not the review's. ADR-30's
+                        # guard reads pull_request.user.login, and a synthesized
+                        # review that omits it short-circuits the guard.
+                        "pr_author": str((pr.get("user") or {}).get("login") or ""),
                         "state": str(rev.get("state") or ""),
                         "number": int(num),
                         "head_ref": head_ref,
