@@ -158,6 +158,15 @@ def _no_github_writes(request, monkeypatch):
 # on every Client goes through it. There is no AsyncClient and no module-level
 # ``httpx.get`` in agentd/src or agentd/tests. urllib in the runner preflight
 # is a named residual and does not run in this process.
+#
+# ``Client.send`` is one layer above the network: ``MockTransport`` and any
+# other in-process stub still call it. Those tests must request
+# ``allows_github_api`` (or re-patch ``send``) even though nothing leaves the
+# process. That is the trade for wrapping ``send`` rather than
+# ``HTTPTransport.handle_request`` — ADR-36 (e) named ``send``, and every
+# gateway ``api.github.com`` call is behind ``except Exception`` (verify.py,
+# github_fetch.py), so the raise must still be recorded and asserted after
+# the test, matching ``_no_github_writes``.
 
 
 def _github_api_url(request: httpx.Request) -> str | None:
@@ -194,11 +203,16 @@ def _no_github_api(request, monkeypatch):
         yield
         return
 
+    attempts: list[str] = []
     real_send = httpx.Client.send
 
     def _refuse(self, request, *args, **kwargs):
         url = _github_api_url(request)
         if url is not None:
+            attempts.append(url)
+            # Fast failure where the exception propagates. Also recorded so a
+            # caller that swallows (verify.py / github_fetch.py BLE001) still
+            # fails the test after the yield — same lesson as _no_github_writes.
             raise RuntimeError(
                 "test would talk to the GitHub API: "
                 f"{url}. Request the allows_github_api fixture if the call "
@@ -208,3 +222,8 @@ def _no_github_api(request, monkeypatch):
 
     monkeypatch.setattr(httpx.Client, "send", _refuse)
     yield
+    assert not attempts, (
+        "test would talk to the GitHub API at "
+        f"{', '.join(attempts)}. Request the allows_github_api fixture if "
+        "the call is under test."
+    )

@@ -12,6 +12,7 @@ from agentd.config import Config
 from agentd.db import Store
 from agentd.design_loop import DesignLoop
 from agentd.supervisor import SessionSupervisor
+from agentd.verify import verify_design_approval
 
 GITHUB_USER = "https://api.github.com/user"
 
@@ -38,10 +39,27 @@ def test_github_api_guard_reaches_env_token_path(monkeypatch: pytest.MonkeyPatch
 
 
 def test_github_api_guard_refuses_env_token_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Acceptance 4: same request, guard installed, failure names the URL."""
+    """Acceptance 4: same request, guard installed, failure names the URL.
+
+    Replaces autouse ``send`` with the same raise so this test can
+    ``pytest.raises`` without the post-yield ``assert not attempts`` also
+    firing (that half is the swallow demonstration below).
+    """
     monkeypatch.setenv("GH_TOKEN", "ghs_test_not_a_real_token")
     monkeypatch.delenv("AGENTD_SECRET_GROK_BOT", raising=False)
     monkeypatch.delenv("AGENTD_SECRET_CLAUDE_BOT", raising=False)
+
+    def _raise(self: httpx.Client, request: httpx.Request, *args, **kwargs):
+        url = str(request.url)
+        if (request.url.host or "") == "api.github.com":
+            raise RuntimeError(
+                "test would talk to the GitHub API: "
+                f"{url}. Request the allows_github_api fixture if the call "
+                "is under test."
+            )
+        raise AssertionError(f"unexpected send {url}")
+
+    monkeypatch.setattr(httpx.Client, "send", _raise)
     with (
         pytest.raises(RuntimeError, match="api.github.com/user") as exc,
         httpx.Client() as client,
@@ -113,7 +131,73 @@ def test_github_api_guard_spares_design_loop_fallbacks(
         store.close()
 
 
+def _uninjected_verify() -> object:
+    return verify_design_approval(
+        repo="o/r",
+        pr_number=7,
+        expected_approver_login="huozhegrok",
+        head_sha="abc123",
+        token="tok",
+    )
+
+
+def test_uninjected_verify_design_approval_swallowed_without_after_assert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The case the raise-only guard misses: verify.py:177 catches Exception.
+
+    Shown to pass under the guard as first written (raise inside send, no
+    post-yield assert): the call returns an ApprovalCheck, the test is green.
+    """
+
+    def _raise_only(self: httpx.Client, request: httpx.Request, *args, **kwargs):
+        url = str(request.url)
+        if (request.url.host or "") == "api.github.com":
+            raise RuntimeError(f"test would talk to the GitHub API: {url}")
+        raise AssertionError(f"unexpected send {url}")
+
+    monkeypatch.setattr(httpx.Client, "send", _raise_only)
+    check = _uninjected_verify()
+    assert check.ok is False
+    assert "GitHub API error" in check.reason
+    assert "api.github.com" in check.reason
+
+
+def test_uninjected_verify_design_approval_fails_after_yield(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same call, fixed guard: record + raise, then assert after the yield.
+
+    The raise is still swallowed (check.ok is False). The post-yield assert
+    is what fails the test — the bind from _no_github_writes.
+    """
+    attempts: list[str] = []
+
+    def _refuse(self: httpx.Client, request: httpx.Request, *args, **kwargs):
+        url = str(request.url)
+        if (request.url.host or "") == "api.github.com":
+            attempts.append(url)
+            raise RuntimeError(
+                "test would talk to the GitHub API: "
+                f"{url}. Request the allows_github_api fixture if the call "
+                "is under test."
+            )
+        raise AssertionError(f"unexpected send {url}")
+
+    monkeypatch.setattr(httpx.Client, "send", _refuse)
+    check = _uninjected_verify()
+    assert check.ok is False
+    assert "GitHub API error" in check.reason
+    with pytest.raises(AssertionError, match="api.github.com"):
+        assert not attempts, (
+            "test would talk to the GitHub API at "
+            f"{', '.join(attempts)}. Request the allows_github_api fixture "
+            "if the call is under test."
+        )
+
+
 def test_m4a_cleanup_patch_then_delete_on_assert_fail(
+    allows_github_api,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Acceptance 3b: finally still PATCH-closes and DELETE-refs when step 1 fails."""
@@ -149,6 +233,7 @@ def test_m4a_cleanup_patch_then_delete_on_assert_fail(
 
 
 def test_m4a_cleanup_deletes_ref_when_pr_never_opened(
+    allows_github_api,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """(d′): cleanup is armed from ref creation, not from PR open."""
