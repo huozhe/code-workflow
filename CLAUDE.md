@@ -22,10 +22,16 @@ rule is written here, where host-side agents actually read.
   it anyway makes the audit trail assert that an agent acted which did not.
 - If you are a host agent carrying an absent role's work under the owner's identity (§5.5.1), say so in
   the body of every artifact you author. GitHub records the identity, never the operator.
+- **Do not run `agentd/tests/test_m4a_branch_protection_live.py`** (or the `AGENTD_LIVE_M4A=1` command
+  the M4-A runbook lists under *Automated re-check*). It reads both machine users' Keychain entries in
+  one process and posts an approval as `huozheclaude` from whoever ran it — the rule above, in a file.
+  ADR-36 removes its Architect half; until then it is off-limits, including to discharge #56 step 3.
 
-Where a demonstration's claim *is* an identity claim, record **how the action was produced** (§5.5.2).
-GitHub logs the identity, not the credential's operator, so that class of claim cannot be re-checked
-from the database afterwards.
+Where a demonstration's claim *is* an identity claim, record **how the action was produced** (§5.5.2):
+put the producing `turn_id` in the artifact's own body — the review body, the PR body, the comment body.
+GitHub logs the identity, not the credential's operator, so an **unstamped** artifact of this class
+cannot be re-checked from the database afterwards. A stamped one partly can: `turn_id`, `role` and the
+turn window are written by the gateway, not by you.
 
 ## Review
 
