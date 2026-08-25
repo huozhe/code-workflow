@@ -88,7 +88,7 @@ def cleanup_m4a_probe(
         )
 
 
-def test_m4a_assert_rules_then_observe_refuse(allows_github_api) -> None:
+def test_m4a_assert_rules_then_observe_refuse(allows_github_api, allows_keychain) -> None:
     del allows_github_api  # opt-in: exemption must be visible in the signature
     dev = _dev_token()
     repo = _repo()
