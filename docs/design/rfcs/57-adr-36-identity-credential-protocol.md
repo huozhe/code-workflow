@@ -327,9 +327,13 @@ until this is approved).** In priority order, because the first item is actively
    with the provenance finding and a pointer to §5.5.2; rewrite **"Automated re-check"** to say what the live
    test covers after (d) and that steps 3 and 4 are not automatable, with an explicit *do not run this to
    discharge #56 step 3*.
-2. `agentd/tests/test_m4a_branch_protection_live.py` — decision (d): drop `_arch_token` (`:60–64`), the
-   approve block (`:206–226`) and the merge block (`:228–241`); close the probe PR and delete its branch;
-   update the module docstring, which currently documents two tokens.
+2. `agentd/tests/test_m4a_branch_protection_live.py` — decision (d) and **(d′)**, not a one-shot close.
+   Drop `_arch_token` (`:60–64`), the approve block (`:206–226`) and the success-merge block (`:228–241`);
+   update the module docstring (it currently documents two tokens). Cleanup is **(d′)**: the branch and PR
+   are created inside a `try`, and a `finally` under the Developer token does `PATCH …/pulls/{n}`
+   `state=closed` then `DELETE …/git/refs/heads/{head}`, armed from the moment the ref is created, running
+   when steps 1 or 2 assert-fail as well as when they pass. There is no standing probe PR — #55 is merged
+   and the test creates a fresh `agentd/m4a-live-<uuid8>` every run (`:99`). Acceptance 3b is the check.
 3. `agentd/tests/conftest.py` — decision (e).
 4. `docs/ops/live-sign-offs.md` — decision (c): a new row in **The ledger**, with the *Not discharged by*
    column naming the live test and a hand-run probe explicitly.
