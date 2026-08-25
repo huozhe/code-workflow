@@ -1,6 +1,8 @@
 # Live sign-offs — what is still unproven, and the one session that proves most of it
 
-**Status:** open, 2026-08-22. Owner action (`@huozhe`).
+**Status:** 2026-08-25. Six items discharged on the live session for #57 (2026-08-24/25).
+**#173 and #172 are not**, and both failed for reasons no fixture had reached. Owner action
+(`@huozhe`) on what is left.
 
 Several merged and deployed changes carry an acceptance item that no fixture can
 discharge: it has to be observed on a real session, against the real gateway.
@@ -22,34 +24,68 @@ It does **not** produce all of it, and the gaps are not obvious:
 |---|---|---|
 | Immediately | `DEFAULT_IMAGE = 1.3.0` creates a container; **#171** | Both are `ensure_session` facts. `_prepare_project_issue_layout` (`supervisor.py:823`) runs `resolve_base_ref` + `worktree_add` for both roles, and its only callers are `_ensure_session_locked` (`:407`) and `_adopt_or_promote` (`:595`) — **before any turn is dispatched**. #171's acceptance says the same: *of a fresh session, with no agent action* |
 | During, **on the first turn that opens the Design PR** | **#156** | The counter's subject is that turn. A session whose early turns defer, hit `role_busy`, or are intake turns leaves #156 unproven while the exercise looks like it is progressing |
-| Only if it outlives a **5-minute** reconcile pass — and, for #116, one that lands while **no turn is open** | **#116**, **#173** | The reconciler is a timer (`RECONCILE_INTERVAL_S`), not something a session triggers — a short session never shows them. For #116 duration is necessary and not sufficient: `_probe_attachments` (`reconciler.py:377`) skips any project in `inflight` with `reason="open turn"` and reports `probe_skipped`, never `attached`, because a runner busy in a turn can miss the 2 s timeout and emit a WARNING that lies. A continuously busy session never produces `attached=1`, however long it runs |
-| At close | **#172**'s kill | `session.teardown` → `shutdown_all()` → `_kill_unlocked` (`server.py:417`) is the reliable half |
+| Only if it outlives a **5-minute** reconcile pass, landing while **no turn is open** | **#116** | The reconciler is a timer (`RECONCILE_INTERVAL_S`), not something a session triggers — a short session never shows them. For #116 duration is necessary and not sufficient: `_probe_attachments` (`reconciler.py:377`) skips any project in `inflight` with `reason="open turn"` and reports `probe_skipped`, never `attached`, because a runner busy in a turn can miss the 2 s timeout and emit a WARNING that lies. A continuously busy session never produces `attached=1`, however long it runs |
+| At close | **nothing** — see #172 below | ~~`session.teardown` → `shutdown_all()` → `_kill_unlocked` is the reliable half~~. **Wrong.** The gateway never sends `session.teardown`: its whole RPC vocabulary is `session.init`, `session.resume`, `session.attach`, `health.ping`. The kill path has no caller, so nothing lands here. On #57 the CLIs died when the reconciler removed the container 2m25s after close (`reason=no live session`), and `grep -ic kill` over a 12-hour log returned **0** |
 
-**Two cannot be forced and must not be counted on the plan.** The reasons are
-different and both are worth stating, because "run it longer" fixes neither:
-**#172's deadline kill** is an **error path** — a healthy turn never enters it, so
-no amount of session length produces one; **#168** depends on an **external**
-event, a real vendor quota refusal, which no local action triggers. Opportunistic
-only.
+**On what "cannot be forced" turned out to mean.** This section used to name two
+such items. Both were wrong, in opposite directions.
 
-**#57 is a different exercise, and it is plannable.** The operator half of M4-A
-is a Feature PR opened by the Developer and approved by an Architect turn from
-inside its own container, with the producing `turn_id` in the review body. A
-session run to teardown never produces that pair; the ordinary design loop does,
-deliberately, whenever a Feature PR is reviewed. Plan that round; do not wait
-for it as if it were #168.
+**#168 was called unforceable and it simply happened** — 2026-08-24 22:53:52, an
+Architect turn that had already merged the Design PR, refused mid-turn. Waiting
+cost nothing; a long session was enough. Plan for it opportunistically, but do
+not treat it as out of reach.
+
+**#172 was called an error path that a healthy turn never enters.** The real
+reason is worse: the kill has **no caller at all**, so no turn of any kind can
+reach it. Length was never the obstacle.
+
+**#57 was a different exercise, and it needed no planning at all.** The operator
+half of M4-A is a Feature PR opened by the Developer and approved by an Architect
+turn from inside its own container, with the producing `turn_id` in the review
+body. The paragraph that added this row said to plan that round rather than wait
+for it — and the very session that wrote the row produced the pair on its way past,
+on PR #213. The prediction was right about the mechanism: the ordinary design loop
+yields it whenever a Feature PR is reviewed, so it costs nothing extra.
 
 ## The ledger
 
-| Issue | ADR | What must be observed | Not discharged by |
+Six rows closed on the live session for #57, 2026-08-24/25 — including #57's own,
+added mid-session by the design round that then satisfied it. Two did not close;
+the `Result` column says which. Evidence for each is in the issue.
+
+| Issue | ADR | What must be observed | Result |
 |---|---|---|---|
-| **#116** | ADR-34 | The reconciler's probe reaching a runner **inside a real container over a published port**: `attached=1` with a real `rss_bytes` in the pass report | Any unit fixture. Everything run so far is a socket stub or an in-process server |
-| **#172** | ADR-35 | A **real vendor CLI** (`claude`/`grok`) killed by the runner, with no descendant surviving | Every kill driven so far was against `sh` |
-| **#171** | ADR-31 | Both role worktrees `behind=0` on the live clone, observed on a **fresh** session with no agent action | Arriving after the fact: the repair happens inside the first `ensure_session`, so a `behind=0` read later does not tell you whether you saw it repaired or saw it already fine. Nor by repairing it by hand — that leaves nothing to observe |
-| **#156** | ADR-32 | A real turn that opens a Design PR leaves `silent_turns` at 0 | A unit fixture trips the same log line without exercising the counter's subject |
-| **#173** | ADR-30 | A rework round logs `author-sent PR event, no turn`, and `silent_turns` never exceeds 1 | As above |
-| **#168** | ADR-33 | A real quota refusal recorded `quota_exhausted`, the delivery re-picked after the hold, the session continuing **without pausing meanwhile** | Cannot be forced; opportunistic only |
-| **#57** | ADR-36 | Operator half of M4-A: a Feature PR opened by the Developer, approved by an Architect turn from inside its own container, review body carrying the producing `turn_id`, checkable against `turns` (`role=architect`, `submitted_at` inside `[started_at, ended_at]`) | The live M4-A test (Developer token only after ADR-36 (d)). A hand-run probe. PR #55. |
+| **#116** | ADR-34 | The reconciler's probe reaching a runner **inside a real container over a published port**: `attached=1` with a real `rss_bytes` in the pass report | **Discharged** 22:26:12 — `attached=1 probe_skipped=0`, payload `rss_bytes=25440256` over `127.0.0.1:33083`, reproduced on three later passes. Read #212 before writing a rule against those numbers: `rss_bytes` is a high-water mark and `cli_rss_kb` is frozen at turn end |
+| **#172** | ADR-35 | A **real vendor CLI** (`claude`/`grok`) killed by the runner, with no descendant surviving | **Not discharged, and not reachable.** The gateway never sends `session.teardown`, so `shutdown_all()` → `_kill_unlocked` has no caller. Another live session will not produce it; wiring the call must come first. Note both CLIs had **zero children** at close, so a kill there would satisfy "no descendant survived" only vacuously — the acceptance needs a case that can reach it |
+| **#171** | ADR-31 | Both role worktrees `behind=0` on the live clone, observed on a **fresh** session with no agent action | **Discharged** 22:52:19 with both sides captured: clone at `85107b4` with `FETCH_HEAD` 4 days stale before the label, `bb8aa5c` and both worktrees `behind=0 ahead=0` after. The fetch happened inside `ensure_session`, and the triggering delivery was dropped `self-echo`, so *no agent action* is literal |
+| **#156** | ADR-32 | A real turn that opens a Design PR leaves `silent_turns` at 0 | **Discharged** 22:06:46 — turn opened Design PR #207, `silent_turns` 0. `turn_count` 0→1 proves `bump_turn_counters` ran (same SQL statement), `status='done'` rules out `keep`, and `inc` would have read 1 — so the mode was `reset`, from observed progress |
+| **#173** | ADR-30 | A rework round logs `author-sent PR event, no turn`, and `silent_turns` never exceeds 1 | **Failed.** First half held on webhooks (two kinds took the branch). Second half did not: the reconciler synthesised the same reviews with no `pull_request.user`, so `_pr_author_login` returned `None`, the guard short-circuited, and two no-op turns pushed `silent_turns` to **2**. See #209 — the one-line fix there is a trap |
+| **#168** | ADR-33 | A real quota refusal recorded `quota_exhausted`, the delivery re-picked after the hold, the session continuing **without pausing meanwhile** | **Discharged** 22:53:52, unforced. The refusing turn had already merged Design PR #207 — the *after real work* case exactly. Status `quota_exhausted` not `failed`; `paused_reason` stayed `NULL` and two Developer turns ran; delivery re-picked at **02:30:00**, precisely `retry_after` |
+| **#57** | ADR-36 | Operator half of M4-A: a Feature PR opened by the Developer, approved by an Architect turn from inside its own container, review body carrying the producing `turn_id`, checkable against `turns` (`role=architect`, `submitted_at` inside `[started_at, ended_at]`) | **Discharged** on this same session, 2026-08-25. Feature PR #213 opened by `huozhegrok` (Developer); approved 16:34:17Z by `huozheclaude`; review body carries *"Produced by turn `t-2095e4fce899` (architect), per §5.5.2"*; `turns` has `t-2095e4fce899` `role=architect` spanning **09:32:40–09:34:41 PDT**, and the review lands at 09:34:17 — inside the window. The row was added by the design round that then satisfied it |
+
+## What the run surfaced
+
+Seven defects, none reachable by a fixture. Filed unlabelled — the `agentd` label
+opens a session.
+
+| # | Defect |
+|---|---|
+| #208 | Stale-drain logs benign vendor notifications at WARNING, burying the discarded-`result` signal the level exists for |
+| #209 | Reconciler-synthesised reviews omit `pull_request.user`, bypassing ADR-30's author-sent guard. The obvious one-line fix silently stalls the loop instead |
+| #210 | Runner pid 1 never reaps adopted children: **175 zombies** in one session, against a `pids.max` of 1024 |
+| #211 | A dropped `pull_request.synchronize` strands a session, and the reconciler has no node kind to regenerate it |
+| #212 | The probe's `rss_bytes` is a high-water mark and `cli_rss_kb` is frozen at turn end — unfit for M6-3's memory rule |
+| #214 | `CHANGES_REQUESTED` pauses the session instead of dispatching Developer rework; the pending delivery then re-defers every 5 s (**4,417 times**) |
+| #172 | The kill path has no caller — see the row above |
+
+**#211 is the one to fix first.** Webhook delivery failed five times in one evening
+(`failed to connect to host` — the ingress is a Tailscale funnel). Four were
+recoverable; the `synchronize` was not, and losing it desynced the FSM from GitHub
+until an agent acted on the true state — producing, in order, a deadlock, a stall
+pause, a recorded **§8.4 merge bypass** that was not a bypass, and a session
+archived `class=ABANDONED` whose Feature PR had merged to `main`. Everything
+reasoning from FSM state is wrong for as long as the gap lasts, and nothing detects
+the divergence.
 
 ## What is not in this ledger, and why
 
@@ -127,7 +163,15 @@ result is only as good as its fixture* — earned six more instances across #116
 #172, and the shape is always the same: the fixture could not **reach** the case it
 was named for, and the result looked like evidence rather than absence.
 
-**This file has already done it once.** An earlier draft put #171 under *During*
+**This file has now done it twice.** The second time was the #172 row: it named a
+chain — `session.teardown` → `shutdown_all()` → `_kill_unlocked` — and called it
+*the reliable half*, without anyone checking that the gateway sends that verb. It
+does not. A reader following that row would have watched a teardown for a kill
+that cannot occur, seen the container vanish and the CLIs with it, and marked the
+item discharged. Every visible signal agreed: teardown logged confirmed removals,
+the session archived, no CLI survived. `grep -ic kill` returned 0.
+
+**And once before that.** An earlier draft put #171 under *During*
 while the same row's advice read "watch the first `ensure_session` repair it" —
 the two columns disagreed, and the one that was wrong was the one a reader acts
 on. Someone following it would have watched a turn for something that had already
