@@ -724,6 +724,13 @@ class Reconciler:
                     "number": node.get("number"),
                     "title": str(node.get("title") or ""),
                     "head": {"ref": str(node.get("head_ref") or "")},
+                    # #209: without this, _pr_author_login returns None and
+                    # ADR-30's author-sent guard short-circuits, so the author's
+                    # own review re-dispatches a turn to the counterpart.
+                    # It is the PR's author — `author` here is the *review's*,
+                    # and using it would make every synthesized review look
+                    # author-sent, silently stalling the loop instead.
+                    "user": {"login": str(node.get("pr_author") or "")},
                 },
                 "sender": {"login": author},
                 "repository": {"full_name": repo},
