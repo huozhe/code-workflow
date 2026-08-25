@@ -32,6 +32,13 @@ no amount of session length produces one; **#168** depends on an **external**
 event, a real vendor quota refusal, which no local action triggers. Opportunistic
 only.
 
+**#57 is a different exercise, and it is plannable.** The operator half of M4-A
+is a Feature PR opened by the Developer and approved by an Architect turn from
+inside its own container, with the producing `turn_id` in the review body. A
+session run to teardown never produces that pair; the ordinary design loop does,
+deliberately, whenever a Feature PR is reviewed. Plan that round; do not wait
+for it as if it were #168.
+
 ## The ledger
 
 | Issue | ADR | What must be observed | Not discharged by |
@@ -42,6 +49,7 @@ only.
 | **#156** | ADR-32 | A real turn that opens a Design PR leaves `silent_turns` at 0 | A unit fixture trips the same log line without exercising the counter's subject |
 | **#173** | ADR-30 | A rework round logs `author-sent PR event, no turn`, and `silent_turns` never exceeds 1 | As above |
 | **#168** | ADR-33 | A real quota refusal recorded `quota_exhausted`, the delivery re-picked after the hold, the session continuing **without pausing meanwhile** | Cannot be forced; opportunistic only |
+| **#57** | ADR-36 | Operator half of M4-A: a Feature PR opened by the Developer, approved by an Architect turn from inside its own container, review body carrying the producing `turn_id`, checkable against `turns` (`role=architect`, `submitted_at` inside `[started_at, ended_at]`) | The live M4-A test (Developer token only after ADR-36 (d)). A hand-run probe. PR #55. |
 
 ## What is not in this ledger, and why
 

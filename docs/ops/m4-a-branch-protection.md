@@ -1,9 +1,18 @@
 # M4-A — Branch protection (FR-1.3)
 
-**Status:** PASS (2026-08-12). Issue #51 **M4-3**. Spike M4-A in the design
-spec: *Developer identity cannot produce a satisfying approval on its own PR*.
+The claim is **split** (#57, ADR-36). FR-1.3 is an account requirement; the
+spike sentence was an operator claim. They are not the same evidence.
 
-Two evidence halves. Neither alone is enough; together they prove FR-1.3.
+| Half | Status |
+|---|---|
+| **Account** — the Developer **account** cannot submit a satisfying approval on a PR it authored | **PASS** (2026-08-12). Steps 1, 2 and 4. Issue #51 **M4-3**. Re-checkable from the API. |
+| **Operator** — the Developer's **operator** cannot cause a satisfying approval to exist on its own PR | **NOT ESTABLISHED.** False in the only run that exists (PR #55). Held open in [`live-sign-offs.md`](live-sign-offs.md); discharged on a real Feature PR approval produced by an Architect turn, stamped per §5.5.2. **Do not re-run #56 step 3 by hand, and do not run the live test to discharge it.** |
+
+Two evidence halves for the **account** claim. Neither alone is enough; together
+they prove FR-1.3.
+
+**§5.5.** Branch protection is an account control. It binds which account
+approves and nothing about which operator drives an account.
 
 | Half | What it shows | What it does **not** show |
 |---|---|---|
@@ -163,6 +172,14 @@ POST /repos/…/pulls/55/reviews   # as huozheclaude
 
 PR: `mergeable: true`, `mergeable_state: "clean"`.
 
+**Account fact, still stands.** Review `4913183219`, `state: APPROVED`,
+`user.login: huozheclaude`, body *"architect approve for m4a probe"*,
+`2026-08-12T05:04:54Z`. The ruleset cleared. **Not evidence for the operator
+claim** — GitHub records the identity, not who held the credential, so a clean
+redo returns the same three values and no new knowledge. Provenance: the owner's
+finding on #57; analysis in ADR-36 / §5.5.2. The operator half is the
+[`live-sign-offs.md`](live-sign-offs.md) row, not a re-run of this step.
+
 ### 4. Same PR, Developer merges → success
 
 ```http
@@ -176,7 +193,15 @@ PUT /repos/…/pulls/55/merge   # as huozhegrok
 
 Unit (always): `tests/test_verify_branch_rules.py`.
 
-Live (opt-in, writes a stamp file on success):
+Live (opt-in). Developer token only. Covers the **assert** half and **steps 1
+and 2** (merge without approval → 405; self-APPROVE → 422). Creates a probe PR,
+then **closes it and deletes the branch** in a `finally` — it cannot merge
+without an Architect approval, and a test process is one operator.
+
+**Does not cover steps 3 or 4.** Those need a second operator. A test that
+appears to cover them can only do so by committing the §5.5 violation (the
+pre-ADR-36 live test did exactly that). **Do not run this to discharge #56
+step 3.**
 
 ```bash
 AGENTD_LIVE_M4A=1 \
@@ -186,4 +211,5 @@ AGENTD_LIVE_M4A=1 \
 ## Cleanup note
 
 One-shot probe PR #55 left a temporary `.agentd-m4a-probe` on `main`; removed in
-the M4-3 code PR.
+the M4-3 code PR. The live test no longer merges; each run's probe is closed
+and its ref deleted by the test's own `finally` (ADR-36 (d′)).
