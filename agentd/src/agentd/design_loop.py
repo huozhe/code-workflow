@@ -644,6 +644,17 @@ class DesignLoop:
                 token=get_password("claude-bot") or get_password("grok-bot"),
             )
             if not check.ok:
+                if check.superseded:
+                    log.info(
+                        "merge_auth superseded id=%s pr=%s latest=%s state=%s "
+                        "— dropped, no escalation",
+                        delivery_id,
+                        pr_num,
+                        check.reason,
+                        state,
+                    )
+                    self.store.set_delivery_status(delivery_id, "dropped")
+                    return
                 log.warning(
                     "design_approved blocked id=%s: %s", delivery_id, check.reason
                 )
@@ -675,6 +686,17 @@ class DesignLoop:
                 required_checks=self.config.required_checks(repo),
             )
             if not check.ok:
+                if check.superseded:
+                    log.info(
+                        "merge_auth superseded id=%s pr=%s latest=%s state=%s "
+                        "— dropped, no escalation",
+                        delivery_id,
+                        pr_num,
+                        check.reason,
+                        state,
+                    )
+                    self.store.set_delivery_status(delivery_id, "dropped")
+                    return
                 if check.transient:
                     n = int(_merge_auth_attempts.get(delivery_id, 0)) + 1
                     _merge_auth_attempts[delivery_id] = n
@@ -829,6 +851,8 @@ class DesignLoop:
                     state,
                 )
                 return
+            n = int(row["defer_count"] or 0)
+            self.store.defer_delivery(delivery_id, min(5 * 2**n, 300))
             log.info("route defer id=%s reason=%s", delivery_id, decision.reason)
             return
 
@@ -3338,6 +3362,7 @@ class DesignLoop:
         dig["resume_state"] = resume_state
 
         n = self.store.close_escalation(session_key)
+        self.store.clear_deferred_clocks()
         project_key = str(
             sess.get("project_key") or project_key_from_repo(str(sess.get("repo") or ""))
         )

@@ -21,6 +21,13 @@ class ApprovalCheck:
     # True → timing/compute artefact: leave deferred and retry (PR #54 B1).
     # False → permanent fault: escalate now.
     transient: bool = False
+    # ADR-38: a later event replaced this delivery's premise. Not a retry, not a
+    # fault. Implies not ok; disjoint from transient.
+    superseded: bool = False
+
+
+# Merge-auth verdicts for latest-review (ADR-38). Not ADR-30's author-drop set.
+_MERGE_AUTH_VERDICTS = frozenset({"APPROVED", "CHANGES_REQUESTED", "DISMISSED"})
 
 
 @dataclass(frozen=True)
@@ -207,14 +214,17 @@ def verify_feature_merge(
     Gateway verifies only — it does **not** merge (ADR-8). On success the
     design loop emits ``merge_authorized`` so the **Developer** acts.
 
-    Failures are classified (PR #54 B1 / #38 split, ADR-26):
+    Failures are classified (PR #54 B1 / #38 split, ADR-26, ADR-38):
 
     - **transient** (``transient=True``): GitHub still computing mergeability
       (``unknown`` / null), or ``blocked`` with no unresolved review threads
       while checks are pending / unset — caller must leave the delivery
       deferred and retry.
-    - **permanent** (``transient=False``): wrong approver, stale head,
-      ``dirty``, a required check that has concluded ``failure``, or
+    - **superseded** (``superseded=True``): counterpart latest is
+      ``CHANGES_REQUESTED`` / ``DISMISSED``, or an ``APPROVED`` on a stale
+      SHA. Drop the delivery; do not escalate; still do not merge.
+    - **permanent** (``transient=False``): no review from the expected
+      approver, ``dirty``, a required check that has concluded ``failure``, or
       ``blocked`` with ``unresolved_count > 0``.
     """
     if not token:
@@ -247,8 +257,8 @@ def verify_feature_merge(
         head_sha=head_sha,
     )
     if not approval.ok:
-        # Approver / stale-head faults are permanent.
-        return ApprovalCheck(False, approval.reason, transient=False)
+        # Propagate superseded (ADR-38). Do not rebuild with transient=False only.
+        return approval
 
     live_head = str((pr.get("head") or {}).get("sha") or head_sha)
     wanted = [str(c) for c in (required_checks or []) if str(c).strip()]
@@ -378,12 +388,13 @@ def _check_approver_on_head(
     if current_head != head_sha:
         head_sha = str(current_head)
 
-    # Latest review per user wins (GitHub returns chronological)
+    # Latest *verdict* per user. COMMENTED / PENDING are not verdicts (ADR-38).
     latest: dict[str, dict[str, Any]] = {}
     if isinstance(reviews, list):
         for rev in reviews:
             user = ((rev.get("user") or {}).get("login") or "").lower()
-            if user:
+            st = str(rev.get("state") or "").upper()
+            if user and st in _MERGE_AUTH_VERDICTS:
                 latest[user] = rev
 
     want = expected_approver_login.lower()
@@ -392,7 +403,14 @@ def _check_approver_on_head(
         return ApprovalCheck(
             False, f"no review from expected approver {expected_approver_login!r}"
         )
-    if str(rev.get("state") or "").upper() != "APPROVED":
+    st = str(rev.get("state") or "").upper()
+    if st in ("CHANGES_REQUESTED", "DISMISSED"):
+        return ApprovalCheck(
+            False,
+            f"latest review from {expected_approver_login} is {rev.get('state')!r}, not APPROVED",
+            superseded=True,
+        )
+    if st != "APPROVED":
         return ApprovalCheck(
             False,
             f"latest review from {expected_approver_login} is {rev.get('state')!r}, not APPROVED",
@@ -402,6 +420,7 @@ def _check_approver_on_head(
         return ApprovalCheck(
             False,
             f"approval is on {str(reviewed_sha)[:8]}… not current head {str(head_sha)[:8]}…",
+            superseded=True,
         )
     return ApprovalCheck(True, "approved on current head by other role")
 

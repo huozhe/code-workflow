@@ -15,7 +15,7 @@ log = logging.getLogger("agentd.db")
 
 # Bump when DDL changes require a rebuild. SQLite is a derived cache (ADR-2);
 # mismatch ⇒ wipe + recreate. GitHub remains source of truth (P1).
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 # The kinds the cleanup ledger knows how to reason about (#192). Both reclaim
 # paths — GC's `_ledger_row_is_stale` and teardown's `_confirm_teardown_artifacts`
@@ -36,6 +36,7 @@ ARTIFACT_KINDS = frozenset({"branch", "scratch", "worktree"})
 # v8 (M6-1b / ADR-21): delivery_nodes + sessions.closed_issue_escalated_at.
 # v9 (M6-1c / ADR-22): turns.resume_attempts.
 # v10 (ADR-37 / #211): sessions.design_pr_head, sessions.feature_pr_head.
+# v11 (ADR-38 / #214): deliveries.next_attempt_at, deliveries.defer_count.
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS deliveries (
   delivery_id TEXT PRIMARY KEY,
@@ -46,7 +47,10 @@ CREATE TABLE IF NOT EXISTS deliveries (
   sender TEXT NOT NULL DEFAULT '',
   received_at INTEGER NOT NULL,
   payload BLOB NOT NULL,
-  status TEXT NOT NULL DEFAULT 'queued'
+  status TEXT NOT NULL DEFAULT 'queued',
+  -- v11 (ADR-38): eligible when next_attempt_at <= now. 0 means eligible now.
+  next_attempt_at INTEGER NOT NULL DEFAULT 0,
+  defer_count INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS ix_deliveries_pending
   ON deliveries(status, received_at);
@@ -249,6 +253,9 @@ class Store:
         if ver == 9:
             self._migrate_v9_to_v10()
             ver = 10
+        if ver == 10:
+            self._migrate_v10_to_v11()
+            ver = 11
         if ver == SCHEMA_VERSION:
             return
         log.warning(
@@ -468,6 +475,23 @@ class Store:
         self._conn.execute("PRAGMA user_version = 10")
         self._conn.commit()
         log.info("schema migration v9 → v10 complete; user_version=10")
+
+    def _migrate_v10_to_v11(self) -> None:
+        """ADR-38: defer clock. Preserve deliveries (the ledger is the queue)."""
+        log.info("migrating schema v10 → v11 (deliveries.next_attempt_at)")
+        self._conn.executescript(SCHEMA)
+        cols = self._table_columns("deliveries")
+        if cols and "next_attempt_at" not in cols:
+            self._conn.execute(
+                "ALTER TABLE deliveries ADD COLUMN next_attempt_at INTEGER NOT NULL DEFAULT 0"
+            )
+        if cols and "defer_count" not in cols:
+            self._conn.execute(
+                "ALTER TABLE deliveries ADD COLUMN defer_count INTEGER NOT NULL DEFAULT 0"
+            )
+        self._conn.execute("PRAGMA user_version = 11")
+        self._conn.commit()
+        log.info("schema migration v10 → v11 complete; user_version=11")
 
     def _rebuild_schema(self) -> None:
         tables = self._conn.execute(
@@ -891,20 +915,52 @@ class Store:
             return [dict(r) for r in rows]
 
     def list_deferred(self, limit: int = 100) -> list[sqlite3.Row]:
+        now = int(time.time())
         with self._lock:
             return list(
                 self._conn.execute(
                     """
                     SELECT delivery_id, event, action, repo, issue_num, sender,
-                           received_at, payload, status
+                           received_at, payload, status, next_attempt_at, defer_count
                     FROM deliveries
-                    WHERE status = 'deferred'
+                    WHERE status = 'deferred' AND next_attempt_at <= ?
                     ORDER BY received_at ASC
                     LIMIT ?
                     """,
-                    (limit,),
+                    (now, limit),
                 ).fetchall()
             )
+
+    def defer_delivery(self, delivery_id: str, retry_after_s: int) -> None:
+        """Increment defer_count; write next_attempt_at = now + retry_after_s.
+
+        Caller passes retry_after_s from the *pre-increment* defer_count
+        (ADR-38 (f): first wait is 5 s).
+        """
+        now = int(time.time())
+        with self._lock:
+            self._conn.execute(
+                """
+                UPDATE deliveries
+                SET defer_count = defer_count + 1,
+                    next_attempt_at = ?
+                WHERE delivery_id = ?
+                """,
+                (now + int(retry_after_s), delivery_id),
+            )
+            self._conn.commit()
+
+    def clear_deferred_clocks(self) -> None:
+        """ADR-38 (g): global, because deliveries.issue_num for a PR event is the PR."""
+        with self._lock:
+            self._conn.execute(
+                """
+                UPDATE deliveries
+                SET next_attempt_at = 0, defer_count = 0
+                WHERE status = 'deferred'
+                """
+            )
+            self._conn.commit()
 
     def count_deferred(self, *, before_received_at: int | None = None) -> int:
         """Count deferred deliveries (optional upper bound on received_at)."""
