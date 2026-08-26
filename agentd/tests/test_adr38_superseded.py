@@ -507,7 +507,8 @@ def test_queued_row_on_paused_session_does_not_read_defer_count(
         github_token="tok",
     )
     row = store.list_queued()[0]
-    assert "defer_count" not in row
+    # sqlite3.Row.__contains__ tests VALUES, not column names (review #225).
+    assert "defer_count" not in row.keys()  # noqa: SIM118
     loop._process_one(row)
     parked = _defer_row(store, "d-queued")
     assert int(parked["defer_count"]) == 1
