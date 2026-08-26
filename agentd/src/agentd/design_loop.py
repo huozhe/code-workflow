@@ -115,6 +115,16 @@ _spent_prs: set[tuple[str, int]] = set()
 _merge_auth_attempts: dict[str, int] = {}
 _MERGE_AUTH_MAX_ATTEMPTS = 5
 
+
+def _supersede_latest(reason: str) -> str:
+    """Short tag for the ADR-38 log (`latest=CHANGES_REQUESTED`)."""
+    for tag in ("CHANGES_REQUESTED", "DISMISSED"):
+        if tag in reason:
+            return tag
+    if "not current head" in reason:
+        return "stale"
+    return reason
+
 # #69 / #78: ensure_session and teardown retries are unbounded without this.
 # §9.2 budgets do not apply on these paths. Restart resets the counter.
 _delivery_attempts: dict[str, int] = {}
@@ -644,6 +654,17 @@ class DesignLoop:
                 token=get_password("claude-bot") or get_password("grok-bot"),
             )
             if not check.ok:
+                if check.superseded:
+                    log.info(
+                        "design_approval superseded id=%s pr=%s latest=%s state=%s "
+                        "— dropped, no escalation",
+                        delivery_id,
+                        pr_num,
+                        _supersede_latest(check.reason),
+                        state,
+                    )
+                    self.store.set_delivery_status(delivery_id, "dropped")
+                    return
                 log.warning(
                     "design_approved blocked id=%s: %s", delivery_id, check.reason
                 )
@@ -675,6 +696,18 @@ class DesignLoop:
                 required_checks=self.config.required_checks(repo),
             )
             if not check.ok:
+                if check.superseded:
+                    _merge_auth_attempts.pop(delivery_id, None)
+                    log.info(
+                        "merge_auth superseded id=%s pr=%s latest=%s state=%s "
+                        "— dropped, no escalation",
+                        delivery_id,
+                        pr_num,
+                        _supersede_latest(check.reason),
+                        state,
+                    )
+                    self.store.set_delivery_status(delivery_id, "dropped")
+                    return
                 if check.transient:
                     n = int(_merge_auth_attempts.get(delivery_id, 0)) + 1
                     _merge_auth_attempts[delivery_id] = n
@@ -829,6 +862,7 @@ class DesignLoop:
                     state,
                 )
                 return
+            self.store.defer_delivery(delivery_id)
             log.info("route defer id=%s reason=%s", delivery_id, decision.reason)
             return
 
@@ -3338,6 +3372,7 @@ class DesignLoop:
         dig["resume_state"] = resume_state
 
         n = self.store.close_escalation(session_key)
+        self.store.clear_deferred_clocks()
         project_key = str(
             sess.get("project_key") or project_key_from_repo(str(sess.get("repo") or ""))
         )
