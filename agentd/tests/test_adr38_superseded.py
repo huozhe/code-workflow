@@ -469,6 +469,52 @@ def _defer_row(store: Store, did: str) -> sqlite3.Row:
     return row
 
 
+def test_queued_row_on_paused_session_does_not_read_defer_count(
+    tmp_path: Path,
+) -> None:
+    """list_queued rows omit defer_count. DEFER must not IndexError (review #225)."""
+    store = Store(tmp_path / "state.db")
+    _seed(
+        store,
+        state="PAUSED_HUMAN",
+        paused_reason="unverified feature merge authorization (permanent): x",
+        resume_state="CODE_REVIEW",
+    )
+    store.insert_delivery(
+        delivery_id="d-queued",
+        event="issue_comment",
+        action="created",
+        repo=_REPO,
+        issue_num=57,
+        sender="huozheclaude",
+        payload=json.dumps(
+            {
+                "action": "created",
+                "issue": {"number": 57, "title": "t", "state": "open"},
+                "comment": {"body": "note", "user": {"login": "huozheclaude"}},
+                "repository": {"full_name": _REPO},
+                "sender": {"login": "huozheclaude"},
+            }
+        ).encode(),
+        status="queued",
+    )
+    loop = DesignLoop(
+        store,
+        _cfg(tmp_path),
+        supervisor=None,
+        dispatch_turns=False,
+        gateway_token="gw",
+        github_token="tok",
+    )
+    row = store.list_queued()[0]
+    assert "defer_count" not in row
+    loop._process_one(row)
+    parked = _defer_row(store, "d-queued")
+    assert int(parked["defer_count"]) == 1
+    assert int(parked["next_attempt_at"]) > int(time.time())
+    store.close()
+
+
 def test_paused_defer_backs_off_and_is_skipped_in_between(tmp_path: Path) -> None:
     """(8) widening interval; list_deferred returns the row zero times while waiting."""
     store = Store(tmp_path / "state.db")

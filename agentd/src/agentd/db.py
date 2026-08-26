@@ -931,22 +931,24 @@ class Store:
                 ).fetchall()
             )
 
-    def defer_delivery(self, delivery_id: str, retry_after_s: int) -> None:
-        """Increment defer_count; write next_attempt_at = now + retry_after_s.
+    def defer_delivery(self, delivery_id: str) -> None:
+        """Backoff in SQL so the caller never reads defer_count (ADR-38 (f)).
 
-        Caller passes retry_after_s from the *pre-increment* defer_count
-        (ADR-38 (f): first wait is 5 s).
+        SET sees the pre-update row: wait is 5 * 2**n for n < 6, else 300.
+        The CASE cap is required: 5 * (1 << n) overflows SQLite INTEGER at
+        n >= 61 and goes negative, which would make the row eligible now.
         """
         now = int(time.time())
         with self._lock:
             self._conn.execute(
                 """
                 UPDATE deliveries
-                SET defer_count = defer_count + 1,
-                    next_attempt_at = ?
+                SET next_attempt_at = ? + (CASE WHEN defer_count >= 6 THEN 300
+                                                ELSE 5 * (1 << defer_count) END),
+                    defer_count = defer_count + 1
                 WHERE delivery_id = ?
                 """,
-                (now + int(retry_after_s), delivery_id),
+                (now, delivery_id),
             )
             self._conn.commit()
 

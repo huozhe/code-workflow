@@ -115,6 +115,16 @@ _spent_prs: set[tuple[str, int]] = set()
 _merge_auth_attempts: dict[str, int] = {}
 _MERGE_AUTH_MAX_ATTEMPTS = 5
 
+
+def _supersede_latest(reason: str) -> str:
+    """Short tag for the ADR-38 log (`latest=CHANGES_REQUESTED`)."""
+    for tag in ("CHANGES_REQUESTED", "DISMISSED"):
+        if tag in reason:
+            return tag
+    if "not current head" in reason:
+        return "stale"
+    return reason
+
 # #69 / #78: ensure_session and teardown retries are unbounded without this.
 # §9.2 budgets do not apply on these paths. Restart resets the counter.
 _delivery_attempts: dict[str, int] = {}
@@ -646,11 +656,11 @@ class DesignLoop:
             if not check.ok:
                 if check.superseded:
                     log.info(
-                        "merge_auth superseded id=%s pr=%s latest=%s state=%s "
+                        "design_approval superseded id=%s pr=%s latest=%s state=%s "
                         "— dropped, no escalation",
                         delivery_id,
                         pr_num,
-                        check.reason,
+                        _supersede_latest(check.reason),
                         state,
                     )
                     self.store.set_delivery_status(delivery_id, "dropped")
@@ -687,12 +697,13 @@ class DesignLoop:
             )
             if not check.ok:
                 if check.superseded:
+                    _merge_auth_attempts.pop(delivery_id, None)
                     log.info(
                         "merge_auth superseded id=%s pr=%s latest=%s state=%s "
                         "— dropped, no escalation",
                         delivery_id,
                         pr_num,
-                        check.reason,
+                        _supersede_latest(check.reason),
                         state,
                     )
                     self.store.set_delivery_status(delivery_id, "dropped")
@@ -851,8 +862,7 @@ class DesignLoop:
                     state,
                 )
                 return
-            n = int(row["defer_count"] or 0)
-            self.store.defer_delivery(delivery_id, min(5 * 2**n, 300))
+            self.store.defer_delivery(delivery_id)
             log.info("route defer id=%s reason=%s", delivery_id, decision.reason)
             return
 
