@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | **Status** | Proposed for formal approval (Phase 3 exit) |
-| **Version** | 1.37.1 — see [Revision history](#revision-history) |
+| **Version** | 1.38.0 — see [Revision history](#revision-history) |
 | **Implements** | [`docs/requirements/SRS_async_multiagent_ai_coding_system.md`](../requirements/SRS_async_multiagent_ai_coding_system.md) **v1.3** |
 | **Supersedes** | [`proposals/claude_design_spec.md`](proposals/claude_design_spec.md) (#4) · [`proposals/grok_design_spec.md`](proposals/grok_design_spec.md) (#2) · [`proposals/gemini_design_spec.md`](proposals/gemini_design_spec.md) (#3) |
 | **Ref** | Issue #1 |
@@ -18,6 +18,7 @@ Amendments are also marked inline at the point they apply, which is where an imp
 
 | Version | Date | Change |
 |---|---|---|
+| **1.38.0** | 2026-08-25 | **A `CHANGES_REQUESTED` that replaces an approval paused the session, and the delivery carrying that verdict was 19 ms behind it in the same batch** (#214, ADR-38). Session #57, PR #213: the drain is serialized behind the running turn, so `APPROVED` (02:47:03) and `CHANGES_REQUESTED` (02:49:02) drained together at 02:49:21 in `received_at` order; the older delivery, whose premise the newer one had already withdrawn, read live GitHub state, classified the verdict a **permanent** authorization fault and escalated — then the verdict's own delivery found the session paused and re-deferred **4,466 times over 6h14m**. Not the first instance: #63 (2026-08-18) paused on `DISMISSED` after `dismiss_stale_reviews_on_push`, with `resume=CODE_REWORK` proving the FSM had already moved on. Repair is a third classification, `superseded`, set in `_check_approver_on_head` so both halves inherit it — `CHANGES_REQUESTED`, `DISMISSED`, or an `APPROVED` on a stale head means a later event replaced this delivery's premise and already has its own FSM kind, so **drop the delivery, do not escalate, still do not merge**. Escalation is narrowed to authorization that cannot be *established*: no review from the counterpart, `dirty`, a concluded `failure`, an unresolved thread. The guard must not re-dispatch the rework itself — `delivery_nodes` is checked only by the reconciler, so a synth beside the real delivery makes two turns (#209's shape). `COMMENTED` is also fixed: it is not a verdict and today overrides an `APPROVED`. **Part 2:** `defer` has no clock. Schema v11 adds `deliveries.next_attempt_at` and `defer_count`, `list_deferred` filters on the clock, and the one `DEFER` branch backs off 5→300 s (the reconcile interval) — 4,466 lines become 79, and a parked row stops occupying a head slot in every batch. Not a `parked` status: any unpause path that forgot to un-park would seal the delivery silently. Unpause clears the clock globally, because `deliveries.issue_num` for a PR event is the PR number. Gateway-only; the migration must preserve the ledger. |
 | **1.37.1** | 2026-08-25 | **ADR-37's spent-SHA gate is before the FSM, not after** (#211, found reviewing #223). A stale or duplicate head must not run `design_revised` / `feature_revised`. The take path still records P1. The merged-ADR sentence said after; the implementation put it before, which is the safer ordering, and the sentence is corrected in place. |
 | **1.37.0** | 2026-08-25 | **A dropped `pull_request.synchronize` has no node id, so the sweep cannot regenerate it, and adopt would skip the review turn** (#211, ADR-37). Observed three times on session #57: `DESIGN_REWORK` stranded 26 minutes (GitHub: *failed to connect to host*); a failed `APPROVED` recovered only because the owner redelivered it; then `CODE_REWORK` lost the Developer's push, the silent-turn guard paused the session, and the later legitimate merge recorded `unauthorized Feature PR merge` because the FSM never reached `MERGING`. Cause is transport (Tailscale funnel), not HMAC or a 4xx. ADR-21 named synchronize as an adopt, which is the wrong half: `_adopt_forward` writes `state` and dispatches nothing, and `fsm.py` has no `DESIGN_REVIEW`+`design_revised` row anyway. Repair is a session head-SHA watermark plus a synthesized `pull_request.synchronize` when live head moves. Watermark advances when `_process_one` takes the event, not when the turn ends. Synth payload carries `pull_request.user.login` (the #209 hole). Unique `delivery_id` `recon:sync:<pr>:<sha>` stops a second pass re-inserting. A duplicate SHA is spent; a payload SHA that is not the forge's live head is spent — hashes are not ordered, so "newer" is not a rule. The live head is the existing ADR-30 (c) GET, grown by one field. Not `check_suite` (also droppable), not hook-redelivery (needs `admin:repo_hook`), not a quiet-pass `PAUSED_HUMAN` (punishes a correct wait). Gateway-only. |
 | **1.36.0** | 2026-08-25 | **The identity boundary is an account control, and M4-A's claim is an operator claim** (#57, ADR-36). §5.5 decided the rule; this settles the residue, checked against the tree rather than the issue. **#57's item 2 was never done** — §5.1 still named branch protection as the FR-1.3 enforcement with no mention of §5.5, and no file under `docs/ops/` mentioned it at all — so §5.1 gains the account/operator split inline. **#57's item 3 is redirected**: step 3's *artifact* is sound (review `4913183219` was submitted by the `huozheclaude` account and the ruleset cleared), and what is void is the inference from four account facts to M4-A's operator sentence; a clean redo returns `200`/`APPROVED`/`huozheclaude`, field for field identical to the tainted run, so it would produce a new artifact and no new knowledge. §17's spike row is split — account claim PASS on steps 1, 2 and 4, operator claim NOT ESTABLISHED and false in the only run that exists — and the operator half is held open in `docs/ops/live-sign-offs.md` and discharged on a real Feature PR approval produced by an Architect turn in its own container, not on a hand-run probe. **The repository ships the violation and advertises it as the remedy**: `test_m4a_branch_protection_live.py` acquires both identities' tokens in one process — `os.environ.get(…) or get_password(…)` at `:54` and `:61`, and the `or` matters, since the documented run has `GH_TOKEN` set and `turn.py:310` exports it into every container turn — and posts an `APPROVE` as `huozheclaude` (`:208`), and the runbook's *"Automated re-check"* is that command; `conftest.py:120`'s no-writes guard patches `design_loop.post_issue_comment` only, while the test writes through `httpx` and never imports `design_loop`, so the guard is green while the write happens; CI is safe by a comment (`pr.yml:7`) and the rule does not exempt the owner. The live test therefore loses its Architect half — steps 3 and 4 leave the automated re-check **permanently**, because a test process is one operator and they need two — and since it creates a fresh probe PR every run (`:99`) rather than reusing a standing one, dropping the success merge means cleanup has to be its own `finally`, closing the PR and deleting the ref on the failure path as well. **The credential-read guard first proposed here is withdrawn**, found in the Developer's review to be the same one-function-one-module defect this ADR diagnoses: blind to the env arm, unable to rebind `from agentd.keychain import get_password` (`:29`), and a proxy that the gateway's own dual-reads trip legitimately (`supervisor._load_tokens` `:898–900`; `design_loop` `:1546–1547`, `:632`). It is replaced by an egress guard at `httpx.Client.send` refusing **any** GitHub API request from the test process, reads included, with a named opt-in — route-independent where the withdrawn one was not, and claiming only to stop the class returning silently, since (d) is what removes the hazard. **§5.5.2 gains a format and a place**: the producing `turn_id` in the artifact's own body, cross-checked against the gateway-written `turns` row (`turn_id`/`role`/window) — never `public_actions`, which is agent-authored and would be written by exactly the agent it is meant to catch — with the ledger as the place. Both bounds are stated: the stamp prevents nothing, and §5.5.2's *"cannot be re-checked from the database"* is narrowed to the unstamped case rather than left absolute. |
@@ -708,6 +709,8 @@ The Developer merges, but only after **`agentd` independently verifies** against
 3. `mergeable_state == "clean"`. A `blocked` state is classified before it is retried: unresolved review threads make it permanent regardless of check state, since retrying cannot clear a thread nobody resolved; only an unresolved-thread-free `blocked` still falls back to checks state as before (ADR-26).
 4. **The PR body carries no closing keyword aimed at a session issue** — and if it does, the gateway **defuses it before authorising** rather than refusing (ADR-24). Rewrite the keyword to a plain reference (`Closes #32` → `Refs #32`), leave every other character intact, log it, then emit `merge_authorized`. **A failed PATCH refuses the authorization and escalates**, because the alternative is authorising a merge already known to close the issue.
 
+**A verification failure is classified three ways, not two (ADR-38).** *Transient* leaves the delivery deferred and retries. *Permanent* escalates — no review from the counterpart at all, a reviewer who is not the counterpart, `dirty`, a required check concluded `failure`, `blocked` with unresolved threads, a failed step-4 defuse. ***Superseded*** does neither: the counterpart's latest verdict is `CHANGES_REQUESTED` or `DISMISSED`, or an otherwise valid `APPROVED` sits on a SHA that is no longer the head. A later event replaced this delivery's premise and that event has its own FSM kind, so the delivery is **dropped** — not merged, and not escalated. `COMMENTED` and `PENDING` are not verdicts and never displace an `APPROVED`.
+
 Step 4 is not symmetric with 1–3, and the asymmetry is the point. The first three are *observations* the gateway makes and GitHub's branch protection independently enforces; the fourth is a *write* the gateway performs, because nothing in GitHub enforces it. §13.1 asserted "no component calls the close API" and was silently defeated twice by a PR body doing the closing (#32, #81) — see ADR-24 for the evidence and for what this deliberately does not cover (commit-message keywords, and a body edited after authorisation).
 
 The gateway verifies; the agent acts. Agents never self-certify a privileged transition. This resolves the enforcement gap present in the Phase 1 drafts — where a gateway "safety check" was specified but the agent called GitHub directly, leaving the gateway outside the write path — without proxying every API call (ADR-8).
@@ -720,6 +723,8 @@ An agent invokes `escalate.human` with a reason and a specific question; the gat
 2. Comment posted **as the gateway identity** (Keychain `agentd` / `gateway` — never an agent PAT) tagging `@<owner>` with the question, current state, and what each plausible answer would cause. Body carries `<!-- agentd:escalation session=… -->` so routing drops the echo for every agent recipient.
 3. Escalation recorded with the comment id.
 4. Resume on the next `issue_comment` from the **owner** (aligned with §9.1: while `PAUSED_*`, non-owner senders defer), injecting the reply as the next turn's event and restoring the pre-pause state.
+
+**Escalation is for authorization that cannot be *established*, never for a counterpart verdict the FSM already has a transition for (ADR-38).** A pause costs an owner round-trip for work no human input is required for, and it parks every pending delivery behind it.
 
 P5: no failure mode ends in silence.
 
@@ -740,7 +745,7 @@ P5: no failure mode ends in silence.
 | `sender.login` is the other agent bot | **Route**, increment `consec_agent_turns` |
 | Body contains a provenance footer written by the recipient | **Drop** (own artifact) |
 | `delivery_id` already terminal | **Drop** (redelivery) |
-| Session `PAUSED_*` and sender is not the owner | **Defer** (stays queued) |
+| Session `PAUSED_*` and sender is not the owner | **Defer** (stays deferred, with backoff — ADR-38) |
 | `sender.login` is the gateway login (no escalation marker) | **Drop** (gateway is not a human collaborator) |
 
 Every agent-authored comment carries a machine-readable footer; gateway comments carry a marker. Escalations keep `agentd:escalation` so §8.5 unpause stays distinct; every other gateway comment uses `agentd:gateway`. Both make drop rules mechanical:
@@ -1195,8 +1200,12 @@ CREATE TABLE deliveries (               -- idempotency ledger + durable queue
   --   dropped  : intentionally discarded (intake fail, loop filter, …)
   --   done     : fully processed terminal success (e.g. ping)
   --   failed   : processed with error
-  status TEXT NOT NULL DEFAULT 'queued'
+  status TEXT NOT NULL DEFAULT 'queued',
   -- queued|deferred|routed|dropped|done|failed
+  -- v11 (ADR-38 / #214): a deferred row is eligible when next_attempt_at <= now.
+  -- 0 means eligible now, so every row that never backs off drains as before.
+  next_attempt_at INTEGER NOT NULL DEFAULT 0,
+  defer_count INTEGER NOT NULL DEFAULT 0   -- backoff exponent for the DEFER path
 );
 CREATE INDEX ix_deliveries_pending ON deliveries(status, received_at);
 
@@ -2615,6 +2624,133 @@ Do not compare to `CHANGES_REQUESTED.commit_id` as the primary rule. It does not
 8. **NULL watermark in `DESIGN_REVIEW` stamps and does not synth; NULL watermark in `DESIGN_REWORK` synths once.** Backfill both arms. The REVIEW arm fails if NULL is treated as mismatch unconditionally; the REWORK arm fails if NULL always stamps.
 9. **A merged Design PR with a moved head synthesizes nothing; step 4's merge adopt still runs.** Do not emit a spent synchronize for the sweep to drain.
 10. **Live, before sign-off.** After deploy, the next session that completes a rework round — real synchronize or synth — leaves `silent_turns` at 0 or 1, never 3, and does not record `unauthorized` on a merge that had Architect approval on the live head. Gateway-only; verify by LaunchAgent restart time. A quiet log with no rework round does not discharge this.
+
+---
+
+### ADR-38: A Withdrawn Approval Is Not an Unverifiable One — Supersede the Delivery, and Give `defer` a Clock
+
+*Fixes #214. Ref #147, #63, #57.*
+
+**Owner decision (`@huozhe`): `CHANGES_REQUESTED` on a Feature PR must dispatch a Developer rework turn. It must not pause the session.** The issue's diagnosis — that the merge-authorization guard (`design_loop.py:708`) classifies that verdict as a permanent authorization fault — is correct and incomplete. It explains the pause. It does not explain why the rework the FSM already had a transition for (`fsm.py:78`) never ran, because `code_changes_requested` routes to the Developer today (`design_loop.py:3705`) and had done so twice in that same session. Two causes, and the second is ordering.
+
+**The drain is serialized behind the running turn, so both reviews land in one batch, oldest first.** Read from `agentd.log.1`, session #57, PR #213, times PDT:
+
+```
+02:45:10  turn complete t-120615511cac        ← previous batch drains
+02:47:03  delivery queued eb822240  pull_request_review.submitted   (APPROVED)
+02:49:02  delivery queued 3341560a  pull_request_review.submitted   (CHANGES_REQUESTED)
+02:49:21  turn complete t-bc7973fe621a        ← 4m11s of drain silence ends
+02:49:21  dispatcher deferred eb822240 … deferred 3341560a          (same batch)
+02:49:23  feature merge_authorized blocked (permanent) id=eb822240:
+          latest review from huozheclaude is 'CHANGES_REQUESTED', not APPROVED
+02:49:24  escalation session=#57 … comment_id=5408613551 resume=CODE_REVIEW
+02:49:24  route defer id=3341560a reason=session paused; non-owner   ← 19 ms later
+```
+
+Nothing raced. `list_deferred` orders by `received_at ASC` (`db.py:893`) and `process_deferred_batch` walks that order (`design_loop.py:409`), so the **older delivery, whose premise the newer one had already withdrawn, is guaranteed to run first** whenever a turn is in flight across both reviews. It read live GitHub state, correctly saw `CHANGES_REQUESTED`, and paused — 19 ms before the delivery carrying that same verdict reached the router, which then found the session paused and deferred it 4,466 times over 6h14m. The withdrawn approval killed the session with the withdrawal sitting in the same batch.
+
+**This is not the first instance, and the second one is worse.** `gateway.err.log:888`, session #63, 2026-08-18 23:58:07:
+
+```
+feature merge_authorized blocked (permanent) id=dc37fc80: latest review
+  from huozheclaude is 'DISMISSED', not APPROVED
+escalation session=#63 … resume=CODE_REWORK
+```
+
+`DISMISSED` is `dismiss_stale_reviews_on_push` doing its job after a rework push. `resume=CODE_REWORK` is the pre-pause state, so **the FSM had already processed that push and moved on**; the session was proceeding correctly and a leftover delivery paused it anyway. Same class, different superseding event, and it shows the rule is about the *delivery's premise*, not about one review state.
+
+**The claim the guard is entitled to make is narrower than the one it makes.** "I cannot verify authorization to merge" and "this session cannot continue" are different claims (the issue's phrasing, and it is exactly right). Refusing to merge is correct and stays fail-closed. But a verdict that the counterpart has since replaced is not an anomaly needing a human — it is the ordinary outcome of a review round, with an ordinary next step already in the FSM and already routed. Escalation is for authorization that genuinely **cannot be established**: no review from the counterpart at all, a reviewer who is not the counterpart, a `dirty` merge, a required check that concluded `failure`, an unresolved thread. Not for a counterpart verdict.
+
+**The design half has the same defect and no transient arm at all.** `design_approved_unverified` (`design_loop.py:648`) escalates on *any* `check.ok == False`, so on that half a network blip also pauses the session — `verify_design_approval` returns `ApprovalCheck(False, "GitHub API error: …")` with `transient` left at its default. Both halves call `_check_approver_on_head` (`verify.py:370`), which is where the superseded/permanent split belongs: one function, both halves, no second mechanism. That answers the issue's "worth checking whether the design and feature halves can share one path" — they already do, one level down.
+
+**The options, with cost, and why four of them lose.**
+
+| | Repair | Cost | Complexity | Why not (or why) |
+|---|---|---|---|---|
+| **A** | **Third classification `superseded` on `ApprovalCheck`, set in `_check_approver_on_head`; both guards drop the delivery instead of escalating** | One field, one function, two call sites | Low | **Chosen.** The claim moves to where the evidence is read. Design and Feature halves inherit it from the shared helper. Refusal to merge is untouched |
+| **B** | Special-case `CHANGES_REQUESTED` at `design_loop.py:708` only | One `if` | Lowest | **Rejected.** Misses `DISMISSED` (#63, live), misses the design half entirely, and puts a review-state rule in the loop rather than in the verifier that reads reviews. Two more copies the next time a state is added |
+| **C** | Guard re-dispatches the rework itself from the review list it already fetched | No extra GET | Medium | **Rejected, and the reason is mechanical.** Dedupe of a synthesized review is `delivery_nodes`, checked *only* by the reconciler (`reconciler.py:637`); a real webhook is deduped by `delivery_id` PK alone (`db.py:509`). A synth emitted here with the real CR delivery still in the batch behind it produces **two** turns — #209's failure mode. Drop is enough: the real delivery is already queued (it is what superseded us), and if it was lost in flight, reviews *are* synthesizable and the next reconcile pass recovers it (ADR-37's own finding) |
+| **D** | Treat a red required check as rework too | New FSM kind, new dispatch | Medium | **Rejected as out of scope, named as residual.** An APPROVED PR with a failed check has no counterpart verdict to route and no FSM transition; inventing one is a separate design. Today it still escalates, and that is unchanged by this ADR |
+| **E** | Suppress the repeated log line, keep a periodic summary | A rate limiter on one `log.info` | Lowest | **Rejected as the whole fix**, by the issue itself: it hides the symptom and leaves the spin. The backoff below makes the line rare as a consequence, which is the right order of causation |
+
+**(a) `ApprovalCheck` gains `superseded: bool = False`, and it is set in one place.** `_check_approver_on_head` (`verify.py:370`) returns `superseded=True` when the expected approver's latest verdict review is `CHANGES_REQUESTED` or `DISMISSED`, and when an otherwise-valid `APPROVED` is on a SHA that is not the current head. All three mean the same thing — *a later event replaced the premise of this delivery, and that event has its own FSM kind* (`code_changes_requested` / `design_changes_requested`, `feature_revised` / `design_revised`). `superseded` implies `not ok` and is disjoint from `transient`: it is neither a retry nor a fault.
+
+Permanent, unchanged, still escalating: **no review from the expected approver at all** (`no review from expected approver …`), a `dirty` merge, a concluded `failure` on a required check, `blocked` with unresolved threads, a failed closing-keyword defuse (§8.4 step 4). Those are the cases where authorization cannot be established and no other event is coming.
+
+**(a′) `COMMENTED` is not a verdict, and today it is treated as one.** `_check_approver_on_head` takes the last review row per user of *any* type (`verify.py:382–387`), so an Architect who approves and then leaves a review-comment makes the latest state `COMMENTED` → not `APPROVED` → permanent → paused. GitHub's own merge gate ignores `COMMENTED`; ours must too. Compute the latest review whose state is in {`APPROVED`, `CHANGES_REQUESTED`, `DISMISSED`} and ignore `COMMENTED` and `PENDING`. `_VERDICT_REVIEW_STATES` (`design_loop.py:99`, ADR-30) already names this notion for two of the three; widen it to include `DISMISSED` and read it from `verify.py`, one definition, not two. Not observed live — reachable by inspection, cheap, and in the function this ADR is already rewriting.
+
+**(b) Both guards drop the delivery on `superseded`; neither escalates, and neither merges.** `dropped` is the existing terminal status for "intentionally discarded" (§15.1), so the row cannot spin. Log at INFO — this is an ordinary outcome and a WARNING here trains the reader to ignore warnings — naming the delivery, the PR, the superseding state, and the session state at drop:
+
+```
+merge_auth superseded id=eb822240 pr=213 latest=CHANGES_REQUESTED state=CODE_REVIEW — dropped, no escalation
+```
+
+Do **not** advance the FSM here, and do not synthesize (option C). The superseding delivery carries the transition; this one carries nothing.
+
+**(c) The FSM, the merge refusal and §8.4's three conditions are untouched.** Nothing about what authorizes a merge changes. This ADR changes only what the gateway does with a delivery it has just proved cannot authorize one.
+
+**(d) Named residual: `CODE_REVIEW` with no rework delivery.** If the superseding webhook is lost in flight *and* the reconciler cannot synthesize it, the session sits in `CODE_REVIEW` with no turn — quiet, not paused. Bounded by one reconcile pass (`RECONCILE_INTERVAL_S`, ≤ 5 min) because reviews carry node ids and step 5's set-diff regenerates them; ADR-37 recorded exactly this asymmetry ("Reviews *are* synthesizable; the next pass would have done it"). Strictly better than today's outcome, which is a permanent pause. Not engineered around.
+
+---
+
+**Part 2 — `defer` has no clock, so any long-lived non-routable state spins.**
+
+`route_for_recipient` returns `DEFER` for a paused session and a non-owner sender (`routing.py:122`), and the caller logs and returns with the row still `deferred` (`design_loop.py:832`). The next drain, ~5 s later, re-picks the identical row. On #57 that ran **4,466 times over 6h14m**, ~12 lines/min, and the log reached 670 KB. Two secondary costs the issue does not name: `list_deferred(limit=20)` is `received_at ASC`, so a parked row permanently occupies a head slot in every batch, and the row is re-evaluated — session lookup, digest, route — not merely re-logged.
+
+**#147's fix does not cover this, exactly as the issue predicted.** ADR-32 (c) suppresses the spin for `state in TERMINAL_STATES` (`design_loop.py:823–831`). `PAUSED_HUMAN` is not terminal, and must not be: the row has to survive until the owner replies. The gap is that `defer` means "not now" with no answer to "then when".
+
+| | Repair | Cost | Complexity | Why not (or why) |
+|---|---|---|---|---|
+| **P1** | **`deliveries.next_attempt_at` + `defer_count`; `list_deferred` filters on the clock; exponential backoff to a ceiling** | Schema v11, two columns, one setter, one `WHERE` clause | Low | **Chosen.** Fails safe in the worst case — a forgotten wake-up costs latency, never the delivery |
+| **P2** | A new `parked` status, excluded from the drain, flipped back to `deferred` on unpause | No schema change | Low | **Rejected, and the reason is the failure mode.** Any unpause path that does not flip it back seals the delivery **silently, with no log line at all** — and there are several (reconciler adopt, `issues.closed` → `TEARDOWN`, a gateway restart mid-pause, the owner's manual DB repair in `~/fix-151.sh`). It converts a noisy bug into a quiet one, which is the failure this repository keeps paying for |
+| **P3** | Drop the delivery on pause and re-fetch on resume | No schema change | Medium | **Rejected.** Re-fetch is a new path into `_process_one`, needs a GitHub read the pause has no budget for, and loses the payload that is the whole point of the durable queue (ADR-2: SQLite is the ledger) |
+| **P4** | Rate-limit the log line only | Trivial | Lowest | **Rejected**, per the issue. Hides the spin, keeps the head-slot cost and the re-evaluation cost |
+
+**(e) Schema v11: `deliveries.next_attempt_at INTEGER NOT NULL DEFAULT 0` and `deliveries.defer_count INTEGER NOT NULL DEFAULT 0`.** Incremental `ALTER TABLE` that **must preserve `deliveries`** — the ledger is the queue (ADR-21's v7→v8 lesson, restated by ADR-37). `list_deferred` gains `AND next_attempt_at <= ?` with the current unix time. Default `0` means every row that never backs off behaves exactly as today, so this is not a change to first-pass drain latency for anything.
+
+**(f) One call site sets the clock: the `RouteAction.DEFER` branch.** `Store.defer_delivery(delivery_id, retry_after_s)` increments `defer_count` and writes `next_attempt_at = now + retry_after_s`; the DEFER branch passes `min(5 * 2 ** defer_count, 300)`. First retry 5 s (unchanged), then 10, 20, 40, 80, 160, and 300 s thereafter — the ceiling is `RECONCILE_INTERVAL_S`, so nothing waits longer than a reconcile pass already does. #57's 4,466 lines become **79**.
+
+**Deliberately not extended to the other two paths that leave a row deferred**, and the reason is different for each:
+
+- **`feature merge_auth deferred (transient)`** (`design_loop.py:691`) returns without touching status and already has its own cap, `_MERGE_AUTH_MAX_ATTEMPTS = 5` (`:116`). It never calls the setter, so its ~5 s cadence is untouched. Slowing merge authorization while GitHub settles `mergeable_state` would be a regression to fix a log-volume bug.
+- **The capacity/`ensure_session` re-defer on resume** (`design_loop.py:3379`, `:3395`) is an **owner-reply** delivery. Backing it off delays the one thing the owner is waiting for. Named residual: it can spin, it is bounded by the owner fixing the host, and it is #35's subject, not this one.
+
+**(g) Unpause clears the clock globally, and globally is deliberate.** `_resume_from_escalation` (`design_loop.py:3295`) runs `UPDATE deliveries SET next_attempt_at = 0, defer_count = 0 WHERE status = 'deferred'` before dispatching. Not scoped by session: `deliveries.issue_num` for a PR event is the **PR** number, not the session's, so a session-scoped `WHERE` would either miss the parked PR-review row — the exact row #214 is about — or need the `sessions.design_pr` / `feature_pr` join that has manufactured false evidence here before. The cost of the global form is one extra immediate attempt for unrelated parked rows, which then back off again. **This clear is an optimisation, not a correctness requirement**: if it is skipped, every parked delivery still runs within the 300 s ceiling. Stating that is the point — P1 was chosen over P2 precisely because no single site is load-bearing.
+
+**Placement.** `superseded` lives in `verify.py`; the drop lives at both guard sites in `design_loop.py`; the clock lives in `db.py` and the one DEFER branch. No new module, no new loop, no new status.
+
+**Amendments in place, so an implementer starting at the section does not build the old sentence.**
+
+- §8.4 gains the superseded clause: verification failure is classified three ways, and a replaced counterpart verdict drops the delivery.
+- §8.5 gains the bound: escalation is for authorization that cannot be established, never for a counterpart verdict the FSM has a transition for.
+- §9.1's `PAUSED_*` **Defer** row: "stays queued" → stays deferred **with backoff**; parenthetical pointer here.
+- §15.1's `deliveries` DDL: two columns, with the comment that `0` means "eligible now".
+
+**Deliberately out of scope.**
+
+- **A red required check on an approved PR.** Option D. Still escalates. It needs an FSM kind that does not exist.
+- **The pause→resume protocol itself.** §8.5 unchanged: owner reply is still the only exit, and this ADR reduces how often a pause happens rather than changing what one is.
+- **`_MERGE_AUTH_MAX_ATTEMPTS` and the in-process `_merge_auth_attempts` dict** (`design_loop.py:115`), which is lost on restart. Real, unrelated, and made less reachable by (b) rather than more.
+- **#147.** Closed by ADR-32 (c) and staying closed; (e) subsumes its shape without reopening it.
+- **Repairing session #57's or #63's recorded pause.** Data. `@huozhe`.
+- **The Tailscale funnel.** ADR-37's residual, unchanged.
+
+**Deploy is gateway-only** — no image rebuild, no `docker rm -f`. Schema v11 migrates on gateway start; confirm `PRAGMA user_version` is 11 **and** that `SELECT COUNT(*) FROM deliveries` is unchanged across the restart, because a migration that recreates the table would silently discard the queue this ADR is about.
+
+**Acceptance — (1) and (7) are where today's defects are proven, and both must fail first.**
+
+1. **A `feature_approved_unverified` delivery whose PR's latest Architect review is `CHANGES_REQUESTED` is dropped, does not escalate, and leaves the session unpaused.** Fixture: session in `CODE_REVIEW`, stub reviews list `[APPROVED@head, CHANGES_REQUESTED@head]` from the Architect. Assert delivery status `dropped`, `sessions.state == 'CODE_REVIEW'`, `paused_reason IS NULL`, zero escalation rows. Today: `PAUSED_HUMAN` with the #214 reason string. **Assert the session row, never the log line.**
+2. **The same two deliveries in one batch dispatch exactly one Developer rework turn, approval first.** This is the live shape and item (1) alone does not reach it. Insert the APPROVED delivery with the earlier `received_at`, then the `CHANGES_REQUESTED` one, and drain **one** batch. Assert one `_dispatch_turn` to `developer`, `fsm` at `CODE_REWORK`, `silent_turns` unchanged. A test that drains them separately passes against a version that still paused on the first.
+3. **`DISMISSED` behaves identically to `CHANGES_REQUESTED`.** Session #63, live. A fixture that only builds the `CHANGES_REQUESTED` arm passes against option B.
+4. **An `APPROVED` on a stale SHA is superseded, not permanent.** Latest Architect review `APPROVED` with `commit_id = X`, PR head `Y`. Dropped, no escalation. Pairs with ADR-37: the `*_revised` delivery for `Y` is what carries the session forward, real or synthesized.
+5. **No review at all from the expected approver still escalates, and so does a required check concluded `failure`.** The guard must not become permissive. A patch that returns `superseded` for every non-`APPROVED` outcome fails here, and this is the item that catches it.
+6. **The design half inherits it: `design_approved_unverified` with a Developer `CHANGES_REQUESTED` drops and does not pause.** Same helper, other caller. A Feature-only test misses the half that has no transient arm at all.
+7. **A latest review of `COMMENTED` from the Architect, with an `APPROVED` behind it on the current head, still authorizes the merge.** (a′). Today this escalates. Fixture order matters: `[APPROVED@head, COMMENTED@head]`, in that order, from the same login — reversed, it proves nothing.
+8. **A deferred delivery on a paused session is re-attempted on a widening interval and stops being re-picked in between.** Drive `process_deferred_batch` against a fake clock. Assert `defer_count` increments, `next_attempt_at` moves 5→10→20→…→300 and stops at 300, and that a drain at `now < next_attempt_at` returns the row **zero** times. Today: every drain, forever. **Assert the row is not returned by `list_deferred`, not merely that nothing was logged** — a suppressed log line looks identical and is option P4.
+9. **A parked row does not consume a `list_deferred` head slot.** Twenty-one deferred rows, the oldest parked with a future `next_attempt_at`, `limit=20`: the twenty-first is returned. This is the starvation cost, and item (8) does not reach it.
+10. **Owner reply clears the clock and the parked delivery drains in the same batch as the resume.** Assert `next_attempt_at == 0` and `defer_count == 0` on the parked row after `_resume_from_escalation`, and that it routes without waiting out the ceiling.
+11. **Migration v10 → v11 preserves every `deliveries` row and its status.** Seed a v10 DB with rows in each status, migrate, assert counts and statuses per status are identical and `user_version == 11`. The ledger is the queue.
+12. **Live, before sign-off.** The next session whose Architect replaces an approval with `CHANGES_REQUESTED` dispatches a Developer rework turn, stays out of `PAUSED_HUMAN`, and logs `merge_auth superseded` once. In the same window, `grep -c "route defer id=" agentd.log` for any one delivery id stays under ~20/hour. Gateway-only; verify by LaunchAgent start time. **A quiet log with no review round does not discharge this**, and neither does a pause that did not happen for some other reason — the round must actually reach `CHANGES_REQUESTED` after an `APPROVED`.
 
 ---
 ---
