@@ -368,7 +368,10 @@ def test_fetch_snapshot_includes_reviews() -> None:
                 "title": "feat: x",
                 "user": {"login": "dev"},
                 "created_at": "2026-08-14T00:00:00Z",
-                "head": {"ref": "agentd/huozhe__code-workflow/32/developer"},
+                "head": {
+                    "ref": "agentd/huozhe__code-workflow/32/developer",
+                    "sha": "abc123deadbeef",
+                },
             }
         if "/pulls/111/reviews" in url:
             return [
@@ -409,6 +412,10 @@ def test_fetch_snapshot_includes_reviews() -> None:
     # two must not be conflated — the fixture's logins differ for that reason.
     assert review["author"] == "arch"
     assert review["pr_author"] == "dev"
+    pr_node = next(n for n in snap["nodes"] if n["kind"] == "pull_request")
+    assert pr_node["head_sha"] == "abc123deadbeef"
+    assert snap["feature_head_sha"] == "abc123deadbeef"
+    assert snap["design_head_sha"] == ""
 
 
 def test_synthesized_review_classifies_as_feature_approved(tmp_path: Path) -> None:

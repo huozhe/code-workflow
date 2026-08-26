@@ -317,3 +317,78 @@ def test_v8_to_v9_adds_resume_attempts(tmp_path: Path) -> None:
     assert store._schema_version() == SCHEMA_VERSION
     assert "resume_attempts" in store._table_columns("turns")
     store.close()
+
+
+def test_v9_to_v10_adds_pr_head_and_preserves_deliveries(tmp_path: Path) -> None:
+    """ADR-37: v10 adds sessions.*_pr_head; must not wipe the ledger."""
+    import sqlite3
+
+    path = tmp_path / "state.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE deliveries (
+          delivery_id TEXT PRIMARY KEY,
+          event TEXT NOT NULL,
+          action TEXT,
+          repo TEXT NOT NULL DEFAULT '',
+          issue_num INTEGER,
+          sender TEXT NOT NULL DEFAULT '',
+          received_at INTEGER NOT NULL,
+          payload BLOB NOT NULL,
+          status TEXT NOT NULL DEFAULT 'queued'
+        );
+        CREATE TABLE sessions (
+          session_key TEXT PRIMARY KEY,
+          project_key TEXT NOT NULL,
+          repo TEXT NOT NULL,
+          issue_num INTEGER NOT NULL,
+          state TEXT NOT NULL,
+          paused_reason TEXT,
+          resume_state TEXT,
+          stall_open_threads TEXT,
+          architect TEXT NOT NULL,
+          developer TEXT NOT NULL,
+          roles_locked INTEGER NOT NULL DEFAULT 0,
+          design_pr INTEGER,
+          feature_pr INTEGER,
+          turn_count INTEGER NOT NULL DEFAULT 0,
+          consec_agent_turns INTEGER NOT NULL DEFAULT 0,
+          review_rounds INTEGER NOT NULL DEFAULT 0,
+          progress_fp TEXT,
+          progress_repeat INTEGER NOT NULL DEFAULT 0,
+          zero_thread_rounds INTEGER NOT NULL DEFAULT 0,
+          silent_turns INTEGER NOT NULL DEFAULT 0,
+          gh_watermark INTEGER,
+          verified_at INTEGER,
+          classification TEXT,
+          closed_issue_escalated_at INTEGER,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE circuit_breaker (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          disk_paused INTEGER NOT NULL DEFAULT 0,
+          reason TEXT,
+          updated_at INTEGER NOT NULL
+        );
+        INSERT INTO circuit_breaker(id, disk_paused, reason, updated_at)
+        VALUES (1, 0, NULL, 0);
+        INSERT INTO deliveries(
+          delivery_id, event, action, repo, issue_num, sender,
+          received_at, payload, status
+        ) VALUES ('keep-me', 'ping', NULL, '', NULL, 'u', 1, X'7B7D', 'done');
+        PRAGMA user_version = 9;
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    store = Store(path)
+    assert store._schema_version() == SCHEMA_VERSION
+    cols = store._table_columns("sessions")
+    assert "design_pr_head" in cols
+    assert "feature_pr_head" in cols
+    assert store.delivery_count() == 1
+    store.close()
+

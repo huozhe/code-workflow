@@ -15,7 +15,7 @@ log = logging.getLogger("agentd.db")
 
 # Bump when DDL changes require a rebuild. SQLite is a derived cache (ADR-2);
 # mismatch ⇒ wipe + recreate. GitHub remains source of truth (P1).
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 # The kinds the cleanup ledger knows how to reason about (#192). Both reclaim
 # paths — GC's `_ledger_row_is_stale` and teardown's `_confirm_teardown_artifacts`
@@ -35,6 +35,7 @@ ARTIFACT_KINDS = frozenset({"branch", "scratch", "worktree"})
 # v7 (M5-2): sessions.classification — VERIFIED/ABANDONED at issues.closed.
 # v8 (M6-1b / ADR-21): delivery_nodes + sessions.closed_issue_escalated_at.
 # v9 (M6-1c / ADR-22): turns.resume_attempts.
+# v10 (ADR-37 / #211): sessions.design_pr_head, sessions.feature_pr_head.
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS deliveries (
   delivery_id TEXT PRIMARY KEY,
@@ -89,6 +90,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   roles_locked INTEGER NOT NULL DEFAULT 0,
   design_pr INTEGER,
   feature_pr INTEGER,
+  design_pr_head TEXT,
+  feature_pr_head TEXT,
   turn_count INTEGER NOT NULL DEFAULT 0,
   consec_agent_turns INTEGER NOT NULL DEFAULT 0,
   review_rounds INTEGER NOT NULL DEFAULT 0,
@@ -243,6 +246,9 @@ class Store:
         if ver == 8:
             self._migrate_v8_to_v9()
             ver = 9
+        if ver == 9:
+            self._migrate_v9_to_v10()
+            ver = 10
         if ver == SCHEMA_VERSION:
             return
         log.warning(
@@ -450,6 +456,19 @@ class Store:
         self._conn.commit()
         log.info("schema migration v8 → v9 complete; user_version=9")
 
+    def _migrate_v9_to_v10(self) -> None:
+        """ADR-37: last taken head SHA per tracked PR. Preserve deliveries."""
+        log.info("migrating schema v9 → v10 (sessions.*_pr_head)")
+        self._conn.executescript(SCHEMA)
+        scols = self._table_columns("sessions")
+        if scols and "design_pr_head" not in scols:
+            self._conn.execute("ALTER TABLE sessions ADD COLUMN design_pr_head TEXT")
+        if scols and "feature_pr_head" not in scols:
+            self._conn.execute("ALTER TABLE sessions ADD COLUMN feature_pr_head TEXT")
+        self._conn.execute("PRAGMA user_version = 10")
+        self._conn.commit()
+        log.info("schema migration v9 → v10 complete; user_version=10")
+
     def _rebuild_schema(self) -> None:
         tables = self._conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
@@ -542,7 +561,8 @@ class Store:
                 """
                 SELECT session_key, project_key, repo, issue_num, state,
                        paused_reason, architect, developer, design_pr,
-                       feature_pr, verified_at, closed_issue_escalated_at, created_at
+                       feature_pr, design_pr_head, feature_pr_head,
+                       verified_at, closed_issue_escalated_at, created_at
                 FROM sessions
                 WHERE state NOT IN ('CLOSED', 'TEARDOWN')
                 """
@@ -766,6 +786,8 @@ class Store:
             "roles_locked",
             "design_pr",
             "feature_pr",
+            "design_pr_head",
+            "feature_pr_head",
             "turn_count",
             "consec_agent_turns",
             "review_rounds",

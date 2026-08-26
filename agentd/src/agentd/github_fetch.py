@@ -216,18 +216,21 @@ def fetch_session_snapshot(
                 }
             )
 
-    def _add_pr(num: int | None) -> bool:
+    def _add_pr(num: int | None) -> tuple[bool, str]:
         if not num:
-            return False
+            return False, ""
         try:
             pr = get(f"https://api.github.com/repos/{repo}/pulls/{int(num)}", token=token)
         except Exception as exc:  # noqa: BLE001
             log.warning("sweep PR fetch failed repo=%s pr=%s: %s", repo, num, exc)
-            return False
+            return False, ""
         if not isinstance(pr, dict) or not pr.get("node_id"):
-            return bool(isinstance(pr, dict) and pr.get("merged"))
+            if not isinstance(pr, dict):
+                return False, ""
+            return bool(pr.get("merged")), str(json_obj(pr.get("head")).get("sha") or "")
         head = json_obj(pr.get("head"))
         head_ref = str(head.get("ref") or "")
+        head_sha = str(head.get("sha") or "")
         pr_title = str(pr.get("title") or "")
         nodes.append(
             {
@@ -238,6 +241,7 @@ def fetch_session_snapshot(
                 "merged": bool(pr.get("merged")),
                 "number": int(num),
                 "head_ref": head_ref,
+                "head_sha": head_sha,
                 "title": pr_title,
             }
         )
@@ -271,10 +275,14 @@ def fetch_session_snapshot(
                         "title": pr_title,
                     }
                 )
-        return bool(pr.get("merged"))
+        return bool(pr.get("merged")), head_sha
 
-    feature_merged = _add_pr(int(feature_pr) if feature_pr else None)
-    design_merged = _add_pr(int(design_pr) if design_pr else None)
+    feature_merged, feature_head_sha = False, ""
+    design_merged, design_head_sha = False, ""
+    if feature_pr:
+        feature_merged, feature_head_sha = _add_pr(int(feature_pr))
+    if design_pr:
+        design_merged, design_head_sha = _add_pr(int(design_pr))
     return {
         "issue_state": str(issue.get("state") or ""),
         "issue_body": issue.get("body") if isinstance(issue.get("body"), str) else "",
@@ -285,6 +293,8 @@ def fetch_session_snapshot(
         "nodes": nodes,
         "feature_merged": feature_merged,
         "design_merged": design_merged,
+        "feature_head_sha": feature_head_sha,
+        "design_head_sha": design_head_sha,
     }
 
 
@@ -295,7 +305,7 @@ def fetch_pull(
     token: str | None,
     http_get: Callable[..., Any] | None = None,
 ) -> dict[str, Any] | None:
-    """REST GET /repos/{repo}/pulls/{n} — merged/state for ADR-30 (c)."""
+    """REST GET /repos/{repo}/pulls/{n} — merged/state/head for ADR-30 (c) / ADR-37."""
     if not token or not repo or not pr_number:
         return None
     get = http_get or _gh_get
@@ -309,6 +319,7 @@ def fetch_pull(
     return {
         "merged": bool(pr.get("merged")),
         "state": str(pr.get("state") or ""),
+        "head_sha": str(json_obj(pr.get("head")).get("sha") or "") or None,
     }
 
 
