@@ -38,8 +38,10 @@ cost nothing; a long session was enough. Plan for it opportunistically, but do
 not treat it as out of reach.
 
 **#172 was called an error path that a healthy turn never enters.** The real
-reason is worse: the kill has **no caller at all**, so no turn of any kind can
-reach it. Length was never the obstacle.
+reason was worse: the kill had **no caller at all**, so no turn of any kind could
+reach it. Length was never the obstacle. **#221 (`101c3c1`) wired the caller**, so
+the path is reachable now and the obstacle has moved — it is the *live child*, not
+the call. Window D below.
 
 **#57 was a different exercise, and it needed no planning at all.** The operator
 half of M4-A is a Feature PR opened by the Developer and approved by an Architect
@@ -80,12 +82,12 @@ column below is what would make it verification.
 |---|---|---|
 | #208 | Stale-drain logs benign vendor notifications at WARNING, burying the discarded-`result` signal the level exists for | Runner **1.4.0** (#219). No `WARNING … stale frame discarded … _x.ai`, **and** at least one INFO `stale frames discarded … notifications=N of M`. Both halves: zero warnings with no `notifications=` line means the drain never ran |
 | #209 | Reconciler-synthesised reviews omit `pull_request.user`, bypassing ADR-30's author-sent guard. The obvious one-line fix silently stalls the loop instead | **#220**. A synthesised review from the PR's own author logged `author-sent PR event, no turn (#173)` |
-| #173 | *(re-opened by the above)* A rework round logs `author-sent PR event, no turn`, and `silent_turns` never exceeds 1 | Same observation as #209. On #57 the second half failed at `silent_turns` **2** |
+| #173 | *(re-opened by the above)* A rework round logs `author-sent PR event, no turn`, and `silent_turns` never exceeds 1 | Same **event** as #209, **two reads.** The log line is #209's half; #173's is `SELECT silent_turns` on the session row, and the grep does not stand in for it. On #57 the log half held and the counter half failed at `silent_turns` **2** |
 | #210 | Runner pid 1 never reaps adopted children: **175 zombies** in one session, against a `pids.max` of 1024 | Runner **1.4.0** (#219). Zombie count **flat** across turns, not merely small |
 | #211 | A dropped `pull_request.synchronize` strands a session, and the reconciler has no node kind to regenerate it | ADR-37, #222 + #223. A completed rework round leaves `silent_turns` 0 or 1, never 3, and records no `unauthorized` on a merge that had Architect approval on the live head |
 | #212 | The probe's `rss_bytes` is a high-water mark and `cli_rss_kb` is frozen at turn end — unfit for M6-3's memory rule | Runner **1.4.0** (#219). `rss_bytes`, `rss_peak_bytes` and `sampled_at` all present **and `rss_bytes` moving between two passes**. One sample cannot show movement |
 | #214 | `CHANGES_REQUESTED` pauses the session instead of dispatching Developer rework; the pending delivery then re-defers every 5 s (**4,417 times**) | ADR-38, #224 + #225, schema v11. An Architect verdict that replaces an approval dispatches a Developer rework turn, the session stays out of `PAUSED_HUMAN`, one `merge_auth superseded` logs, and no delivery id exceeds ~20 `route defer` lines an hour |
-| #172 | The kill path has no caller — see the row above | **#221** gave it one. Needs a close landing while a CLI has a **live child** |
+| #172 | *(as filed)* The kill path has no caller | **#221** gave it one. Needs a close landing while a CLI has a **live child** — window D |
 
 **#211 was the one to fix first, and it was.** Webhook delivery failed five times in
 one evening (`failed to connect to host` — the ingress is a Tailscale funnel). Four
@@ -234,8 +236,13 @@ review's node before a pass:
 
 ```bash
 sqlite3 ~/.agentd/state.db "DELETE FROM delivery_nodes WHERE node_id='<PRR_… of that review>';"
-grep -n "author-sent PR event, no turn" ~/.agentd/logs/agentd.log | tail -3
+grep -n "author-sent PR event, no turn" ~/.agentd/logs/agentd.log | tail -3   # #209's half
+sqlite3 ~/.agentd/state.db "SELECT silent_turns FROM sessions WHERE issue_num=<N>;"  # #173's half
 ```
+
+**One event, two reads.** The log line discharges #209; #173 is the counter, and
+the grep does not stand in for it. On #57 the log half held and the counter reached
+**2**.
 
 **Record in both issues that it was forced.** It proves the drop, which is what both
 acceptances name. It does not prove the loss.
@@ -264,9 +271,10 @@ was named for, and the result looked like evidence rather than absence.
 **This file has now done it twice.** The second time was the #172 row: it named a
 chain — `session.teardown` → `shutdown_all()` → `_kill_unlocked` — and called it
 *the reliable half*, without anyone checking that the gateway sends that verb. It
-does not. A reader following that row would have watched a teardown for a kill
-that cannot occur, seen the container vanish and the CLIs with it, and marked the
-item discharged. Every visible signal agreed: teardown logged confirmed removals,
+did not — not until **#221** wired it, months of rows later. A reader following
+that row in the interval would have watched a teardown for a kill that could not
+occur, seen the container vanish and the CLIs with it, and marked the item
+discharged. Every visible signal agreed: teardown logged confirmed removals,
 the session archived, no CLI survived. `grep -ic kill` returned 0.
 
 **And once before that.** An earlier draft put #171 under *During*
