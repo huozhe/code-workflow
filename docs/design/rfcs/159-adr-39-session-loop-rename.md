@@ -6,7 +6,7 @@
 | **Issue** | [#159](https://github.com/huozhe/code-workflow/issues/159) |
 | **Decision of record** | ADR-39 — [`../unified_design_spec.md`](../unified_design_spec.md) §16 (new), spec 1.39.0 |
 | **Baseline** | `main` @ `90ccc65` (spec 1.38.0). Every count and line number below is measured against that commit. |
-| **Touches** | `agentd/src/agentd/{design_loop,dispatcher,server,reconciler,fsm}.py` · 37 files under `agentd/tests/` · `docs/design/unified_design_spec.md` (2 lines + 1 ADR) · `docs/ops/live-sign-offs.md` (1 note) |
+| **Touches** | `agentd/src/agentd/{design_loop,dispatcher,server,reconciler,fsm}.py` — note `dispatcher` and `server` carry **log messages**, not only imports (§2) · 37 files under `agentd/tests/` · `docs/design/unified_design_spec.md` (2 lines + 1 ADR) · `docs/ops/live-sign-offs.md` (1 note) |
 | **Produced by** | Architect turn `t-889ec5ce7199`, session #159 (§5.5.2 stamp) |
 
 ## 0. What this RFC is
@@ -70,20 +70,31 @@ documents keys on the **message**, never on `%(name)s`:
 | `:239` | `"author-sent PR event, no turn"` |
 | `:259`, `:278` | `grep -ic kill` |
 
-Five of those six messages are emitted by `design_loop.py`. **A logger rename changes none of them.**
-`docs/ops/m0-bootstrap.md` greps `dev.agentd` out of `launchctl`, which is a plist label. There is no
-third ops file.
+**Four** of those six messages are emitted by `design_loop.py` (`:821`, `:702`, `:866`, `:555`); the
+fifth is `reconciler.py:204` and the sixth is the runner's kill path. **A logger rename changes none of
+them.** `docs/ops/m0-bootstrap.md` greps `dev.agentd` out of `launchctl`, which is a plist label. There
+is no third ops file.
 
-The one place the module's *name* is load-bearing to an operator is not the logger at all:
+The places where the module's *name* is load-bearing to an operator are not the logger at all, and
+**there are three of them, in three different modules**:
 
 ```
 design_loop.py:426    log.exception("design_loop failed delivery=%s", row["delivery_id"])
+dispatcher.py:77      log.exception("design_loop batch failed")
+server.py:98          log.exception("design_loop init failed; deferred deliveries stay parked")
 ```
 
-That is a **message** string containing the module name, and it is in the class of thing the runbook
-greps. It has to be renamed with the module, and it is the only occurrence of its kind — `grep -n
-'"[^"]*design_loop[^"]*"' src/agentd/design_loop.py` returns exactly two lines, `:174` (the logger) and
-`:426` (this).
+All three are `log.exception`, so all three are ERROR and land in `gateway.err.log` — the crash sink
+`live-sign-offs.md:170` names. They are the highest-value operator greps in the tree: *"the gateway is
+not draining"* is answered by grepping this name in that file. All three rename with the module.
+
+**Corrected after the first draft, and the correction is the point.** This section originally claimed
+`:426` was *"the only occurrence of its kind"*, on the evidence of `grep -n '"[^"]*design_loop[^"]*"'
+src/agentd/design_loop.py` — **a query scoped to the one file being renamed, whose answer was then
+generalised to the tree.** That is this project's recurring failure shape, committed inside the RFC
+that catalogues it: the fixture could not reach the case. Two of the three sites are in the importers,
+which is precisely where a message about a module gets logged from. The corrected query resolves
+string *constants* rather than source lines, tree-wide (§5′).
 
 **The retention bound, which the issue's 6869-line count omits.** `agentd.log` is a
 `RotatingFileHandler` with `LOG_MAX_BYTES = 1 MiB` and `LOG_BACKUP_COUNT = 5` (`__main__.py:21–22`).
@@ -226,6 +237,39 @@ The three test *filenames* split on the same line: `tests/test_design_loop.py` a
 `tests/test_stall_design_loop.py` are named for the module and are renamed with it;
 `tests/test_m3d_design_exit.py` is named for the **design-half exit criteria** (M3-D) and is not.
 
+## 5′. The sweep's blind spot: a line grep cannot see a string constant
+
+The corrected §2 was found by a query that resolves **string constants** instead of source lines, and
+the difference is a hazard the acceptance list has to name.
+
+This tree wraps long log messages mid-phrase. `design_loop.py:555` is the live example — the runbook
+greps `"author-sent PR event, no turn"`, and that phrase **exists in no source line**:
+
+```python
+log.info(
+    "delivery done id=%s event=%s action=%s — author-sent PR "
+    "event, no turn (#173)",
+```
+
+Implicit concatenation makes the emitted string whole; `grep` sees two halves. That is how §2's original
+count was wrong by two, and it is the shape a rename sweep is exposed to: a name split across a
+concatenation boundary is invisible to acceptance item (1).
+
+**Measured at `90ccc65`: the exposure is currently zero.** Parsing every file under `src/` and `tests/`
+and walking `ast.Constant`, there are **14** string constants whose *value* contains `design_loop` or
+`DesignLoop`, and for every one of them the name appears intact on at least one source line. **Zero**
+are split across the boundary. So acceptance item (1)'s grep is sufficient at this commit.
+
+It is sufficient by luck, not by construction, and the luck is exactly what the rename can destroy: an
+implementer who rewraps `"design_loop init failed; deferred deliveries stay parked"` to fit a line
+length while renaming it can produce `"session_"` `"loop init failed…"` — green, greppable by nothing,
+and wrong in the file the crash sink points at. Hence acceptance (1′).
+
+**The attribute and keyword-argument sites are not this class and need no special handling.**
+`Dispatcher.__init__` takes `design_loop=` (`dispatcher.py:40`, called from `server.py:100` and
+`tests/test_turn_resume.py:535`) and reads `self.design_loop` at `:72`, `:74`, `:75`. Six sites, all
+matched by the plain name, and a missed keyword breaks loudly at the call.
+
 ## 6. Decisions
 
 **(a) `design_loop.py` → `session_loop.py`.** As the issue proposes. `orchestrator.py` and `lifecycle.py`
@@ -246,7 +290,8 @@ the reader the exit condition is written for has not opened either file yet, and
 is unambiguous where `supervisor` is not.
 
 **(c) Logger → `agentd.session_loop`.** Option (1) in the issue, on §2's measurement rather than on
-preference. The message at `:426` renames with it.
+preference. **All three** operator-facing messages naming the module rename with it — `design_loop.py:426`,
+`dispatcher.py:77`, `server.py:98` — not just the one in the renamed file.
 
 **(d) The module docstring is rewritten, and it is not cosmetic.** Today:
 
@@ -283,14 +328,21 @@ careful person does by default and it is green when it is wrong.
 
 ## 7. Acceptance
 
-Ordered so that a failure at any step names the thing it falsifies. (5) and (6) are the two a green suite
-does not cover, and they are the reason this is not a one-line PR description.
+Ordered so that a failure at any step names the thing it falsifies. **(1′), (5) and (6) are the three a
+green suite does not cover**, and they are the reason this is not a one-line PR description.
 
 1. **`grep -rn 'design_loop\|DesignLoop' agentd/src agentd/tests` returns zero.** The blunt one. Run it
    as the last step, not the first.
+
+1′. **The same, resolved through the parser, because (1) cannot see a split string (§5′).** Walk
+   `ast.Constant` over every `.py` under `src/` and `tests/` and assert no constant's *value* contains
+   either name. At `90ccc65` this finds 14 constants that (1) also finds; after the rename it must find
+   zero. This is the check that survives a rewrap, and it is four lines of throwaway script — not a test
+   to commit.
 2. **`pytest`, `lint`, `types` green**, and `git diff --stat` shows no `.py` hunk that is not a rename of
    one of the two names. A semantic diff of `session_loop.py` against `design_loop.py` is the docstring,
-   the logger, and `:426`.
+   the logger, and the message at `:426` — plus, in the two importers, the messages at `dispatcher.py:77`
+   and `server.py:98` and nothing else.
 3. **`grep -rn '\bdesign_pr\b\|_is_design_pr\|is_design_head_ref\|DESIGN_STATES' agentd/src` returns the
    same set of lines as at `90ccc65`.** §5's guard against a too-wide regex. This is the check that
    catches the sweep that passed CI because nothing tests a column name's spelling in prose.
