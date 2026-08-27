@@ -529,8 +529,8 @@ def test_10_one_shared_predicate_two_callers_one_ping_per_project_per_pass(
     import inspect
     import re
 
-    import agentd.design_loop as dl
     import agentd.reconciler as rc
+    import agentd.session_loop as dl
 
     # exactly two callers, and neither has a probe of its own
     call_sites = [
@@ -540,9 +540,9 @@ def test_10_one_shared_predicate_two_callers_one_ping_per_project_per_pass(
     ]
     assert len(call_sites) == 2, call_sites
     assert "probe_runner(runner, client_cls=RunnerClient).serviceable" in inspect.getsource(
-        dl.DesignLoop._runner_reachable
+        dl.SessionLoop._runner_reachable
     )
-    assert "health.ping" not in inspect.getsource(dl.DesignLoop._runner_reachable)
+    assert "health.ping" not in inspect.getsource(dl.SessionLoop._runner_reachable)
 
     # one project, two containers claiming it: still one ping
     store = Store(tmp_path / "state.db")
@@ -557,7 +557,7 @@ def test_10_one_shared_predicate_two_callers_one_ping_per_project_per_pass(
     assert stub.pings == 1, "one probe per project per pass, not per container"
     assert len(rep["attached"]) == 1
 
-    # the DesignLoop caller reaches the same predicate
+    # the SessionLoop caller reaches the same predicate
     stub.pings = 0
     assert probe_runner(store.get_runner(PROJECT)).serviceable is True
     assert stub.pings == 1

@@ -14,8 +14,8 @@ from agentd.archive import (
 )
 from agentd.config import Config
 from agentd.db import Store
-from agentd.design_loop import DesignLoop
 from agentd.paths import DEFAULT_CONFIG
+from agentd.session_loop import SessionLoop
 from agentd.verification import render_verification_block
 
 
@@ -118,13 +118,13 @@ def _insert_close(
     )
 
 
-def _loop(store: Store, tmp: Path, *, posts: list | None = None) -> DesignLoop:
+def _loop(store: Store, tmp: Path, *, posts: list | None = None) -> SessionLoop:
     def _post(**k):
         if posts is not None:
             posts.append(k)
         return 1
 
-    return DesignLoop(
+    return SessionLoop(
         store,
         _cfg(tmp),
         supervisor=None,
@@ -405,7 +405,7 @@ def test_no_dir_no_tarball_does_not_close(tmp_path: Path) -> None:
     """B1: never CLOSED with neither tarball nor live directory."""
     store = Store(tmp_path / "state.db")
     sk = _seed(store, state="TEARDOWN", classification="ABANDONED")
-    import agentd.design_loop as dl
+    import agentd.session_loop as dl
 
     dl._delivery_attempts.clear()
     _insert_close(
@@ -432,7 +432,7 @@ def test_archive_failure_exhausts_and_escalates(tmp_path: Path, monkeypatch) -> 
     sk = _seed(store, state="TEARDOWN", classification="ABANDONED")
     _make_session_dir(tmp_path)
     posts: list = []
-    import agentd.design_loop as dl
+    import agentd.session_loop as dl
 
     dl._delivery_attempts.clear()
 

@@ -8,8 +8,8 @@ from typing import ClassVar
 
 from agentd.config import Config
 from agentd.db import Store
-from agentd.design_loop import DesignLoop
 from agentd.refusals import CapacityRefusal
+from agentd.session_loop import SessionLoop
 
 
 def _cfg(tmp: Path) -> Config:
@@ -138,8 +138,8 @@ def _run(
     *,
     posts: list | None = None,
     client: type = _RecordingClient,
-) -> DesignLoop:
-    import agentd.design_loop as dl
+) -> SessionLoop:
+    import agentd.session_loop as dl
 
     def _post(**k):
         if posts is not None:
@@ -147,7 +147,7 @@ def _run(
         return 1
 
     _RecordingClient.calls = []
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         _cfg(tmp),
         supervisor=supervisor,
@@ -251,7 +251,7 @@ def test_ensure_failure_leaves_deferred_not_routed(tmp_path: Path) -> None:
             raise RuntimeError("docker daemon down")
 
     _owner_comment(store, did="d-boom")
-    import agentd.design_loop as dl
+    import agentd.session_loop as dl
 
     dl._delivery_attempts.clear()
     _run(store, tmp_path, Boom())
@@ -273,7 +273,7 @@ def test_capacity_refusal_stays_typed_and_deferred(tmp_path: Path) -> None:
             raise CapacityRefusal("max_hot_containers=2 reached (hot=2)")
 
     _owner_comment(store, did="d-cap")
-    import agentd.design_loop as dl
+    import agentd.session_loop as dl
 
     dl._delivery_attempts.clear()
     _run(store, tmp_path, Cap())
@@ -310,7 +310,7 @@ def test_ensure_failure_exhausts_and_escalates(tmp_path: Path) -> None:
         def ensure_session(self, **k):
             raise RuntimeError("still down")
 
-    import agentd.design_loop as dl
+    import agentd.session_loop as dl
 
     dl._delivery_attempts.clear()
     _owner_comment(store, did="d-ex")

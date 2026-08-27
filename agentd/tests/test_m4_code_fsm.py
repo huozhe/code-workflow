@@ -7,9 +7,9 @@ from pathlib import Path
 
 from agentd.config import Config
 from agentd.db import Store
-from agentd.design_loop import DesignLoop
 from agentd.fsm import CODE_STATES, transition
 from agentd.gitops import is_feature_head_ref, role_branch_name
+from agentd.session_loop import SessionLoop
 
 
 def _cfg(tmp: Path) -> Config:
@@ -100,7 +100,7 @@ def test_feature_pr_open_by_developer_branch_not_title(tmp_path: Path) -> None:
         token="tok",
         tier="hot",
     )
-    loop = DesignLoop(store, cfg, supervisor=None, dispatch_turns=False)
+    loop = SessionLoop(store, cfg, supervisor=None, dispatch_turns=False)
     feat_ref = _feature_ref(100)
     _insert(
         store,
@@ -152,7 +152,7 @@ def test_code_review_rework_round(tmp_path: Path) -> None:
         token="tok",
         tier="hot",
     )
-    loop = DesignLoop(store, cfg, supervisor=None, dispatch_turns=False)
+    loop = SessionLoop(store, cfg, supervisor=None, dispatch_turns=False)
     head = "deadbeef"
 
     _insert(
@@ -222,7 +222,7 @@ def test_merging_to_awaiting_on_feature_merged(tmp_path: Path) -> None:
         token="tok",
         tier="hot",
     )
-    loop = DesignLoop(store, cfg, supervisor=None, dispatch_turns=False)
+    loop = SessionLoop(store, cfg, supervisor=None, dispatch_turns=False)
     _insert(
         store,
         did="d-merge",
@@ -270,7 +270,7 @@ def test_awaiting_verification_reenter_implementing(tmp_path: Path) -> None:
         token="tok",
         tier="hot",
     )
-    loop = DesignLoop(store, cfg, supervisor=None, dispatch_turns=False)
+    loop = SessionLoop(store, cfg, supervisor=None, dispatch_turns=False)
     feat_ref = _feature_ref(100)
     _insert(
         store,
@@ -314,7 +314,7 @@ def test_feature_merged_wrong_pr_dropped(tmp_path: Path) -> None:
         updated_at=1,
     )
     store.update_session_fields(sk, feature_pr=60)
-    loop = DesignLoop(store, cfg, supervisor=None, dispatch_turns=False)
+    loop = SessionLoop(store, cfg, supervisor=None, dispatch_turns=False)
     _insert(
         store,
         did="d-wrong",
@@ -342,24 +342,24 @@ def test_feature_merged_wrong_pr_dropped(tmp_path: Path) -> None:
 
 def test_pick_recipient_design_merged_wakes_developer() -> None:
     """Architect merge is self-echo; Developer must get IMPLEMENTING turn (M4-4)."""
-    loop = DesignLoop.__new__(DesignLoop)
-    role, login = DesignLoop._pick_recipient(
+    loop = SessionLoop.__new__(SessionLoop)
+    role, login = SessionLoop._pick_recipient(
         loop, "design_merged", "DESIGN_APPROVED", "arch", "dev", "arch"
     )
     assert role == "developer" and login == "dev"
 
 
 def test_pick_recipient_code_half() -> None:
-    loop = DesignLoop.__new__(DesignLoop)
-    role, login = DesignLoop._pick_recipient(
+    loop = SessionLoop.__new__(SessionLoop)
+    role, login = SessionLoop._pick_recipient(
         loop, "feature_pr_opened", "IMPLEMENTING", "arch", "dev", "dev"
     )
     assert role == "architect" and login == "arch"
-    role, login = DesignLoop._pick_recipient(
+    role, login = SessionLoop._pick_recipient(
         loop, "code_changes_requested", "CODE_REVIEW", "arch", "dev", "arch"
     )
     assert role == "developer" and login == "dev"
-    role, login = DesignLoop._pick_recipient(
+    role, login = SessionLoop._pick_recipient(
         loop, "merge_authorized", "CODE_REVIEW", "arch", "dev", "arch"
     )
     assert role == "developer" and login == "dev"

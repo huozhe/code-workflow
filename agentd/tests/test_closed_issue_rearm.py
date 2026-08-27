@@ -7,8 +7,8 @@ from pathlib import Path
 
 from agentd.config import Config
 from agentd.db import Store
-from agentd.design_loop import CLOSE_RECONCILE_PREFIX, DesignLoop
 from agentd.reconciler import Reconciler
+from agentd.session_loop import CLOSE_RECONCILE_PREFIX, SessionLoop
 
 
 def _cfg(tmp: Path) -> Config:
@@ -74,8 +74,8 @@ def _insert_reopen(store: Store, *, did: str, sender: str) -> None:
     )
 
 
-def _loop(store: Store, tmp: Path) -> DesignLoop:
-    return DesignLoop(
+def _loop(store: Store, tmp: Path) -> SessionLoop:
+    return SessionLoop(
         store,
         _cfg(tmp),
         dispatch_turns=False,

@@ -7,7 +7,7 @@ from pathlib import Path
 
 from agentd.config import Config
 from agentd.db import Store
-from agentd.design_loop import DesignLoop
+from agentd.session_loop import SessionLoop
 
 _RUNNER_ROOT = Path(__file__).resolve().parents[1] / "docker" / "session-runner"
 sys.path.insert(0, str(_RUNNER_ROOT))
@@ -189,13 +189,13 @@ def test_dispatch_passes_session_state(tmp_path: Path) -> None:
             seen["params"] = dict(params or {})
             return {"status": "done", "summary": "ok"}
 
-    import agentd.design_loop as dl
+    import agentd.session_loop as dl
 
     orig = dl.RunnerClient
     dl.RunnerClient = FakeClient  # type: ignore[misc, assignment]
     try:
         cfg = Config(raw={}, root=tmp_path)
-        loop = DesignLoop(store, cfg, supervisor=None, dispatch_turns=True)
+        loop = SessionLoop(store, cfg, supervisor=None, dispatch_turns=True)
         out = loop._dispatch_turn(
             session_key="o/r#1",
             role="developer",

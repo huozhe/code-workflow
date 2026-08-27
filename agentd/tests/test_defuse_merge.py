@@ -7,8 +7,8 @@ from pathlib import Path
 
 from agentd.config import Config
 from agentd.db import Store
-from agentd.design_loop import DesignLoop
 from agentd.gitops import role_branch_name
+from agentd.session_loop import SessionLoop
 
 
 def _cfg(tmp: Path) -> Config:
@@ -59,7 +59,7 @@ def _approve_and_drain(
     issue: int = 100,
     pr: int = 60,
     extra_sessions: list[int] | None = None,
-) -> DesignLoop:
+) -> SessionLoop:
     for n in extra_sessions or []:
         store.upsert_session(
             session_key=f"huozhe/code-workflow#{n}",
@@ -115,7 +115,7 @@ def _approve_and_drain(
         return real(**kwargs)
 
     vmod.verify_feature_merge = patched  # type: ignore[assignment]
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         _cfg(tmp),
         supervisor=None,

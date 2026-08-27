@@ -8,8 +8,8 @@ from pathlib import Path
 
 from agentd.config import Config
 from agentd.db import Store
-from agentd.design_loop import DesignLoop, _role_busy_until, _role_key
 from agentd.gitops import project_path
+from agentd.session_loop import SessionLoop, _role_busy_until, _role_key
 
 
 def _cfg(tmp_path: Path, **gateway: object) -> Config:
@@ -87,12 +87,12 @@ def test_dispatch_sends_config_deadline_and_derived_timeout(tmp_path: Path) -> N
             seen["deadline_s"] = (params or {}).get("deadline_s")
             return {"status": "done", "summary": "ok"}
 
-    import agentd.design_loop as dl
+    import agentd.session_loop as dl
 
     orig = dl.RunnerClient
     dl.RunnerClient = FakeClient  # type: ignore[misc, assignment]
     try:
-        loop = DesignLoop(store, cfg, supervisor=None, dispatch_turns=True)
+        loop = SessionLoop(store, cfg, supervisor=None, dispatch_turns=True)
         out = loop._dispatch_turn(
             session_key="o/r#1",
             role="architect",
@@ -135,12 +135,12 @@ def test_gateway_timeout_records_turn_and_transcript(tmp_path: Path) -> None:
         def call(self, method, params=None):
             raise TimeoutError("timed out")
 
-    import agentd.design_loop as dl
+    import agentd.session_loop as dl
 
     orig = dl.RunnerClient
     dl.RunnerClient = TimeoutClient  # type: ignore[misc, assignment]
     try:
-        loop = DesignLoop(store, cfg, supervisor=None, dispatch_turns=True)
+        loop = SessionLoop(store, cfg, supervisor=None, dispatch_turns=True)
         t0 = time.time()
         out = loop._dispatch_turn(
             session_key="o/r#1",
@@ -213,12 +213,12 @@ def test_gateway_timeout_role_busy_returns_immediately(tmp_path: Path) -> None:
                 raise TimeoutError("timed out")
             return {"status": "done", "summary": "recovered"}
 
-    import agentd.design_loop as dl
+    import agentd.session_loop as dl
 
     orig = dl.RunnerClient
     dl.RunnerClient = FlakyClient  # type: ignore[misc, assignment]
     try:
-        loop = DesignLoop(store, cfg, supervisor=None, dispatch_turns=True)
+        loop = SessionLoop(store, cfg, supervisor=None, dispatch_turns=True)
         t0 = time.time()
         r1 = loop._dispatch_turn(
             session_key="o/r#1",
@@ -276,12 +276,12 @@ def test_connect_failure_does_not_mark_busy(tmp_path: Path) -> None:
         def __exit__(self, *a):
             return False
 
-    import agentd.design_loop as dl
+    import agentd.session_loop as dl
 
     orig = dl.RunnerClient
     dl.RunnerClient = BoomClient  # type: ignore[misc, assignment]
     try:
-        loop = DesignLoop(store, cfg, supervisor=None, dispatch_turns=True)
+        loop = SessionLoop(store, cfg, supervisor=None, dispatch_turns=True)
         out = loop._dispatch_turn(
             session_key="o/r#1",
             role="architect",

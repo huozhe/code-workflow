@@ -12,8 +12,8 @@ import pytest
 
 from agentd.config import Config
 from agentd.db import Store
-from agentd.design_loop import DesignLoop
 from agentd.refusals import CapacityRefusal
+from agentd.session_loop import SessionLoop
 from agentd.supervisor import SessionSupervisor, runner_image
 
 
@@ -81,12 +81,12 @@ class _FakePing:
 def test_runner_reachable_requires_initialized(tmp_path: Path) -> None:
     """Reachability is serviceable, not answering (ADR-25)."""
     store = Store(tmp_path / "state.db")
-    loop = DesignLoop(store, _cfg(tmp_path), supervisor=None, dispatch_turns=False)
+    loop = SessionLoop(store, _cfg(tmp_path), supervisor=None, dispatch_turns=False)
     runner = {
         "endpoint": "127.0.0.1:9",
         "token": "tok",
     }
-    import agentd.design_loop as dl
+    import agentd.session_loop as dl
 
     orig = dl.RunnerClient
     try:

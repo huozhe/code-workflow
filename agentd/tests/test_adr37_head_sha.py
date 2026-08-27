@@ -8,12 +8,12 @@ from typing import Any
 
 import pytest
 
-import agentd.design_loop as design_loop_mod
+import agentd.session_loop as session_loop_mod
 from agentd.config import Config
 from agentd.db import Store, decompress_payload
-from agentd.design_loop import DesignLoop
 from agentd.gitops import role_branch_name
 from agentd.reconciler import Reconciler
+from agentd.session_loop import SessionLoop
 
 _REPO = "huozhe/code-workflow"
 _X = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -22,9 +22,9 @@ _Y = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
 @pytest.fixture(autouse=True)
 def _clear_spent() -> None:
-    design_loop_mod._spent_prs.clear()
+    session_loop_mod._spent_prs.clear()
     yield
-    design_loop_mod._spent_prs.clear()
+    session_loop_mod._spent_prs.clear()
 
 
 def _cfg(tmp: Path) -> Config:
@@ -141,11 +141,11 @@ def _sweep(store: Store, snap: dict[str, Any], *, dry_run: bool = False) -> dict
     return rec.reconcile_once(dry_run=dry_run)
 
 
-def _loop(store: Store, tmp: Path, *, fetch_pr: Any | None = None) -> DesignLoop:
+def _loop(store: Store, tmp: Path, *, fetch_pr: Any | None = None) -> SessionLoop:
     kw: dict[str, Any] = {}
     if fetch_pr is not None:
         kw["fetch_pr"] = fetch_pr
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         _cfg(tmp),
         supervisor=object(),

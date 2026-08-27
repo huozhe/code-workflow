@@ -8,7 +8,7 @@ from pathlib import Path
 
 from agentd.config import Config
 from agentd.db import Store
-from agentd.design_loop import DesignLoop, _role_busy_until, _role_key
+from agentd.session_loop import SessionLoop, _role_busy_until, _role_key
 
 
 def _cfg(tmp: Path) -> Config:
@@ -96,10 +96,10 @@ class _StatusClient:
         return dict(self._payload)
 
 
-def _run(store: Store, tmp: Path, client_cls: type) -> DesignLoop:
-    import agentd.design_loop as dl
+def _run(store: Store, tmp: Path, client_cls: type) -> SessionLoop:
+    import agentd.session_loop as dl
 
-    loop = DesignLoop(
+    loop = SessionLoop(
         store, _cfg(tmp), supervisor=object(), dispatch_turns=True, gateway_token="gw"
     )
     orig = dl.RunnerClient

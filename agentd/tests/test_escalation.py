@@ -7,8 +7,8 @@ from pathlib import Path
 
 from agentd.config import Config
 from agentd.db import SCHEMA_VERSION, Store
-from agentd.design_loop import DesignLoop
 from agentd.github_write import format_escalation_comment
+from agentd.session_loop import SessionLoop
 
 
 def _cfg(tmp_path: Path) -> Config:
@@ -44,7 +44,7 @@ def test_gateway_token_no_agent_pat_fallback(tmp_path: Path, monkeypatch) -> Non
     store = Store(tmp_path / "state.db")
     cfg = _cfg(tmp_path)
     # Injected empty token forces fail-closed path for missing keychain.
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         cfg,
         supervisor=None,
@@ -54,14 +54,14 @@ def test_gateway_token_no_agent_pat_fallback(tmp_path: Path, monkeypatch) -> Non
     monkeypatch.delenv("AGENTD_SECRET_GATEWAY", raising=False)
     assert loop._gateway_github_token() is None
     # Without inject, only get_password("gateway") is consulted — not agent bots.
-    loop2 = DesignLoop(store, cfg, supervisor=None, dispatch_turns=False)
+    loop2 = SessionLoop(store, cfg, supervisor=None, dispatch_turns=False)
     monkeypatch.setattr(
-        "agentd.design_loop.get_password",
+        "agentd.session_loop.get_password",
         lambda account: {"claude-bot": "pat-c", "grok-bot": "pat-g"}.get(account),
     )
     assert loop2._gateway_github_token() is None
     monkeypatch.setattr(
-        "agentd.design_loop.get_password",
+        "agentd.session_loop.get_password",
         lambda account: "gw-pat" if account == "gateway" else None,
     )
     assert loop2._gateway_github_token() == "gw-pat"
@@ -90,7 +90,7 @@ def test_escalate_posts_comment_and_records_id(tmp_path: Path) -> None:
         )
         return 9_001
 
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         cfg,
         supervisor=None,
@@ -140,7 +140,7 @@ def test_escalation_echo_dropped_not_dispatched_after_unpause(tmp_path: Path) ->
         posts.append(body)
         return 42
 
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         cfg,
         supervisor=None,
@@ -216,7 +216,7 @@ def test_owner_reply_resumes_pre_pause_state(tmp_path: Path) -> None:
         created_at=now,
         updated_at=now,
     )
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         cfg,
         supervisor=None,
@@ -302,7 +302,7 @@ def test_non_owner_while_paused_defers(tmp_path: Path) -> None:
         payload=body,
         status="deferred",
     )
-    loop = DesignLoop(store, cfg, supervisor=None, dispatch_turns=False)
+    loop = SessionLoop(store, cfg, supervisor=None, dispatch_turns=False)
     loop.process_deferred_batch()
     # still deferred (route defer)
     assert store.count_by_status().get("deferred") == 1

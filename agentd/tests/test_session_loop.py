@@ -1,4 +1,4 @@
-"""Design loop: deferred → session row + route without docker turns."""
+"""Session loop: deferred → session row + route without docker turns."""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ from pathlib import Path
 
 from agentd.config import Config
 from agentd.db import Store
-from agentd.design_loop import DesignLoop
 from agentd.intake import evaluate_intake
+from agentd.session_loop import SessionLoop
 
 
 def test_deferred_issue_creates_planning_without_supervisor(tmp_path: Path) -> None:
@@ -51,7 +51,7 @@ def test_deferred_issue_creates_planning_without_supervisor(tmp_path: Path) -> N
         payload=body,
         status="deferred",
     )
-    loop = DesignLoop(store, cfg, supervisor=None, dispatch_turns=False)
+    loop = SessionLoop(store, cfg, supervisor=None, dispatch_turns=False)
     # without supervisor, process leaves deferred (cannot create session)
     loop.process_deferred_batch()
     assert store.count_by_status().get("deferred") == 1
@@ -106,7 +106,7 @@ def test_routing_self_echo_marks_done_no_turn(tmp_path: Path) -> None:
         payload=body,
         status="deferred",
     )
-    loop = DesignLoop(store, cfg, supervisor=None, dispatch_turns=False)
+    loop = SessionLoop(store, cfg, supervisor=None, dispatch_turns=False)
     loop.process_deferred_batch()
     assert store.count_by_status().get("done") == 1
     store.close()

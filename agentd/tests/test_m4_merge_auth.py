@@ -7,8 +7,8 @@ from pathlib import Path
 
 from agentd.config import Config
 from agentd.db import Store
-from agentd.design_loop import DesignLoop
 from agentd.gitops import role_branch_name
+from agentd.session_loop import SessionLoop
 
 
 def _cfg(tmp: Path, *, required_checks: list[str] | None = None) -> Config:
@@ -146,7 +146,7 @@ def test_architect_approve_emits_merge_authorized(tmp_path: Path) -> None:
 
     vmod.verify_feature_merge = patched  # type: ignore[assignment]
     try:
-        loop = DesignLoop(
+        loop = SessionLoop(
             store,
             cfg,
             supervisor=None,
@@ -239,7 +239,7 @@ def test_failed_check_escalates_permanent(tmp_path: Path) -> None:
 
     vmod.verify_feature_merge = patched  # type: ignore[assignment]
     try:
-        loop = DesignLoop(
+        loop = SessionLoop(
             store,
             cfg,
             supervisor=None,
@@ -280,7 +280,7 @@ def test_failed_check_escalates_permanent(tmp_path: Path) -> None:
 
 def test_unknown_mergeable_leaves_deferred(tmp_path: Path) -> None:
     """PR #54 B1: unknown mergeable_state must not pause/page the owner."""
-    import agentd.design_loop as dl
+    import agentd.session_loop as dl
 
     store = Store(tmp_path / "state.db")
     cfg = _cfg(tmp_path, required_checks=[])
@@ -319,7 +319,7 @@ def test_unknown_mergeable_leaves_deferred(tmp_path: Path) -> None:
 
     vmod.verify_feature_merge = patched  # type: ignore[assignment]
     try:
-        loop = DesignLoop(
+        loop = SessionLoop(
             store,
             cfg,
             supervisor=None,
@@ -362,7 +362,7 @@ def test_unknown_mergeable_leaves_deferred(tmp_path: Path) -> None:
 
 
 def test_transient_exhausted_retries_escalate(tmp_path: Path) -> None:
-    import agentd.design_loop as dl
+    import agentd.session_loop as dl
 
     store = Store(tmp_path / "state.db")
     cfg = _cfg(tmp_path, required_checks=[])
@@ -401,7 +401,7 @@ def test_transient_exhausted_retries_escalate(tmp_path: Path) -> None:
 
     vmod.verify_feature_merge = patched  # type: ignore[assignment]
     try:
-        loop = DesignLoop(
+        loop = SessionLoop(
             store,
             cfg,
             supervisor=None,
@@ -492,7 +492,7 @@ def test_merge_auth_uses_gateway_token(
         patches.append(kwargs)
 
     try:
-        loop = DesignLoop(
+        loop = SessionLoop(
             store,
             cfg,
             supervisor=None,
@@ -545,7 +545,7 @@ def test_unauthorized_feature_merged_escalates(tmp_path: Path) -> None:
         ref=feat_ref,
     )
     posts: list[str] = []
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         cfg,
         supervisor=None,
@@ -599,7 +599,7 @@ def test_authorized_feature_merged_marks_branch_and_awaits(tmp_path: Path) -> No
         kind="branch",
         ref=feat_ref,
     )
-    loop = DesignLoop(store, cfg, supervisor=None, dispatch_turns=False)
+    loop = SessionLoop(store, cfg, supervisor=None, dispatch_turns=False)
     _insert(
         store,
         did="d-auth-merge",
@@ -638,8 +638,8 @@ def test_authorized_feature_merged_marks_branch_and_awaits(tmp_path: Path) -> No
 
 def test_pick_merge_authorized_is_developer() -> None:
     """§8.4: Developer merges — opposite of Design PR merge actor."""
-    loop = DesignLoop.__new__(DesignLoop)
-    role, login = DesignLoop._pick_recipient(
+    loop = SessionLoop.__new__(SessionLoop)
+    role, login = SessionLoop._pick_recipient(
         loop, "merge_authorized", "CODE_REVIEW", "huozheclaude", "huozhegrok", "huozheclaude"
     )
     assert role == "developer"
@@ -650,7 +650,7 @@ def test_blocked_unresolved_threads_escalate_on_first_observation(
     tmp_path: Path,
 ) -> None:
     """ADR-26 (1): retry counter never leaves zero — no wait for max attempts."""
-    import agentd.design_loop as dl
+    import agentd.session_loop as dl
     from agentd.github_fetch import PrReviewThreadSnapshot
 
     store = Store(tmp_path / "state.db")
@@ -697,7 +697,7 @@ def test_blocked_unresolved_threads_escalate_on_first_observation(
 
     vmod.verify_feature_merge = patched  # type: ignore[assignment]
     try:
-        loop = DesignLoop(
+        loop = SessionLoop(
             store,
             cfg,
             supervisor=None,

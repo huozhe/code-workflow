@@ -12,9 +12,9 @@ from typing import Any
 
 from agentd.config import Config
 from agentd.db import Store
-from agentd.design_loop import DesignLoop
 from agentd.fsm import TERMINAL_STATES
 from agentd.gitops import role_branch_name
+from agentd.session_loop import SessionLoop
 from agentd.verification import render_verification_block
 
 REPO = "huozhe/code-workflow"
@@ -154,8 +154,8 @@ def _loop(
     turn_len: int = 98,
     public_actions: list | None = None,
     status: str = "done",
-) -> DesignLoop:
-    """DesignLoop whose dispatch stub writes a real turn row.
+) -> SessionLoop:
+    """SessionLoop whose dispatch stub writes a real turn row.
 
     ``started_at`` is set to the **triggering delivery's own** ``received_at``:
     both columns are whole seconds and they collide in practice (live turns
@@ -163,7 +163,7 @@ def _loop(
     collision, so every test here has it.
     """
     posted: list[dict[str, Any]] = []
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         _cfg(tmp),
         supervisor=object(),
@@ -248,7 +248,7 @@ _MID_FEATURE_SYNC = {
 }
 
 
-def _drive(loop: DesignLoop, store: Store, *, did: str, sender: str) -> None:
+def _drive(loop: SessionLoop, store: Store, *, did: str, sender: str) -> None:
     _insert(
         store,
         did=did,
@@ -572,8 +572,8 @@ def _verification_block(*, checked: bool) -> str:
     )
 
 
-def _close_loop(store: Store, tmp: Path) -> DesignLoop:
-    return DesignLoop(
+def _close_loop(store: Store, tmp: Path) -> SessionLoop:
+    return SessionLoop(
         store,
         _cfg(tmp),
         supervisor=None,

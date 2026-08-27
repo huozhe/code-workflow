@@ -11,7 +11,7 @@ from pathlib import Path
 
 from agentd.config import Config
 from agentd.db import Store
-from agentd.design_loop import DesignLoop
+from agentd.session_loop import SessionLoop
 
 
 def _cfg(tmp: Path) -> Config:
@@ -99,7 +99,7 @@ def test_design_half_happy_path_to_implementing(tmp_path: Path) -> None:
         return {"head": {"sha": head}, "number": 50}
 
     posts: list[str] = []
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         cfg,
         supervisor=None,
@@ -108,7 +108,7 @@ def test_design_half_happy_path_to_implementing(tmp_path: Path) -> None:
         gateway_token="gw",
     )
 
-    # Patch verify used inside design_loop (imported lazily in method)
+    # Patch verify used inside session_loop (imported lazily in method)
     import agentd.verify as vmod
 
     real = vmod.verify_design_approval
@@ -229,7 +229,7 @@ def test_non_design_merge_does_not_advance(tmp_path: Path) -> None:
         updated_at=1,
         design_pr=50,
     )
-    loop = DesignLoop(store, cfg, supervisor=None, dispatch_turns=False)
+    loop = SessionLoop(store, cfg, supervisor=None, dispatch_turns=False)
     # Merge of a different PR (feature) must not move DESIGN_APPROVED
     _insert(
         store,
@@ -271,7 +271,7 @@ def test_issue_comment_on_design_pr_resolves_session(tmp_path: Path) -> None:
         updated_at=1,
         design_pr=50,
     )
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         cfg,
         supervisor=None,
@@ -329,7 +329,7 @@ def test_review_comment_remaps_via_design_pr(tmp_path: Path) -> None:
         updated_at=1,
         design_pr=88,
     )
-    loop = DesignLoop(store, cfg, supervisor=None, dispatch_turns=False)
+    loop = SessionLoop(store, cfg, supervisor=None, dispatch_turns=False)
     store.insert_delivery(
         delivery_id="d-inline",
         event="pull_request_review_comment",
@@ -358,10 +358,10 @@ def test_review_comment_remaps_via_design_pr(tmp_path: Path) -> None:
 
 
 def test_design_pr_by_branch_not_title() -> None:
-    from agentd.design_loop import DesignLoop
     from agentd.gitops import role_branch_name
+    from agentd.session_loop import SessionLoop
 
-    loop = DesignLoop.__new__(DesignLoop)
+    loop = SessionLoop.__new__(SessionLoop)
     repo = "huozhe/code-workflow"
     ref = role_branch_name(repo, 7, "architect")
     assert loop._is_design_pr(
@@ -383,10 +383,10 @@ def test_design_pr_by_branch_not_title() -> None:
 
 def test_design_approved_routes_to_architect_merge_actor() -> None:
     """§8.3: after Developer approval, next turn is Architect (merge)."""
-    from agentd.design_loop import DesignLoop
+    from agentd.session_loop import SessionLoop
 
-    loop = DesignLoop.__new__(DesignLoop)
-    role, login = DesignLoop._pick_recipient(
+    loop = SessionLoop.__new__(SessionLoop)
+    role, login = SessionLoop._pick_recipient(
         loop,
         "design_approved",
         "DESIGN_REVIEW",
@@ -396,7 +396,7 @@ def test_design_approved_routes_to_architect_merge_actor() -> None:
     )
     assert role == "architect"
     assert login == "huozheclaude"
-    role2, _ = DesignLoop._pick_recipient(
+    role2, _ = SessionLoop._pick_recipient(
         loop,
         "design_pr_opened",
         "PLANNING",

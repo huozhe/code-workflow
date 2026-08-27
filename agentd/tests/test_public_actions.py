@@ -11,8 +11,8 @@ import pytest
 
 from agentd.config import Config
 from agentd.db import SCHEMA_VERSION, Store
-from agentd.design_loop import DesignLoop
 from agentd.loop_safety import SilentTurnTracker
+from agentd.session_loop import SessionLoop
 
 _RUNNER_ROOT = Path(__file__).resolve().parents[1] / "docker" / "session-runner"
 sys.path.insert(0, str(_RUNNER_ROOT))
@@ -355,7 +355,7 @@ def test_schema_v6_public_actions_and_silent(tmp_path: Path) -> None:
     store.close()
 
 
-def test_design_loop_escalates_after_silent_run(tmp_path: Path) -> None:
+def test_session_loop_escalates_after_silent_run(tmp_path: Path) -> None:
     """N consecutive silent turns with no FSM move → §8.5."""
     store = Store(tmp_path / "state.db")
     cfg = Config(
@@ -395,7 +395,7 @@ def test_design_loop_escalates_after_silent_run(tmp_path: Path) -> None:
     class FakeSup:
         pass
 
-    import agentd.design_loop as dl
+    import agentd.session_loop as dl
 
     class FakeClient:
         def __init__(self, *a, **k):
@@ -417,7 +417,7 @@ def test_design_loop_escalates_after_silent_run(tmp_path: Path) -> None:
     orig = dl.RunnerClient
     dl.RunnerClient = FakeClient  # type: ignore[misc, assignment]
     try:
-        loop = DesignLoop(
+        loop = SessionLoop(
             store,
             cfg,
             supervisor=FakeSup(),  # type: ignore[arg-type]
@@ -468,7 +468,7 @@ def test_design_loop_escalates_after_silent_run(tmp_path: Path) -> None:
     store.close()
 
 
-def test_design_loop_claimed_action_without_observation_still_counts(
+def test_session_loop_claimed_action_without_observation_still_counts(
     tmp_path: Path,
 ) -> None:
     """Claimed pr_opened with no FSM/webhook progress still increments silent."""
@@ -510,7 +510,7 @@ def test_design_loop_claimed_action_without_observation_still_counts(
     class FakeSup:
         pass
 
-    import agentd.design_loop as dl
+    import agentd.session_loop as dl
 
     class FakeClient:
         def __init__(self, *a, **k):
@@ -534,7 +534,7 @@ def test_design_loop_claimed_action_without_observation_still_counts(
     orig = dl.RunnerClient
     dl.RunnerClient = FakeClient  # type: ignore[misc, assignment]
     try:
-        loop = DesignLoop(
+        loop = SessionLoop(
             store,
             cfg,
             supervisor=FakeSup(),  # type: ignore[arg-type]

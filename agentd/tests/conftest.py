@@ -9,7 +9,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from agentd import design_loop, keychain
+from agentd import keychain, session_loop
 from agentd.supervisor import DEFAULT_IMAGE, runner_image
 
 
@@ -90,7 +90,7 @@ def session_runner_image(_isolate_runner_image: str) -> str:
 
 # --- no test may write to GitHub -------------------------------------------
 #
-# ``DesignLoop._escalate`` falls back to the real ``post_issue_comment`` with the
+# ``SessionLoop._escalate`` falls back to the real ``post_issue_comment`` with the
 # gateway's Keychain token whenever ``post_comment=`` is not injected, so a test
 # that escalates posts a comment to a live issue as ``huozhegateway``. That is
 # the §5.5 rule appearing as a defect: the identity says something no operator
@@ -116,7 +116,7 @@ def allows_github_post(monkeypatch):
         posted.append(kwargs)
         return len(posted)
 
-    monkeypatch.setattr(design_loop, "post_issue_comment", _record)
+    monkeypatch.setattr(session_loop, "post_issue_comment", _record)
     return posted
 
 
@@ -132,22 +132,22 @@ def _no_github_writes(request, monkeypatch):
         attempts.append(f"{kwargs.get('repo')}#{kwargs.get('issue_num')}")
         return 0
 
-    monkeypatch.setattr(design_loop, "post_issue_comment", _refuse)
+    monkeypatch.setattr(session_loop, "post_issue_comment", _refuse)
     yield
     # Raising inside the call would be swallowed: _escalate catches every
     # exception and appends ``[comment_post_failed: …]`` to the reason, which is
     # precisely why this has been invisible on CI. Fail after the test instead.
     assert not attempts, (
         "test would POST a comment as the gateway to "
-        f"{', '.join(attempts)}. Inject post_comment= into DesignLoop, or "
+        f"{', '.join(attempts)}. Inject post_comment= into SessionLoop, or "
         "request the allows_github_post fixture if the post is under test."
     )
 
 
 # --- no test may talk to the GitHub API (ADR-36 (e)) -----------------------
 #
-# ``_no_github_writes`` patches ``design_loop.post_issue_comment`` only. The
-# live M4-A test writes through ``httpx`` and never imports ``design_loop``,
+# ``_no_github_writes`` patches ``session_loop.post_issue_comment`` only. The
+# live M4-A test writes through ``httpx`` and never imports ``session_loop``,
 # so that guard is green while the write happens. A credential-read guard on
 # ``get_password`` is the same hole: the live test prefers ``GH_TOKEN`` /
 # ``AGENTD_SECRET_CLAUDE_BOT``, and ``from agentd.keychain import get_password``
@@ -253,7 +253,7 @@ def _no_github_api(request, monkeypatch):
 # the suite was green only where there was no Keychain.
 #
 # Patched at ``keychain.subprocess`` rather than at ``get_password``, for the
-# reason the note above gives: ``design_loop`` binds the name at import
+# reason the note above gives: ``session_loop`` binds the name at import
 # (``:48``), so a module-attribute patch misses it. Everything below that
 # binding goes through this one call.
 #

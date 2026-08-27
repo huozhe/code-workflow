@@ -7,8 +7,8 @@ from pathlib import Path
 
 from agentd.config import Config
 from agentd.db import SCHEMA_VERSION, Store
-from agentd.design_loop import DesignLoop
 from agentd.github_fetch import PrReviewThreadSnapshot
+from agentd.session_loop import SessionLoop
 
 
 def _cfg(tmp: Path) -> Config:
@@ -91,7 +91,7 @@ def test_zero_thread_escalates_via_fetch_boundary_fp_disarmed(tmp_path: Path) ->
         assert base == "main"
         return "file.py|modified|1+0-"
 
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         cfg,
         supervisor=None,
@@ -159,7 +159,7 @@ def test_thread_resolution_prevents_zero_thread_escalate(tmp_path: Path) -> None
         return s
 
     posts: list = []
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         cfg,
         supervisor=None,
@@ -210,7 +210,7 @@ def test_missing_fetch_skips_signals_no_countdown(tmp_path: Path) -> None:
         design_pr=11,
     )
     posts: list = []
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         cfg,
         supervisor=None,

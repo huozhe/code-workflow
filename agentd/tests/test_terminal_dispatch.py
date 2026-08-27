@@ -8,7 +8,7 @@ from typing import ClassVar
 
 from agentd.config import Config
 from agentd.db import Store
-from agentd.design_loop import DesignLoop
+from agentd.session_loop import SessionLoop
 
 
 def _cfg(tmp: Path) -> Config:
@@ -129,11 +129,11 @@ class _RecordingClient:
         return {"status": "done", "summary": "ok", "public_actions": []}
 
 
-def _loop(store: Store, tmp: Path, supervisor) -> DesignLoop:
-    import agentd.design_loop as dl
+def _loop(store: Store, tmp: Path, supervisor) -> SessionLoop:
+    import agentd.session_loop as dl
 
     _RecordingClient.calls = []
-    loop = DesignLoop(
+    loop = SessionLoop(
         store, _cfg(tmp), supervisor=supervisor, dispatch_turns=True, gateway_token="gw"
     )
     orig = dl.RunnerClient
@@ -248,7 +248,7 @@ def test_closed_late_review_does_not_observe_stall(tmp_path: Path) -> None:
     seen: list[str] = []
     fsm_calls: list[tuple[str, str]] = []
 
-    import agentd.design_loop as dl
+    import agentd.session_loop as dl
 
     orig_tr = dl.transition
 
@@ -257,7 +257,7 @@ def test_closed_late_review_does_not_observe_stall(tmp_path: Path) -> None:
         return orig_tr(state, kind)
 
     dl.transition = spy_tr  # type: ignore[misc]
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         _cfg(tmp_path),
         supervisor=_Supervisor(),
@@ -290,7 +290,7 @@ def test_escalate_on_closed_session_is_noop(tmp_path: Path) -> None:
     store = Store(tmp_path / "state.db")
     sk = _seed(store, state="CLOSED")
     posts: list = []
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         _cfg(tmp_path),
         supervisor=None,

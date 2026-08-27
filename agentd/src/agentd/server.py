@@ -77,17 +77,17 @@ def create_app(
             if notify is not None:
                 gov_kw["notify"] = notify
             state.governor = ResourceGovernor(store, config.root, **gov_kw)
-            # Design loop: session/turn orchestration (M3). Supervisor is
+            # Session loop: session/turn orchestration (M3). Supervisor is
             # optional at process start — attach when docker image is ready.
-            design_loop = None
+            session_loop = None
             sup = None
             try:
-                from agentd.design_loop import DesignLoop
                 from agentd.github_fetch import fetch_pull
+                from agentd.session_loop import SessionLoop
                 from agentd.supervisor import SessionSupervisor, image_present
 
                 sup = SessionSupervisor(store, config) if image_present() else None
-                design_loop = DesignLoop(
+                session_loop = SessionLoop(
                     store,
                     config,
                     sup,
@@ -95,9 +95,9 @@ def create_app(
                     fetch_pr=fetch_pull,
                 )
             except Exception:
-                log.exception("design_loop init failed; deferred deliveries stay parked")
+                log.exception("session_loop init failed; deferred deliveries stay parked")
             state.dispatcher = Dispatcher(
-                store, config, state.nudge, design_loop=design_loop
+                store, config, state.nudge, session_loop=session_loop
             )
             state.governor.start()
             state.dispatcher.start()
@@ -116,9 +116,9 @@ def create_app(
                     )
 
                 def _escalate(sk: str, reason: str, **kw: Any) -> None:
-                    if design_loop is None:
+                    if session_loop is None:
                         return
-                    design_loop._escalate(
+                    session_loop._escalate(
                         sk,
                         "system",
                         reason,
@@ -138,7 +138,7 @@ def create_app(
                     fetch_snapshot=_fetch,
                     escalate=_escalate,
                     notify_missed=(
-                        design_loop.report_missed if design_loop is not None else None
+                        session_loop.report_missed if session_loop is not None else None
                     ),
                     resume_max_age_s=config.resume_max_age_s,
                 )

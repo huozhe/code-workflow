@@ -11,7 +11,7 @@ from test_m4a_branch_protection_live import cleanup_m4a_probe
 
 from agentd.config import Config
 from agentd.db import Store
-from agentd.design_loop import DesignLoop
+from agentd.session_loop import SessionLoop
 from agentd.supervisor import SessionSupervisor
 from agentd.verify import verify_design_approval
 
@@ -84,16 +84,16 @@ def test_github_api_guard_spares_load_tokens(
         store.close()
 
 
-def test_github_api_guard_spares_design_loop_fallbacks(
+def test_github_api_guard_spares_session_loop_fallbacks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Acceptance 5: design_loop :1546–1547 and :632 consult both agent accounts."""
+    """Acceptance 5: session_loop :1546–1547 and :632 consult both agent accounts."""
     monkeypatch.delenv("AGENTD_SECRET_GATEWAY", raising=False)
     monkeypatch.delenv("AGENTD_SECRET_CLAUDE_BOT", raising=False)
     monkeypatch.setenv("AGENTD_SECRET_GROK_BOT", "pat-g")
     store = Store(tmp_path / "state.db")
     try:
-        loop = DesignLoop(
+        loop = SessionLoop(
             store,
             Config(
                 raw={

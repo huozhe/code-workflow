@@ -25,8 +25,8 @@ import pytest
 
 from agentd.config import Config
 from agentd.db import ARTIFACT_KINDS, Store
-from agentd.design_loop import DesignLoop
 from agentd.gc import GarbageCollector
+from agentd.session_loop import SessionLoop
 
 SESSION = "o/r#1"
 
@@ -41,7 +41,7 @@ def _cfg(tmp: Path) -> Config:
     )
 
 
-def _seeded(tmp: Path, *, state: str = "TEARDOWN") -> tuple[Store, DesignLoop]:
+def _seeded(tmp: Path, *, state: str = "TEARDOWN") -> tuple[Store, SessionLoop]:
     store = Store(tmp / "state.db")
     store.upsert_session(
         session_key=SESSION,
@@ -54,7 +54,7 @@ def _seeded(tmp: Path, *, state: str = "TEARDOWN") -> tuple[Store, DesignLoop]:
         created_at=1_000_000,
         updated_at=1_000_000,
     )
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         _cfg(tmp),
         post_comment=lambda **k: 1,
@@ -171,7 +171,7 @@ def test_notify_path_keeps_an_unknown_kind_and_the_turn_survives(
     tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Driven through the real `_on_runner_notify`, not a copy of it."""
-    import agentd.design_loop as dl
+    import agentd.session_loop as dl
 
     store, loop = _seeded(tmp_path, state="PLANNING")
     store.upsert_runner(
@@ -212,7 +212,7 @@ def test_teardown_leaves_an_unknown_row_open_and_reports_it(
         session_key=SESSION, role="architect", kind="log", ref=str(tmp_path / "gone.log")
     )
 
-    with caplog.at_level(logging.WARNING, logger="agentd.design_loop"):
+    with caplog.at_level(logging.WARNING, logger="agentd.session_loop"):
         loop._confirm_teardown_artifacts(SESSION, "o/r")
         loop._log_teardown_leaks(SESSION)
 

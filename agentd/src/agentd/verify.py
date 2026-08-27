@@ -212,7 +212,7 @@ def verify_feature_merge(
     3. ``mergeable_state == "clean"``
 
     Gateway verifies only — it does **not** merge (ADR-8). On success the
-    design loop emits ``merge_authorized`` so the **Developer** acts.
+    session loop emits ``merge_authorized`` so the **Developer** acts.
 
     Failures are classified (PR #54 B1 / #38 split, ADR-26, ADR-38):
 

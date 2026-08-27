@@ -7,8 +7,8 @@ from pathlib import Path
 
 from agentd.config import Config
 from agentd.db import Store
-from agentd.design_loop import DesignLoop
 from agentd.gitops import role_branch_name
+from agentd.session_loop import SessionLoop
 from agentd.verification import (
     CHECKBOX_CHECKED,
     CHECKBOX_UNCHECKED,
@@ -159,7 +159,7 @@ def test_feature_merged_writes_verification_block(tmp_path: Path) -> None:
         patches.append({"repo": repo, "issue_num": issue_num, "body": body})
         bodies[int(issue_num)] = body
 
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         cfg,
         supervisor=None,
@@ -249,7 +249,7 @@ def test_feature_merged_idempotent_when_block_unchanged(tmp_path: Path) -> None:
         patches.append(body)
         bodies[int(issue_num)] = body
 
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         cfg,
         supervisor=None,
