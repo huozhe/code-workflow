@@ -6,7 +6,7 @@
 | **Issue** | [#159](https://github.com/huozhe/code-workflow/issues/159) |
 | **Decision of record** | ADR-39 — [`../unified_design_spec.md`](../unified_design_spec.md) §16 (new), spec 1.39.0 |
 | **Baseline** | `main` @ `90ccc65` (spec 1.38.0). Every count and line number below is measured against that commit. |
-| **Touches** | `agentd/src/agentd/{design_loop,dispatcher,server,reconciler,fsm}.py` — note `dispatcher` and `server` carry **log messages**, not only imports (§2) · 37 files under `agentd/tests/` · `docs/design/unified_design_spec.md` (2 lines + 1 ADR) · `docs/ops/live-sign-offs.md` (1 note) |
+| **Touches** | `agentd/src/agentd/{design_loop,dispatcher,server,reconciler,fsm}.py` — note `dispatcher`, `server` and `verify` carry **log messages and prose**, not only imports (§2, §5″) · 37 files under `agentd/tests/` · `docs/design/unified_design_spec.md` (2 lines + 1 ADR) · `docs/ops/live-sign-offs.md` (1 note) |
 | **Produced by** | Architect turn `t-889ec5ce7199`, session #159 (§5.5.2 stamp) |
 
 ## 0. What this RFC is
@@ -27,6 +27,14 @@ Everything below was measured at `90ccc65`, not read from the issue. Three thing
   anyway** — for a reason that makes the rename *less* safe than the issue thought, not more (§3);
 - **the issue's evidence for the logger being risky to rename is wrong too**, and this one does change
   the decision: not one documented deploy-verification grep in this repository greps a logger name (§2).
+
+**Revised twice since the first draft, both times on the same defect, and it is worth stating plainly.**
+§2's original claim was scoped to the file being renamed; the Developer's review then showed §5 was
+scoped to the *identifier*. Both times the query could not reach the case, and both times the answer
+looked complete. The taxonomy is now four classes plus two boundaries — identifiers (§5), split
+constants (§5′), colloquial prose (§5″), and dated citations that live inside the sweep and so cannot be
+frozen (§5‴). Everything in §5″ and §5‴ came from the review; the corresponding acceptance items are
+(1″) and (2).
 
 ## 1. The issue's numbers, re-measured at `90ccc65`
 
@@ -180,9 +188,11 @@ options, because it produces a citation that is false against **both** commits a
   Present tense, load-bearing, and a reader is meant to go open it — **and it is already wrong.** At
   `90ccc65` that comment (`public_actions are claims (tool_use) — diagnostic, not a reset.`) is at
   **`:1119`**; `:1035` is a `RouteAction.DROP` condition. §5.5.2 was written against spec 1.36.0 and
-  the citation drifted 84 lines. Rewrite the path **and** the number, to `session_loop.py:1119`. A pure
-  rename shifts no lines, so that number is stable across this PR — the drift is pre-existing, not
-  introduced here.
+  the citation drifted 84 lines. Rewrite the path **and** the number. **Not to a flat `:1119`** — an
+  earlier draft said that, on the reasoning that "a pure rename shifts no lines". True of a pure rename;
+  this PR is not one, because decision (d) rewrites the module docstring in the same commit. The number
+  is `1119 + Δ` for (d)'s line delta, and acceptance (7) verifies it by content. The 84-line drift is
+  pre-existing; Δ is introduced here and is the only line shift in the PR.
 - `:1015` (§12.3) names *"a test suite constructing `DesignLoop` with a bare `Config()` (#121)"*. Present
   tense in a section about what GC may touch. Rewrite the identifier. It names no line.
 - Everything under **Revision history** and everything inside a **§16 ADR body** is left exactly as
@@ -233,6 +243,10 @@ the log messages at `:659`, `:669`, `:780`, `:3604`, `:3612`, `:3619`.
 exception is the two strings in §2 — `:174` and `:426` — which contain `design_loop` and are therefore
 already covered by that rule.
 
+**This bounds the *sweep*, not the *edit list*.** §5″ adds six prose sites that no identifier query
+reaches and that are edited by enumeration. "Never the bare word" and "never the bare phrase" both hold;
+what changes is that the enumeration, not the regex, is what makes them safe.
+
 The three test *filenames* split on the same line: `tests/test_design_loop.py` and
 `tests/test_stall_design_loop.py` are named for the module and are renamed with it;
 `tests/test_m3d_design_exit.py` is named for the **design-half exit criteria** (M3-D) and is not.
@@ -270,6 +284,71 @@ and wrong in the file the crash sink points at. Hence acceptance (1′).
 `tests/test_turn_resume.py:535`) and reads `self.design_loop` at `:72`, `:74`, `:75`. Six sites, all
 matched by the plain name, and a missed keyword breaks loudly at the call.
 
+## 5″. The colloquial name — where `design loop` means the module, and where it means the protocol
+
+**Developer finding on PR #227, and it is the same shape §2 had to correct: a query scoped to
+`design_loop` / `DesignLoop` whose answer was then treated as the set of current-tense names.** It is
+not. The module is also referred to in prose, with a hyphen or a space, and no identifier sweep reaches
+any of it.
+
+The complete set in `src`/`tests`, matching `design[-_ ]?loop` case-insensitively and subtracting the
+identifier hits — **six** lines:
+
+| Site | Text | Status |
+|---|---|---|
+| `design_loop.py:1` | `Design-loop orchestration — … (M3).` (module docstring) | Already bound by decision **(d)** |
+| `dispatcher.py:1` | `Dispatcher — intake gate + design-loop drain (M1/M3).` | **New edit** |
+| `dispatcher.py:24` | `handed to a sessions row (M3 design loop). See §15.1.` | **New edit** |
+| `server.py:80` | `# Design loop: session/turn orchestration (M3). Supervisor is` | **New edit** |
+| `verify.py:215` | `design loop emits ``merge_authorized`` so the **Developer** acts.` | **New edit** |
+| `tests/test_design_loop.py:1` | `Design loop: deferred → session row + route without docker turns.` | **New edit** (file renames too) |
+
+**`verify.py:215` is the load-bearing one and it is worth reading in place.** It is the docstring of
+`verify_feature_merge` — headed *"§8.4 Feature PR merge authorization (M4-2)"*, the **code half** — and
+it tells the reader that *"the design loop emits `merge_authorized`"*. That is not a stale label; it is
+#159's defect stated as documentation, in the module a reviewer opens to understand merge
+authorization. `server.py:80` is the second worst: after a literal application of this RFC it would
+introduce the lifecycle owner as *"Design loop: session/turn orchestration"* **five lines above**
+`from agentd.session_loop import SessionLoop` (`server.py:80` and `:85`), in the same block.
+
+**The boundary is not a curated list, it is a measured rule.** Applying the same query to `docs/`,
+`README.md` and `CLAUDE.md` returns **five** lines, and every one of them is the **protocol** — the M3
+milestone rows (`unified_design_spec.md:2832`, `proposals/claude_design_spec.md:881`), §-body M3
+language (`:242`), the standing-loop reference in `rfcs/57-adr-36-…:223`, and
+`live-sign-offs.md:51`'s *"the ordinary design loop yields it whenever a Feature PR is reviewed"*.
+
+> **In `src` and `tests` the phrase always names the module (6/6). In `docs` it always names the
+> protocol (5/5).** That is the binding; the enumerated table is its instance, not its definition.
+
+**Do not widen the sweep to the bare phrase `design loop`.** The rule above is exactly why the
+enumeration is safe and a regex is not: an implementer who greps `design loop` across the repo and edits
+what it finds renames the M3 milestone and rewrites a captured observation in `live-sign-offs.md` —
+§4's falsification class, reached by a different route.
+
+## 5‴. A fifth record class: dated citations that live inside the sweep
+
+§4 splits references into code, current-tense prose, and dated record, and freezes the third. **Two
+references are both at once**, and the taxonomy as written has no cell for them — Developer finding:
+
+```
+tests/test_adr30_author_pr_events.py:209   Acceptance (4): design_loop.py:74–79 — standalone inline comment wake.
+tests/test_adr36_github_api_guard.py:90    Acceptance 5: design_loop :1546–1547 and :632 consult both agent accounts.
+```
+
+They are ADR-30 and ADR-36 **acceptance labels**, dated against those ADRs' baselines exactly like the
+55 spec citations §4 freezes — and both are already stale at `90ccc65`: `:74–79` is now a comment block
+about review-webhook *parts*, and `:632` / `:1546–1547` are now `event=event,`, `pr_num: int,` and
+`delivery_id: str,` — nothing to do with the `get_password("claude-bot")` fallbacks ADR-36 cited.
+
+They cannot be frozen, because they sit inside `tests/` and acceptance (1) requires zero matches there.
+
+**Binding: rewrite the path, never the number — and this is the one place in the RFC where new-path /
+old-line is correct rather than "the worst of the three options" (§4).** In the spec, freezing keeps
+path and number consistent against a stated baseline. Here (1) forces the path, so consistency is not
+available, and the choice is between a citation that is honestly stale — matching the ADR it labels —
+and one silently re-measured to a line whose meaning nobody checked. Name both in the Feature PR body
+so the reviewer does not read the stale numbers as a miss.
+
 ## 6. Decisions
 
 **(a) `design_loop.py` → `session_loop.py`.** As the issue proposes. `orchestrator.py` and `lifecycle.py`
@@ -293,6 +372,11 @@ is unambiguous where `supervisor` is not.
 preference. **All three** operator-facing messages naming the module rename with it — `design_loop.py:426`,
 `dispatcher.py:77`, `server.py:98` — not just the one in the renamed file.
 
+**(c′) The five colloquial-name sites in §5″ are renamed too.** `dispatcher.py:1`, `:24`, `server.py:80`,
+`verify.py:215`, and the `test_session_loop.py` module docstring. Prose, not identifiers; invisible to
+every other check in §7; and `verify.py:215` is the single site in the tree that states #159's defect as
+documentation.
+
 **(d) The module docstring is rewritten, and it is not cosmetic.** Today:
 
 ```python
@@ -305,6 +389,21 @@ not at all. Replace with a line that names all of it — design half, code half,
 delivery drain — and states that `_dispatch_turn` holds the tree's only production call to
 `Store.insert_turn`, since that is the fact §1 shows is the actual answer to "did this change cover
 every turn dispatch?"
+
+**It will be a multi-line docstring, and §4's "a pure rename shifts no lines" does not survive that —
+Developer finding, accepted with the remedy inverted.** The review asks that (d) be bound
+*line-count-neutral* so acceptance (7)'s `:1119` stays true. Measured: (d)'s content on one line is
+**199 characters**, against a longest existing line in this file of **100** and a conventional 88.
+`line-length` is unset and `E501` is not in the enabled `ruff` set, so a 199-character docstring would
+*pass lint* — which makes it worse, not better: the constraint would be invisible to CI and enforced
+only by this sentence. Forcing an unreadable line to protect a hard-coded citation is the tail wagging
+the dog.
+
+Bind it the other way. **(d) is a normal multi-line docstring**, and the load-bearing claim moves from
+the number to the arithmetic: this PR's only line-shifting edit is (d), its delta Δ is `new_docstring_lines − 1`
+and is known by inspection, so §4's `:1119` becomes **`1119 + Δ`**, verified by content (§7 item 7).
+That the RFC hard-coded `1119` at all was introduced in `86afa4d`, replacing a content-anchored check
+with a numeric one — the review caught the consequence, and the cause was mine.
 
 **(e) The three `caplog` strings and the two `monkeypatch` strings are updated in the same commit.** Not
 a follow-up. §3 shows CI cannot see three of the five.
@@ -328,11 +427,23 @@ careful person does by default and it is green when it is wrong.
 
 ## 7. Acceptance
 
-Ordered so that a failure at any step names the thing it falsifies. **(1′), (5) and (6) are the three a
-green suite does not cover**, and they are the reason this is not a one-line PR description.
+Ordered so that a failure at any step names the thing it falsifies. **(1″), (1′), (5) and (6) are the
+four a green suite does not cover**, and they are the reason this is not a one-line PR description.
 
 1. **`grep -rn 'design_loop\|DesignLoop' agentd/src agentd/tests` returns zero.** The blunt one. Run it
    as the last step, not the first.
+
+1″. **`grep -rniE 'design[-_ ]?loop' agentd/src agentd/tests` returns zero (§5″).** The identifier
+   sweep cannot see a hyphen or a space, and six lines in `src`/`tests` use one — verified at
+   `90ccc65`, and it must read zero after.
+
+   Then the mirror, and **it must exclude this RFC or it is meaningless**: run the same query over
+   `docs/`, `README.md` and `CLAUDE.md` with `docs/design/rfcs/159-adr-39-session-loop-rename.md`
+   filtered out, and confirm it still returns **five** — the two M3 milestone rows, spec `:242`,
+   `rfcs/57-adr-36-…:223`, and `live-sign-offs.md:51`. Those five are the protocol and must be
+   **unchanged**. Measured now: 5 excluding this file, 16 including it, so an unfiltered run reports 16,
+   looks like a finding, and is not one. A result *below* five means the sweep was widened to the bare
+   phrase and has renamed a milestone and rewritten a captured observation.
 
 1′. **The same, resolved through the parser, because (1) cannot see a split string (§5′).** Walk
    `ast.Constant` over every `.py` under `src/` and `tests/` and assert no constant's *value* contains
@@ -340,9 +451,13 @@ green suite does not cover**, and they are the reason this is not a one-line PR 
    zero. This is the check that survives a rewrap, and it is four lines of throwaway script — not a test
    to commit.
 2. **`pytest`, `lint`, `types` green**, and `git diff --stat` shows no `.py` hunk that is not a rename of
-   one of the two names. A semantic diff of `session_loop.py` against `design_loop.py` is the docstring,
-   the logger, and the message at `:426` — plus, in the two importers, the messages at `dispatcher.py:77`
-   and `server.py:98` and nothing else.
+   one of the two names **or an edit named in (c′) / §5‴**. Enumerated, because "nothing else" would
+   otherwise make the §5″ prose fixes a failed acceptance item (Developer finding): a semantic diff of
+   `session_loop.py` against `design_loop.py` is the docstring, the logger and the `:426` message; of
+   `dispatcher.py`, the `:77` message plus the `:1` and `:24` prose; of `server.py`, the `:98` message
+   plus the `:80` comment; of `verify.py`, the `:215` docstring line alone; of
+   `tests/test_adr30_author_pr_events.py:209` and `tests/test_adr36_github_api_guard.py:90`, the cited
+   **path only, with the line numbers left stale** (§5‴). Nothing else.
 3. **`grep -rn '\bdesign_pr\b\|_is_design_pr\|is_design_head_ref\|DESIGN_STATES' agentd/src` returns the
    same set of lines as at `90ccc65`.** §5's guard against a too-wide regex. This is the check that
    catches the sweep that passed CI because nothing tests a column name's spelling in prose.
@@ -358,8 +473,10 @@ green suite does not cover**, and they are the reason this is not a one-line PR 
    spec: `git diff` touches exactly two lines outside §16's new ADR — `:447` and `:1015` — and the
    Revision history's eleven old rows are unchanged while a 1.39.0 row is added. Fifty-three of the 55
    `design_loop`-bearing spec lines survive the PR untouched; count them.
-7. **`:447` now reads `session_loop.py:1119`, not `session_loop.py:1035`.** Open the file at that line
-   and confirm the `public_actions are claims (tool_use)` comment is on it. This is the one place a
+7. **`:447` cites `session_loop.py:1119 + Δ`, where Δ is (d)'s docstring line delta — and the check is
+   the content, not the number.** Open `session_loop.py` at whatever line §5.5.2 now cites and confirm
+   the `public_actions are claims (tool_use)` comment is on it. Δ is `0` only if (d)'s docstring stays
+   one line, which decision (d) says it will not. This is the one place a
    blind path-only sweep produces a citation that is false against *both* commits (§4), and the tree
    already contains the drift that makes it so — so this check has a live subject, not a hypothetical.
 8. **The rebase commit is named in the Feature PR body**, per the session brief.
