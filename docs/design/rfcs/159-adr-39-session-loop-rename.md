@@ -6,7 +6,7 @@
 | **Issue** | [#159](https://github.com/huozhe/code-workflow/issues/159) |
 | **Decision of record** | ADR-39 — [`../unified_design_spec.md`](../unified_design_spec.md) §16 (new), spec 1.39.0 |
 | **Baseline** | `main` @ `90ccc65` (spec 1.38.0). Every count and line number below is measured against that commit. |
-| **Touches** | `agentd/src/agentd/{design_loop,dispatcher,server,reconciler,fsm}.py` — note `dispatcher`, `server` and `verify` carry **log messages and prose**, not only imports (§2, §5″) · 37 files under `agentd/tests/` · `docs/design/unified_design_spec.md` (2 lines + 1 ADR) · `docs/ops/live-sign-offs.md` (1 note) |
+| **Touches** | `agentd/src/agentd/{design_loop,dispatcher,server,verify,reconciler,fsm}.py` — `dispatcher` and `server` carry **log messages *and* prose** (§2, §5″); `verify` carries **prose only** — one line, `:215`, and no log message; `reconciler` and `fsm` are import/comment only · 37 files under `agentd/tests/` · `docs/design/unified_design_spec.md` (2 lines + 1 ADR) · `docs/ops/live-sign-offs.md` (1 note) |
 | **Produced by** | Architect turn `t-889ec5ce7199`, session #159 (§5.5.2 stamp) |
 
 ## 0. What this RFC is
@@ -28,13 +28,25 @@ Everything below was measured at `90ccc65`, not read from the issue. Three thing
 - **the issue's evidence for the logger being risky to rename is wrong too**, and this one does change
   the decision: not one documented deploy-verification grep in this repository greps a logger name (§2).
 
-**Revised twice since the first draft, both times on the same defect, and it is worth stating plainly.**
-§2's original claim was scoped to the file being renamed; the Developer's review then showed §5 was
-scoped to the *identifier*. Both times the query could not reach the case, and both times the answer
-looked complete. The taxonomy is now four classes plus two boundaries — identifiers (§5), split
-constants (§5′), colloquial prose (§5″), and dated citations that live inside the sweep and so cannot be
-frozen (§5‴). Everything in §5″ and §5‴ came from the review; the corresponding acceptance items are
-(1″) and (2).
+**Revised three times since the first draft, and the three failures are not all the same one.** The
+first two were: §2's claim was scoped to the file being renamed, and §5 was scoped to the *identifier* —
+both queries that could not reach the case, and both answers that looked complete. The third, found on
+`280b666`, is a different and sharper shape: **acceptance (1″) prescribed one command and stated another
+command's answer.** The number `5` was real — I had measured it with a two-stage pipeline that subtracts
+identifier hits — but the item told the implementer to run `design[-_ ]?loop` over `docs/`, which returns
+**69**, of which 64 are the very citations §4 binds as frozen. An implementer following the item as
+written would see a large finding pointing straight at the frozen records, with no warning in the item
+that a result *above* five is possible at all.
+
+That is worth separating from the first two because a scoped query is caught by widening it, and this is
+not: the measurement was correct, the binding was correct, and the two were written down as if one
+implied the other. The remedy is that (1″) now carries **two commands with two regexes and two expected
+numbers**, each runnable verbatim, and reads its result in both directions.
+
+The taxonomy is now four classes plus two boundaries — identifiers (§5), split constants (§5′),
+colloquial prose (§5″), and dated citations that live inside the sweep and so cannot be frozen (§5‴).
+Everything in §5″ and §5‴ came from review, as did the correction to (1″) and the `verify.py` line in
+`Touches`.
 
 ## 1. The issue's numbers, re-measured at `90ccc65`
 
@@ -291,8 +303,10 @@ matched by the plain name, and a missed keyword breaks loudly at the call.
 not. The module is also referred to in prose, with a hyphen or a space, and no identifier sweep reaches
 any of it.
 
-The complete set in `src`/`tests`, matching `design[-_ ]?loop` case-insensitively and subtracting the
-identifier hits — **six** lines:
+The complete set in `src`/`tests` is **six** lines, matching `design[- ]loop` case-insensitively —
+hyphen or space, **not** the broad `design[-_ ]?loop`, which also matches `design_loop` and `DesignLoop`
+and so returns 321 here and 69 in `docs/` (see acceptance (1″), where the distinction is the whole
+item):
 
 | Site | Text | Status |
 |---|---|---|
@@ -311,8 +325,9 @@ authorization. `server.py:80` is the second worst: after a literal application o
 introduce the lifecycle owner as *"Design loop: session/turn orchestration"* **five lines above**
 `from agentd.session_loop import SessionLoop` (`server.py:80` and `:85`), in the same block.
 
-**The boundary is not a curated list, it is a measured rule.** Applying the same query to `docs/`,
-`README.md` and `CLAUDE.md` returns **five** lines, and every one of them is the **protocol** — the M3
+**The boundary is not a curated list, it is a measured rule.** The same narrow query over `docs/`,
+`README.md` and `CLAUDE.md`, with this RFC excluded, returns **five** lines, and every one is the
+**protocol** — the M3
 milestone rows (`unified_design_spec.md:2832`, `proposals/claude_design_spec.md:881`), §-body M3
 language (`:242`), the standing-loop reference in `rfcs/57-adr-36-…:223`, and
 `live-sign-offs.md:51`'s *"the ordinary design loop yields it whenever a Feature PR is reviewed"*.
@@ -433,17 +448,44 @@ four a green suite does not cover**, and they are the reason this is not a one-l
 1. **`grep -rn 'design_loop\|DesignLoop' agentd/src agentd/tests` returns zero.** The blunt one. Run it
    as the last step, not the first.
 
-1″. **`grep -rniE 'design[-_ ]?loop' agentd/src agentd/tests` returns zero (§5″).** The identifier
-   sweep cannot see a hyphen or a space, and six lines in `src`/`tests` use one — verified at
-   `90ccc65`, and it must read zero after.
+1″. **The colloquial sweep (§5″) — two commands, two different regexes, two expected numbers.** They
+   are not the same query and must not be written as if they were. Run each verbatim.
 
-   Then the mirror, and **it must exclude this RFC or it is meaningless**: run the same query over
-   `docs/`, `README.md` and `CLAUDE.md` with `docs/design/rfcs/159-adr-39-session-loop-rename.md`
-   filtered out, and confirm it still returns **five** — the two M3 milestone rows, spec `:242`,
-   `rfcs/57-adr-36-…:223`, and `live-sign-offs.md:51`. Those five are the protocol and must be
-   **unchanged**. Measured now: 5 excluding this file, 16 including it, so an unfiltered run reports 16,
-   looks like a finding, and is not one. A result *below* five means the sweep was widened to the bare
-   phrase and has renamed a milestone and rewritten a captured observation.
+   **(a) `src`/`tests`, a post-condition of zero:**
+
+   ```bash
+   grep -rniE 'design[-_ ]?loop' agentd/src agentd/tests        # want: 0
+   ```
+
+   The broad form is right *here* because after the rename both classes are gone. At `90ccc65` it
+   returns **321** — 315 identifier lines plus the 6 prose lines of §5″ — so this is a post-condition,
+   not a count to reconcile against six.
+
+   **(b) The docs mirror, a fixed point of five — and the regex is deliberately narrower:**
+
+   ```bash
+   grep -rniE 'design[- ]loop' docs README.md CLAUDE.md \
+        --exclude=159-adr-39-session-loop-rename.md            # want: 5, unchanged
+   ```
+
+   Hyphen **or space only**: no `_`, and no `?` making the separator optional. Both of those were in an
+   earlier draft of this item and both are wrong here, because they make the query match `design_loop`
+   and `DesignLoop` — which drags in **64** identifier citations that §4 has just bound as frozen
+   records. Measured at `90ccc65`, RFC excluded: the broad form returns **69**, the narrow form returns
+   **5**. *(Developer finding. The earlier draft told the implementer to run the broad query and expect
+   the narrow query's answer; the "5 / 16" pair it quoted came from a third procedure again — a
+   two-stage pipeline subtracting identifier hits — which is why its numbers matched neither. Under the
+   narrow query the true pair is 5 excluding this RFC and **18** including it.)*
+
+   **Excluding this RFC is load-bearing**, hence the `--exclude`: this file is itself full of the
+   phrase, and an unfiltered run returns 18 and looks like a finding.
+
+   **Read the result in both directions.** *Below* five: the sweep was widened to the bare phrase and
+   has renamed an M3 milestone or rewritten `live-sign-offs.md:51`'s captured observation — §4's
+   falsification class. *Above* five: the mirror was run with the broad regex, and the number it reports
+   is mostly the frozen records themselves. Neither reading is available from the count alone, so print
+   the five lines and check they are the two M3 milestone rows, spec `:242`, `rfcs/57-adr-36-…:223`, and
+   `live-sign-offs.md:51`.
 
 1′. **The same, resolved through the parser, because (1) cannot see a split string (§5′).** Walk
    `ast.Constant` over every `.py` under `src/` and `tests/` and assert no constant's *value* contains
