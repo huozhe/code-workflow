@@ -60,6 +60,15 @@ any count and points at §7 instead (the decision of record and the binding cann
 them carries the figure); §4's table is explicitly captioned as the `90ccc65` measurement and keeps the
 old pair; and every item that runs later verifies by **content** — the paragraph at `:448`, the sentence
 at `:1016`, the eight enumerated mirror rows — because a number checks nothing about the thing it names.
+
+**The rule had to be applied twice more before it held.** Reviewing `3ec5f37`, the Developer found ADR-39's
+decision **(g)** still carrying `:447`; auditing around it turned up the *"Rejected: the blanket sweep"*
+paragraph still carrying the spec census (`72` occurrences, `53 of 55` frozen) that this ADR falsifies as
+it lands. Both are now gone from the ADR entirely rather than corrected in place. **ADR-39 carries no
+figure that this change moves** — no line citations, no spec totals, no acceptance counts; it points at
+§4 for the census and §7 for the acceptance numbers, and keeps only measurements the rename leaves alone
+(the module's length, the identifier and logger counts, the 199-character docstring argument), each
+anchored to `90ccc65` where it appears.
 §4's and §5″'s tables remain the `90ccc65` measurement and are correct as such; (1″) and (6) are the two
 items that run later, and they say so.
 
