@@ -10,8 +10,8 @@ from pathlib import Path
 import pytest
 
 from agentd.db import Store
-from agentd.design_loop import _inflight_turn_ids
 from agentd.reconciler import RESUME_MAX_AGE_S, Reconciler
+from agentd.session_loop import _inflight_turn_ids
 
 _RUNNER_ROOT = Path(__file__).resolve().parents[1] / "docker" / "session-runner"
 if str(_RUNNER_ROOT) not in sys.path:
@@ -250,9 +250,9 @@ def test_inflight_spares_resuming_turn_past_resume_max_age(
 
 def test_resume_interrupted_turn_registers_inflight_id(tmp_path: Path) -> None:
     """ADR-28 (3): id is in the set during cli.call and finish_turn, gone after."""
-    import agentd.design_loop as dl
+    import agentd.session_loop as dl
     from agentd.config import Config
-    from agentd.design_loop import DesignLoop
+    from agentd.session_loop import SessionLoop
 
     store = Store(tmp_path / "state.db")
     sk = _sess(store, state="IMPLEMENTING")
@@ -293,7 +293,7 @@ def test_resume_interrupted_turn_registers_inflight_id(tmp_path: Path) -> None:
     orig = dl.RunnerClient
     dl.RunnerClient = FakeClient  # type: ignore[misc]
     try:
-        loop = DesignLoop(store, Config(), dispatch_turns=False, gateway_token="")
+        loop = SessionLoop(store, Config(), dispatch_turns=False, gateway_token="")
         loop.resume_interrupted_turn(
             next(t for t in store.list_resuming_turns())
         )
@@ -310,9 +310,9 @@ def test_resume_interrupted_turn_clears_inflight_id_on_error(
     tmp_path: Path,
 ) -> None:
     """ADR-28 (3): exception path discards the id."""
-    import agentd.design_loop as dl
+    import agentd.session_loop as dl
     from agentd.config import Config
-    from agentd.design_loop import DesignLoop
+    from agentd.session_loop import SessionLoop
 
     store = Store(tmp_path / "state.db")
     sk = _sess(store, state="IMPLEMENTING")
@@ -345,7 +345,7 @@ def test_resume_interrupted_turn_clears_inflight_id_on_error(
     orig = dl.RunnerClient
     dl.RunnerClient = FakeClient  # type: ignore[misc]
     try:
-        loop = DesignLoop(store, Config(), dispatch_turns=False, gateway_token="")
+        loop = SessionLoop(store, Config(), dispatch_turns=False, gateway_token="")
         with pytest.raises(RuntimeError, match="rpc down"):
             loop.resume_interrupted_turn(
                 next(t for t in store.list_resuming_turns())
@@ -386,7 +386,7 @@ def test_resume_fails_twice_then_retires(
     tmp_path: Path, allows_github_post: list
 ) -> None:
     from agentd.config import Config
-    from agentd.design_loop import DesignLoop
+    from agentd.session_loop import SessionLoop
 
     store = Store(tmp_path / "state.db")
     sk = _sess(store, state="IMPLEMENTING")
@@ -399,7 +399,7 @@ def test_resume_fails_twice_then_retires(
         now_fn=lambda: now,
         resume_max_age_s=RESUME_MAX_AGE_S,
     )
-    loop = DesignLoop(store, Config(), dispatch_turns=False, gateway_token="")
+    loop = SessionLoop(store, Config(), dispatch_turns=False, gateway_token="")
 
     def boom(_turn: dict) -> None:
         raise RuntimeError("rpc down")
@@ -441,7 +441,7 @@ def test_retire_notifies_session_resume(tmp_path: Path) -> None:
 
 def test_drain_skips_paused_session(tmp_path: Path) -> None:
     from agentd.config import Config
-    from agentd.design_loop import DesignLoop
+    from agentd.session_loop import SessionLoop
 
     store = Store(tmp_path / "state.db")
     sk = _sess(store, state="IMPLEMENTING")
@@ -456,7 +456,7 @@ def test_drain_skips_paused_session(tmp_path: Path) -> None:
     _turn(store, sk, started_at=now - 30)
     _rec(store, now=now)
     store.update_session_fields(sk, state="PAUSED_HUMAN")
-    loop = DesignLoop(store, Config(), dispatch_turns=False, gateway_token="")
+    loop = SessionLoop(store, Config(), dispatch_turns=False, gateway_token="")
     seen: list = []
     loop.resume_interrupted_turn = lambda t: seen.append(t)  # type: ignore[method-assign]
     n = loop.process_resuming_turns()
@@ -469,9 +469,9 @@ def test_drain_skips_paused_session(tmp_path: Path) -> None:
 
 
 def test_drain_runs_marked_resume(tmp_path: Path) -> None:
-    import agentd.design_loop as dl
+    import agentd.session_loop as dl
     from agentd.config import Config
-    from agentd.design_loop import DesignLoop
+    from agentd.session_loop import SessionLoop
 
     store = Store(tmp_path / "state.db")
     sk = _sess(store, state="IMPLEMENTING")
@@ -504,7 +504,7 @@ def test_drain_runs_marked_resume(tmp_path: Path) -> None:
     orig = dl.RunnerClient
     dl.RunnerClient = FakeClient
     try:
-        loop = DesignLoop(store, Config(), dispatch_turns=False, gateway_token="")
+        loop = SessionLoop(store, Config(), dispatch_turns=False, gateway_token="")
         n = loop.process_resuming_turns()
     finally:
         dl.RunnerClient = orig
@@ -532,16 +532,16 @@ def test_drain_once_runs_resuming_turns(tmp_path: Path) -> None:
         def process_deferred_batch(self, limit: int = 20) -> int:
             return 0
 
-    d = Dispatcher(store, Config(), threading.Event(), design_loop=_Loop())
+    d = Dispatcher(store, Config(), threading.Event(), session_loop=_Loop())
     assert d.drain_once() == 1
     assert seen == [1]
     store.close()
 
 
 def test_resume_takes_role_lock_and_reads_budget_fresh(tmp_path: Path) -> None:
-    import agentd.design_loop as dl
+    import agentd.session_loop as dl
     from agentd.config import Config
-    from agentd.design_loop import DesignLoop, _lock_for_project_role
+    from agentd.session_loop import SessionLoop, _lock_for_project_role
 
     store = Store(tmp_path / "state.db")
     sk = _sess(store, state="IMPLEMENTING")
@@ -577,7 +577,7 @@ def test_resume_takes_role_lock_and_reads_budget_fresh(tmp_path: Path) -> None:
     orig = dl.RunnerClient
     dl.RunnerClient = FakeClient
     try:
-        loop = DesignLoop(store, Config(), dispatch_turns=False, gateway_token="")
+        loop = SessionLoop(store, Config(), dispatch_turns=False, gateway_token="")
         loop.resume_interrupted_turn(
             next(t for t in store.list_resuming_turns())
         )
@@ -591,9 +591,9 @@ def test_resume_takes_role_lock_and_reads_budget_fresh(tmp_path: Path) -> None:
 def test_resume_timeout_sets_busy_until(tmp_path: Path) -> None:
     import time
 
-    import agentd.design_loop as dl
+    import agentd.session_loop as dl
     from agentd.config import Config
-    from agentd.design_loop import DesignLoop, _role_busy_until, _role_key
+    from agentd.session_loop import SessionLoop, _role_busy_until, _role_key
 
     store = Store(tmp_path / "state.db")
     sk = _sess(store, state="IMPLEMENTING")
@@ -623,7 +623,7 @@ def test_resume_timeout_sets_busy_until(tmp_path: Path) -> None:
     orig = dl.RunnerClient
     dl.RunnerClient = Boom
     try:
-        loop = DesignLoop(
+        loop = SessionLoop(
             store,
             Config(raw={"gateway": {"turn_deadline_s": 30}}),
             dispatch_turns=False,
@@ -647,7 +647,7 @@ def test_drain_busy_is_not_counted(tmp_path: Path) -> None:
     import time
 
     from agentd.config import Config
-    from agentd.design_loop import DesignLoop, _role_busy_until, _role_key
+    from agentd.session_loop import SessionLoop, _role_busy_until, _role_key
 
     store = Store(tmp_path / "state.db")
     sk = _sess(store, state="IMPLEMENTING")
@@ -664,7 +664,7 @@ def test_drain_busy_is_not_counted(tmp_path: Path) -> None:
     rkey = _role_key("huozhe/code-workflow", "developer")
     _role_busy_until[rkey] = time.time() + 60
     try:
-        loop = DesignLoop(store, Config(), dispatch_turns=False, gateway_token="")
+        loop = SessionLoop(store, Config(), dispatch_turns=False, gateway_token="")
         n = loop.process_resuming_turns()
     finally:
         _role_busy_until.clear()

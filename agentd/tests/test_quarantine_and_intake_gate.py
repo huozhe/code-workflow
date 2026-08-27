@@ -7,7 +7,7 @@ from pathlib import Path
 
 from agentd.config import Config
 from agentd.db import Store
-from agentd.design_loop import DesignLoop
+from agentd.session_loop import SessionLoop
 
 
 def _cfg(root: Path, **host: object) -> Config:
@@ -127,7 +127,7 @@ def test_deferred_backlog_creates_zero_sessions_without_intake_issues(
         def ensure_session(self, **kwargs):
             raise AssertionError(f"ensure_session must not run: {kwargs}")
 
-    loop = DesignLoop(store, cfg, supervisor=BoomSupervisor(), dispatch_turns=False)
+    loop = SessionLoop(store, cfg, supervisor=BoomSupervisor(), dispatch_turns=False)
     loop.process_deferred_batch(limit=50)
     assert store.list_sessions() == []
     # All deferred either dropped or still deferred (no session attach path)
@@ -180,7 +180,7 @@ def test_intake_passing_issues_may_create_session(tmp_path: Path) -> None:
         payload=body,
         status="deferred",
     )
-    loop = DesignLoop(store, cfg, supervisor=FakeSupervisor(), dispatch_turns=False)
+    loop = SessionLoop(store, cfg, supervisor=FakeSupervisor(), dispatch_turns=False)
     loop.process_deferred_batch()
     assert created == ["huozhe/code-workflow#99"]
     assert len(store.list_sessions()) == 1

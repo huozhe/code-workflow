@@ -8,12 +8,12 @@ from typing import Any
 
 import pytest
 
-import agentd.design_loop as design_loop_mod
+import agentd.session_loop as session_loop_mod
 from agentd.config import Config
 from agentd.db import Store
-from agentd.design_loop import DesignLoop
 from agentd.fsm import TERMINAL_STATES
 from agentd.gitops import role_branch_name
+from agentd.session_loop import SessionLoop
 
 _FIXTURE = (
     Path(__file__).resolve().parent / "fixtures" / "adr30_author_review.json"
@@ -22,9 +22,9 @@ _FIXTURE = (
 
 @pytest.fixture(autouse=True)
 def _clear_spent_prs() -> None:
-    design_loop_mod._spent_prs.clear()
+    session_loop_mod._spent_prs.clear()
     yield
-    design_loop_mod._spent_prs.clear()
+    session_loop_mod._spent_prs.clear()
 
 
 def _cfg(tmp: Path) -> Config:
@@ -93,11 +93,11 @@ def _insert(
     )
 
 
-def _loop(store: Store, tmp: Path, *, fetch_pr: Any | None = None) -> DesignLoop:
+def _loop(store: Store, tmp: Path, *, fetch_pr: Any | None = None) -> SessionLoop:
     kw: dict[str, Any] = {}
     if fetch_pr is not None:
         kw["fetch_pr"] = fetch_pr
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         _cfg(tmp),
         supervisor=object(),
@@ -206,7 +206,7 @@ def test_author_synchronize_still_routes_design_revised(tmp_path: Path) -> None:
 def test_counterpart_empty_body_commented_review_still_routes(
     tmp_path: Path,
 ) -> None:
-    """Acceptance (4): design_loop.py:74–79 — standalone inline comment wake.
+    """Acceptance (4): session_loop.py:74–79 — standalone inline comment wake.
 
     Counterpart-sent empty-body commented review must still route. A check that
     drops every empty-body COMMENTED review makes this path invisible.
@@ -309,7 +309,7 @@ def test_author_sent_verdict_routes_and_logs_warning(
         issue=170,
         payload=_wire_author_review(state="changes_requested", body="nits"),
     )
-    with caplog.at_level(logging.WARNING, logger="agentd.design_loop"):
+    with caplog.at_level(logging.WARNING, logger="agentd.session_loop"):
         loop.process_deferred_batch(limit=5)
     sess = store.get_session(sk)
     assert sess is not None

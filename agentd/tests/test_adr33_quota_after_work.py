@@ -15,12 +15,12 @@ from typing import Any
 
 import pytest
 
-import agentd.design_loop as design_loop_mod
+import agentd.session_loop as session_loop_mod
 from agentd.config import Config
 from agentd.db import Store
-from agentd.design_loop import DesignLoop
 from agentd.github_fetch import PrReviewThreadSnapshot
 from agentd.gitops import role_branch_name
+from agentd.session_loop import SessionLoop
 
 REPO = "huozhe/code-workflow"
 ISSUE = 169
@@ -30,9 +30,9 @@ LIMIT_COPY = "You've hit your session limit · resets 9:50am (UTC)"
 
 @pytest.fixture(autouse=True)
 def _clear_role_holds() -> None:
-    design_loop_mod._role_busy_until.clear()
+    session_loop_mod._role_busy_until.clear()
     yield
-    design_loop_mod._role_busy_until.clear()
+    session_loop_mod._role_busy_until.clear()
 
 
 def _cfg(tmp: Path) -> Config:
@@ -104,7 +104,7 @@ def _insert_review(store: Store, *, did: str) -> None:
     )
 
 
-def _loop(store: Store, tmp: Path, *, retry_after: float | None = None) -> DesignLoop:
+def _loop(store: Store, tmp: Path, *, retry_after: float | None = None) -> SessionLoop:
     """Loop whose dispatch refuses for quota, exactly as the runner now does.
 
     The stub also takes the role hold, which the real ``_dispatch_turn`` does at
@@ -122,7 +122,7 @@ def _loop(store: Store, tmp: Path, *, retry_after: float | None = None) -> Desig
             head_oid="deadbeef",
         )
 
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         _cfg(tmp),
         supervisor=object(),
@@ -138,8 +138,8 @@ def _loop(store: Store, tmp: Path, *, retry_after: float | None = None) -> Desig
     def _refuse(*, session_key: str, role: str, **kwargs: Any) -> dict[str, Any]:
         dispatched.append(role)
         until = retry_after if retry_after is not None else time.time() + 3600
-        design_loop_mod._hold_role_for_quota(
-            design_loop_mod._role_key(REPO, role),
+        session_loop_mod._hold_role_for_quota(
+            session_loop_mod._role_key(REPO, role),
             until,
             session_key=session_key,
             role=role,
@@ -224,9 +224,9 @@ def test_expired_hold_lets_the_delivery_through(tmp_path: Path) -> None:
     loop.process_deferred_batch(limit=5)
     assert len(loop.dispatched) == 1  # type: ignore[attr-defined]
 
-    key = design_loop_mod._role_key(REPO, "architect")
-    design_loop_mod._role_busy_until[key] = time.time() - 1.0
-    assert design_loop_mod._role_busy_until[key]  # present, merely expired
+    key = session_loop_mod._role_key(REPO, "architect")
+    session_loop_mod._role_busy_until[key] = time.time() - 1.0
+    assert session_loop_mod._role_busy_until[key]  # present, merely expired
 
     loop.process_deferred_batch(limit=5)
     assert len(loop.dispatched) == 2  # type: ignore[attr-defined]
@@ -250,7 +250,7 @@ def test_hold_short_circuits_dispatch_without_spawning(tmp_path: Path) -> None:
             self.calls.append("ensure_session")
 
     sup = _Supervisor()
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         _cfg(tmp_path),
         supervisor=sup,
@@ -259,8 +259,8 @@ def test_hold_short_circuits_dispatch_without_spawning(tmp_path: Path) -> None:
         gateway_token="gw",
         post_comment=lambda **k: 1,
     )
-    design_loop_mod._hold_role_for_quota(
-        design_loop_mod._role_key(REPO, "architect"),
+    session_loop_mod._hold_role_for_quota(
+        session_loop_mod._role_key(REPO, "architect"),
         time.time() + 3600,
         session_key=sk,
         role="architect",

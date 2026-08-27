@@ -7,8 +7,8 @@ import logging
 from pathlib import Path
 
 from agentd.db import Store, decompress_payload
-from agentd.design_loop import CLOSE_RECONCILE_PREFIX
 from agentd.reconciler import Reconciler
+from agentd.session_loop import CLOSE_RECONCILE_PREFIX
 
 
 def _sess(
@@ -420,8 +420,8 @@ def test_fetch_snapshot_includes_reviews() -> None:
 
 def test_synthesized_review_classifies_as_feature_approved(tmp_path: Path) -> None:
     from agentd.config import Config
-    from agentd.design_loop import DesignLoop
     from agentd.gitops import role_branch_name
+    from agentd.session_loop import SessionLoop
 
     store = Store(tmp_path / "state.db")
     sk = _sess(store, issue=32, state="CODE_REVIEW")
@@ -447,7 +447,7 @@ def test_synthesized_review_classifies_as_feature_approved(tmp_path: Path) -> No
     queued = [dict(r) for r in store.list_queued()]
     row = next(r for r in queued if r["delivery_id"] == "recon:PRR_appr")
     payload = json.loads(decompress_payload(row["payload"]))
-    loop = DesignLoop(store, Config(), dispatch_turns=False, gateway_token="")
+    loop = SessionLoop(store, Config(), dispatch_turns=False, gateway_token="")
     kind = loop._event_kind(
         row["event"],
         row["action"],
@@ -467,8 +467,8 @@ def test_synthesized_review_carries_the_pr_author(tmp_path: Path) -> None:
     review re-dispatched a turn to the counterpart — #173's symptom, reached
     through the reconciler rather than the webhook.
     """
-    from agentd.design_loop import _pr_author_login
     from agentd.gitops import role_branch_name
+    from agentd.session_loop import _pr_author_login
 
     store = Store(tmp_path / "state.db")
     sk = _sess(store, issue=32, state="CODE_REVIEW")

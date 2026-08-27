@@ -51,7 +51,7 @@ def transition(state: str, event_kind: str) -> Transition | None:
         return Transition("PAUSED_HUMAN", note="escalate.human")
 
     if k == "owner_reply" and s == "PAUSED_HUMAN":
-        # design_loop restores sessions.resume_state; PLANNING is fallback only.
+        # session_loop restores sessions.resume_state; PLANNING is fallback only.
         return Transition("PLANNING", note="resume from pause (fallback PLANNING)")
 
     # Owner close from any live state. Diagram draws AWAITING_VERIFICATION →

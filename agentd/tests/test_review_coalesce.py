@@ -7,9 +7,9 @@ from pathlib import Path
 
 from agentd.config import Config
 from agentd.db import Store
-from agentd.design_loop import DesignLoop
 from agentd.digest import build_digest
 from agentd.gitops import role_branch_name
+from agentd.session_loop import SessionLoop
 
 
 def _cfg(tmp: Path) -> Config:
@@ -86,7 +86,7 @@ def test_seven_inline_comments_plus_review_is_one_routed_turn(tmp_path: Path) ->
     design_ref = _design_ref(issue)
     head = "deadbeef"
 
-    loop = DesignLoop(store, cfg, supervisor=None, dispatch_turns=False)
+    loop = SessionLoop(store, cfg, supervisor=None, dispatch_turns=False)
 
     for i in range(7):
         _insert(
@@ -179,7 +179,7 @@ def test_review_part_without_session_still_not_stuck_deferred(tmp_path: Path) ->
     """No session → existing no-session drop; must not leave deferred forever."""
     store = Store(tmp_path / "state.db")
     cfg = _cfg(tmp_path)
-    loop = DesignLoop(store, cfg, supervisor=None, dispatch_turns=False)
+    loop = SessionLoop(store, cfg, supervisor=None, dispatch_turns=False)
     _insert(
         store,
         did="d-orphan-cmt",
@@ -212,7 +212,7 @@ def test_review_submitted_commented_still_routes_once(tmp_path: Path) -> None:
     issue, pr = 47, 48
     _seed_session(store, issue=issue, pr=pr)
     design_ref = _design_ref(issue)
-    loop = DesignLoop(store, cfg, supervisor=None, dispatch_turns=False)
+    loop = SessionLoop(store, cfg, supervisor=None, dispatch_turns=False)
 
     _insert(
         store,

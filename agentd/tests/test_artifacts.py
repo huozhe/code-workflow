@@ -120,7 +120,7 @@ def test_register_session_layout_artifacts_observes_worktrees(
 
 
 def test_runner_notify_artifact_register_persists(tmp_path: Path) -> None:
-    """Runner → gateway notification path via design_loop callback."""
+    """Runner → gateway notification path via session_loop callback."""
     store = Store(tmp_path / "state.db")
     cfg = Config(
         raw={
@@ -150,9 +150,9 @@ def test_runner_notify_artifact_register_persists(tmp_path: Path) -> None:
         tier="hot",
     )
 
-    from agentd.design_loop import DesignLoop
+    from agentd.session_loop import SessionLoop
 
-    loop = DesignLoop(store, cfg, supervisor=None, dispatch_turns=True)
+    loop = SessionLoop(store, cfg, supervisor=None, dispatch_turns=True)
 
     # Simulate the notification callback used inside _dispatch_turn
     def on_notify(method: str, params: dict) -> None:

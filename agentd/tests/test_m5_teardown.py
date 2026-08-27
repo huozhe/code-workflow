@@ -13,10 +13,10 @@ import pytest
 
 from agentd.config import Config
 from agentd.db import Store
-from agentd.design_loop import DesignLoop
 from agentd.fsm import SESSION_STATES, TERMINAL_STATES, transition
 from agentd.gitops import ensure_shared_clone, role_branch_name, shared_clone_path
 from agentd.refusals import CapacityRefusal
+from agentd.session_loop import SessionLoop
 from agentd.verification import (
     classify_at_close,
     render_verification_block,
@@ -155,7 +155,7 @@ def _loop(
     posts: list | None = None,
     live_body: str | None = None,
     live_state: str = "closed",
-) -> DesignLoop:
+) -> SessionLoop:
     def _post(**k):
         if posts is not None:
             posts.append(k)
@@ -167,7 +167,7 @@ def _loop(
             "state": live_state,
         }
 
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         _cfg(tmp),
         supervisor=supervisor,
@@ -178,7 +178,7 @@ def _loop(
         gateway_token="gw",
     )
     if client_factory is not None:
-        import agentd.design_loop as dl
+        import agentd.session_loop as dl
 
         loop._orig_client = dl.RunnerClient  # type: ignore[attr-defined]
         dl.RunnerClient = client_factory  # type: ignore[misc, assignment]
@@ -412,7 +412,7 @@ def test_owner_close_dispatches_developer_then_architect(tmp_path: Path) -> None
     try:
         loop.process_deferred_batch()
     finally:
-        import agentd.design_loop as dl
+        import agentd.session_loop as dl
 
         dl.RunnerClient = loop._orig_client  # type: ignore[attr-defined, misc]
 
@@ -449,7 +449,7 @@ def test_teardown_never_calls_session_teardown_rpc(tmp_path: Path) -> None:
     try:
         loop.process_deferred_batch()
     finally:
-        import agentd.design_loop as dl
+        import agentd.session_loop as dl
 
         dl.RunnerClient = loop._orig_client  # type: ignore[attr-defined, misc]
     assert all(m != "session.teardown" for m, _ in _RecordingClient.calls)
@@ -471,7 +471,7 @@ def test_teardown_turns_do_not_trip_silent_or_budget(tmp_path: Path) -> None:
     try:
         loop.process_deferred_batch()
     finally:
-        import agentd.design_loop as dl
+        import agentd.session_loop as dl
 
         dl.RunnerClient = loop._orig_client  # type: ignore[attr-defined, misc]
     sess = store.get_session(sk)
@@ -496,7 +496,7 @@ def test_redelivery_while_teardown_does_not_reclassify(tmp_path: Path) -> None:
     try:
         loop.process_deferred_batch()
     finally:
-        import agentd.design_loop as dl
+        import agentd.session_loop as dl
 
         dl.RunnerClient = loop._orig_client  # type: ignore[attr-defined, misc]
     sess = store.get_session(sk)
@@ -556,7 +556,7 @@ def test_removed_at_only_after_gateway_confirms_gone(tmp_path: Path, caplog) -> 
         try:
             loop.process_deferred_batch()
         finally:
-            import agentd.design_loop as dl
+            import agentd.session_loop as dl
 
             dl.RunnerClient = loop._orig_client  # type: ignore[attr-defined, misc]
     open_rows = store.list_artifacts(sk, open_only=True)
@@ -600,7 +600,7 @@ def test_gateway_marks_removed_when_path_gone(tmp_path: Path) -> None:
     try:
         loop.process_deferred_batch()
     finally:
-        import agentd.design_loop as dl
+        import agentd.session_loop as dl
 
         dl.RunnerClient = loop._orig_client  # type: ignore[attr-defined, misc]
     assert store.list_artifacts(sk, open_only=True) == []
@@ -662,7 +662,7 @@ def test_branch_marked_removed_only_when_git_list_empty(tmp_path: Path) -> None:
     try:
         loop.process_deferred_batch()
     finally:
-        import agentd.design_loop as dl
+        import agentd.session_loop as dl
 
         dl.RunnerClient = loop._orig_client  # type: ignore[attr-defined, misc]
     open_rows = store.list_artifacts(sk, open_only=True)
@@ -724,7 +724,7 @@ def test_no_runner_ensure_session_still_sends_teardown_state(tmp_path: Path) -> 
     try:
         loop.process_deferred_batch()
     finally:
-        import agentd.design_loop as dl
+        import agentd.session_loop as dl
 
         dl.RunnerClient = loop._orig_client  # type: ignore[attr-defined, misc]
     assert sup.calls == 1
@@ -768,7 +768,7 @@ def test_empty_scratch_directory_is_confirmed_removed(tmp_path: Path) -> None:
     try:
         loop.process_deferred_batch()
     finally:
-        import agentd.design_loop as dl
+        import agentd.session_loop as dl
 
         dl.RunnerClient = loop._orig_client  # type: ignore[attr-defined, misc]
     assert store.list_artifacts(sk, open_only=True) == []
@@ -792,7 +792,7 @@ def test_redelivery_retries_only_when_ledger_still_open(tmp_path: Path) -> None:
     try:
         loop.process_deferred_batch()
     finally:
-        import agentd.design_loop as dl
+        import agentd.session_loop as dl
 
         dl.RunnerClient = loop._orig_client  # type: ignore[attr-defined, misc]
     assert len([m for m, _ in _RecordingClient.calls if m == "turn.dispatch"]) == 2
@@ -829,7 +829,7 @@ def test_teardown_needs_human_does_not_pause(tmp_path: Path) -> None:
     try:
         loop.process_deferred_batch()
     finally:
-        import agentd.design_loop as dl
+        import agentd.session_loop as dl
 
         dl.RunnerClient = loop._orig_client  # type: ignore[attr-defined, misc]
     sess = store.get_session(sk)
@@ -866,7 +866,7 @@ def test_stale_runner_row_still_calls_ensure_session(tmp_path: Path) -> None:
     try:
         loop.process_deferred_batch()
     finally:
-        import agentd.design_loop as dl
+        import agentd.session_loop as dl
 
         dl.RunnerClient = loop._orig_client  # type: ignore[attr-defined, misc]
     assert sup.calls == 1
@@ -895,7 +895,7 @@ def test_failed_teardown_turn_leaves_delivery_deferred(tmp_path: Path) -> None:
     sk = _seed(store, tmp_path)
     _register_open(store, sk)
     _FailedClient.calls = []
-    import agentd.design_loop as dl
+    import agentd.session_loop as dl
 
     dl._delivery_attempts.clear()
     _insert_close(
@@ -928,7 +928,7 @@ def test_failed_teardown_exhausts_and_escalates(tmp_path: Path) -> None:
     _register_open(store, sk, kind="worktree", ref=str(wt))
     posts: list = []
     _FailedClient.calls = []
-    import agentd.design_loop as dl
+    import agentd.session_loop as dl
 
     dl._delivery_attempts.clear()
     _insert_close(
@@ -979,7 +979,7 @@ def test_teardown_capacity_refusal_uses_same_retry_bound(tmp_path: Path) -> None
     (tmp_path / "wt").mkdir()
     (tmp_path / "wt" / "f").write_text("x", encoding="utf-8")
     posts: list = []
-    import agentd.design_loop as dl
+    import agentd.session_loop as dl
 
     dl._delivery_attempts.clear()
     _insert_close(
@@ -1095,7 +1095,7 @@ def test_teardown_second_role_does_not_resurrect_branch(tmp_path: Path) -> None:
     try:
         loop.process_deferred_batch()
     finally:
-        import agentd.design_loop as dl
+        import agentd.session_loop as dl
 
         dl.RunnerClient = loop._orig_client  # type: ignore[attr-defined, misc]
 
@@ -1124,7 +1124,7 @@ def test_open_artifact_after_successful_turns_defers_across_passes(
     (wt / "f").write_text("x", encoding="utf-8")
     _register_open(store, sk, kind="worktree", ref=str(wt))
     _RecordingClient.calls = []
-    import agentd.design_loop as dl
+    import agentd.session_loop as dl
 
     dl._delivery_attempts.clear()
     _insert_close(
@@ -1159,7 +1159,7 @@ def test_open_artifact_exhausts_once_and_does_not_redispatch(
     _register_open(store, sk, kind="worktree", ref=str(wt))
     posts: list = []
     _RecordingClient.calls = []
-    import agentd.design_loop as dl
+    import agentd.session_loop as dl
 
     dl._delivery_attempts.clear()
     _insert_close(
@@ -1197,7 +1197,7 @@ def test_drained_ledger_archive_failure_increments_attempts(
     store = Store(tmp_path / "state.db")
     _seed(store, tmp_path, with_session_dir=False)
     posts: list = []
-    import agentd.design_loop as dl
+    import agentd.session_loop as dl
 
     dl._delivery_attempts.clear()
     _insert_close(
@@ -1251,7 +1251,7 @@ def test_teardown_role_busy_defers_without_archive(tmp_path: Path) -> None:
     sk = _seed(store, tmp_path, with_session_dir=True)
     _register_open(store, sk)
     _BusyClient.calls = []
-    import agentd.design_loop as dl
+    import agentd.session_loop as dl
 
     dl._delivery_attempts.clear()
     _insert_close(
@@ -1288,7 +1288,7 @@ def test_teardown_quota_exhausted_defers_without_archive(tmp_path: Path) -> None
     sk = _seed(store, tmp_path, with_session_dir=True)
     _register_open(store, sk)
     _QuotaClient.calls = []
-    import agentd.design_loop as dl
+    import agentd.session_loop as dl
 
     dl._delivery_attempts.clear()
     _insert_close(
@@ -1336,7 +1336,7 @@ class _TeardownSupervisor(_IntakeClobberSupervisor):
 
 
 def _drive_close(store: Store, tmp_path: Path, sup: object, did: str) -> str:
-    import agentd.design_loop as _dl
+    import agentd.session_loop as _dl
 
     # `_role_busy_until` is module-level and nothing clears it between tests, so
     # an earlier case in this file leaves developer busy for 1800s and the
@@ -1356,7 +1356,7 @@ def _drive_close(store: Store, tmp_path: Path, sup: object, did: str) -> str:
     try:
         loop.process_deferred_batch()
     finally:
-        import agentd.design_loop as dl
+        import agentd.session_loop as dl
 
         dl.RunnerClient = loop._orig_client  # type: ignore[attr-defined, misc]
     return sk
@@ -1381,7 +1381,7 @@ def test_a_failed_kill_does_not_block_the_close(
     strand the session for a kill that is already best-effort. It must warn."""
     store = Store(tmp_path / "state.db")
     sup = _TeardownSupervisor(store, failure="teardown could not kill held CLIs: grok")
-    with caplog.at_level(logging.WARNING, logger="agentd.design_loop"):
+    with caplog.at_level(logging.WARNING, logger="agentd.session_loop"):
         sk = _drive_close(store, tmp_path, sup, "d-teardown-failed")
 
     sess = store.get_session(sk)

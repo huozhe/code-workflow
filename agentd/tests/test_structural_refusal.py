@@ -7,8 +7,8 @@ from pathlib import Path
 
 from agentd.config import Config
 from agentd.db import SCHEMA_VERSION, Store
-from agentd.design_loop import DesignLoop
 from agentd.refusals import CapacityRefusal, StructuralRefusal
+from agentd.session_loop import SessionLoop
 from agentd.supervisor import assert_host_secrets_not_mounted
 
 
@@ -71,7 +71,7 @@ def test_capacity_refusal_leaves_deferred(tmp_path: Path) -> None:
         def ensure_session(self, **kwargs):
             raise CapacityRefusal("max_hot_containers=2 reached (hot=2)")
 
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         cfg,
         supervisor=CapSup(),  # type: ignore[arg-type]
@@ -109,7 +109,7 @@ def test_structural_refusal_escalates_once_and_blocks_project(tmp_path: Path) ->
         )
         return 555
 
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         cfg,
         supervisor=StructSup(),  # type: ignore[arg-type]
@@ -141,7 +141,7 @@ def test_structural_refusal_escalates_once_and_blocks_project(tmp_path: Path) ->
     assert row["status"] == "done"
 
     # Second deferred for same project: block short-circuits at supervisor...
-    # but design_loop only calls ensure_session when no session. New issue:
+    # but session_loop only calls ensure_session when no session. New issue:
     _deferred_issues(store, delivery_id="d-s2", issue_num=8)
     loop.process_deferred_batch()
     # ensure_session ran once more and raised; no second comment
@@ -259,7 +259,7 @@ def test_resume_clears_project_block(tmp_path: Path) -> None:
             # Still structural if owner did not fix — test success path: clear only.
             raise CapacityRefusal("max_hot_containers=1 reached")
 
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         cfg,
         supervisor=NoRunner(),  # type: ignore[arg-type]

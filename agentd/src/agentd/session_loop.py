@@ -1,4 +1,8 @@
-"""Design-loop orchestration — deferred deliveries → sessions → turns (M3)."""
+"""Session-loop orchestration — design half, code half, teardown, escalation, delivery drain.
+
+``_dispatch_turn`` holds the tree's only production call to ``Store.insert_turn``.
+SessionLoop owns the FSM and turns; SessionSupervisor owns containers and runners.
+"""
 
 from __future__ import annotations
 
@@ -171,7 +175,7 @@ _OBSERVED_PROGRESS_KINDS = frozenset(
     }
 )
 
-log = logging.getLogger("agentd.design_loop")
+log = logging.getLogger("agentd.session_loop")
 
 # Serialize turns per (project, role) — one CLI conversation per role (#20).
 _role_locks: dict[str, threading.Lock] = {}
@@ -342,7 +346,7 @@ def _payload_head_sha(data: dict[str, Any]) -> str | None:
     return sha or None
 
 
-class DesignLoop:
+class SessionLoop:
     """Processes deferred deliveries into session turns for the design half."""
 
     def __init__(
@@ -423,7 +427,7 @@ class DesignLoop:
                 self._process_one(row)
                 n += 1
             except Exception:
-                log.exception("design_loop failed delivery=%s", row["delivery_id"])
+                log.exception("session_loop failed delivery=%s", row["delivery_id"])
         return n
 
     def _process_one(self, row: sqlite3.Row) -> None:

@@ -8,7 +8,7 @@ from pathlib import Path
 
 from agentd.config import Config
 from agentd.db import Store
-from agentd.design_loop import DesignLoop
+from agentd.session_loop import SessionLoop
 from agentd.verification import (
     CHECKBOX_CHECKED,
     CHECKBOX_UNCHECKED,
@@ -166,7 +166,7 @@ def test_owner_tick_records_verified_at(tmp_path: Path) -> None:
         issue=58,
         sender="huozhe",
     )
-    DesignLoop(store, cfg, supervisor=None, dispatch_turns=False).process_deferred_batch()
+    SessionLoop(store, cfg, supervisor=None, dispatch_turns=False).process_deferred_batch()
     sess = store.get_session(sk)
     assert sess is not None
     assert sess["verified_at"] is not None
@@ -187,7 +187,7 @@ def test_owner_untick_clears_verified_at(tmp_path: Path) -> None:
         issue=58,
         sender="huozhe",
     )
-    DesignLoop(store, cfg, supervisor=None, dispatch_turns=False).process_deferred_batch()
+    SessionLoop(store, cfg, supervisor=None, dispatch_turns=False).process_deferred_batch()
     assert store.get_session(sk)["verified_at"] is None
     store.close()
 
@@ -206,7 +206,7 @@ def test_owner_deletes_checkbox_line_clears_verified_at(tmp_path: Path) -> None:
         issue=58,
         sender="huozhe",
     )
-    DesignLoop(store, cfg, supervisor=None, dispatch_turns=False).process_deferred_batch()
+    SessionLoop(store, cfg, supervisor=None, dispatch_turns=False).process_deferred_batch()
     assert store.get_session(sk)["verified_at"] is None
     store.close()
 
@@ -225,7 +225,7 @@ def test_owner_deletes_block_clears_verified_at(tmp_path: Path) -> None:
         issue=58,
         sender="huozhe",
     )
-    DesignLoop(store, cfg, supervisor=None, dispatch_turns=False).process_deferred_batch()
+    SessionLoop(store, cfg, supervisor=None, dispatch_turns=False).process_deferred_batch()
     assert store.get_session(sk)["verified_at"] is None
     store.close()
 
@@ -249,7 +249,7 @@ def test_owner_prose_edit_while_box_gone_keeps_verified_at(
         issue=58,
         sender="huozhe",
     )
-    DesignLoop(store, cfg, supervisor=None, dispatch_turns=False).process_deferred_batch()
+    SessionLoop(store, cfg, supervisor=None, dispatch_turns=False).process_deferred_batch()
     assert store.get_session(sk)["verified_at"] == stamped
     store.close()
 
@@ -271,7 +271,7 @@ def test_agent_tick_restores_and_warns(tmp_path: Path) -> None:
         comments.append({"body": body})
         return 1
 
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         cfg,
         supervisor=None,
@@ -317,7 +317,7 @@ def test_agent_untick_restores_checked_from_prev(tmp_path: Path) -> None:
     def fake_comment(*, repo, issue_num, body, token):
         return 1
 
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         cfg,
         supervisor=None,
@@ -360,7 +360,7 @@ def test_lost_owner_tick_is_not_reverted_by_agent_step_refinement(
 
     patches: list = []
     comments: list = []
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         cfg,
         supervisor=None,
@@ -411,7 +411,7 @@ def test_agent_deletes_block_restored_from_prev(tmp_path: Path) -> None:
         comments.append(body)
         return 1
 
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         cfg,
         supervisor=None,
@@ -449,7 +449,7 @@ def test_agent_refines_steps_no_patch_when_checkbox_ok(tmp_path: Path) -> None:
     patches: list = []
     comments: list = []
 
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         cfg,
         supervisor=None,
@@ -490,7 +490,7 @@ def test_agent_adds_preticked_block_where_none_existed(tmp_path: Path) -> None:
         comments.append(body)
         return 1
 
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         cfg,
         supervisor=None,
@@ -536,7 +536,7 @@ def test_agent_inserts_tick_into_block_without_line(tmp_path: Path) -> None:
     patches: list[str] = []
     comments: list = []
 
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         cfg,
         supervisor=None,
@@ -584,7 +584,7 @@ def test_agent_removes_unticked_line_restored(tmp_path: Path) -> None:
     patches: list[str] = []
     comments: list[str] = []
 
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         cfg,
         supervisor=None,
@@ -625,7 +625,7 @@ def test_agent_bare_tick_outside_sentinels_neutralized(tmp_path: Path) -> None:
     patches: list[str] = []
     comments: list[str] = []
 
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         cfg,
         supervisor=None,
@@ -674,7 +674,7 @@ def test_failed_patch_does_not_claim_restored(tmp_path: Path) -> None:
     def boom(**kw):
         raise RuntimeError("github down")
 
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         cfg,
         supervisor=None,
@@ -704,7 +704,7 @@ def test_missing_body_from_skips_restore(tmp_path: Path) -> None:
     _seed(store, verified_at=None)
     body = _body(checked=True)
     patches: list = []
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         cfg,
         supervisor=None,
@@ -732,7 +732,7 @@ def test_gateway_edit_ignored(tmp_path: Path) -> None:
     sk = _seed(store)
     body = _body(checked=True)
     patches: list = []
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         cfg,
         supervisor=None,
@@ -762,7 +762,7 @@ def test_owner_who_is_agent_not_recorded(tmp_path: Path) -> None:
     body = _body(checked=True)
     patches: list = []
     comments: list = []
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         cfg,
         supervisor=None,
@@ -805,7 +805,7 @@ def test_title_only_edit_noop(tmp_path: Path) -> None:
         issue=58,
         sender="huozhe",
     )
-    DesignLoop(store, cfg, supervisor=None, dispatch_turns=False).process_deferred_batch()
+    SessionLoop(store, cfg, supervisor=None, dispatch_turns=False).process_deferred_batch()
     assert store.get_session(sk)["verified_at"] is None
     store.close()
 
@@ -817,7 +817,7 @@ def test_agent_edit_outside_awaiting_no_restore(tmp_path: Path) -> None:
     prev = _body(checked=False)
     body = _body(checked=True)
     patches: list = []
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         cfg,
         supervisor=None,
@@ -862,7 +862,7 @@ def test_adr15_corrected_body_survives_stale_corrupting_delivery(
     patches: list = []
     fetches: list[int] = []
 
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         cfg,
         supervisor=None,
@@ -900,7 +900,7 @@ def test_adr15_owner_tick_in_window_skips_patch(tmp_path: Path) -> None:
     current = _body(checked=True)
     patches: list = []
 
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         cfg,
         supervisor=None,
@@ -941,7 +941,7 @@ def test_adr15_redelivery_patches_at_most_once(tmp_path: Path) -> None:
         patches.append(body)
         live["body"] = body
 
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         cfg,
         supervisor=None,
@@ -973,7 +973,7 @@ def test_adr15_collapsed_current_escalates_no_patch(tmp_path: Path) -> None:
     patches: list = []
     comments: list[str] = []
 
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         cfg,
         supervisor=None,
@@ -1015,7 +1015,7 @@ def test_agent_untick_without_verified_at_does_not_restore_up(
     patches: list = []
     comments: list = []
 
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         cfg,
         supervisor=None,
@@ -1066,7 +1066,7 @@ def test_agent_tick_then_untick_queued_does_not_restore_up(tmp_path: Path) -> No
         patches.append(body)
         live["body"] = body
 
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         cfg,
         supervisor=None,
@@ -1122,7 +1122,7 @@ def test_agent_tick_then_delete_line_queued_does_not_restore_up(
         patches.append(body)
         live["body"] = body
 
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         cfg,
         supervisor=None,
@@ -1181,7 +1181,7 @@ def test_agent_tick_then_delete_block_queued_does_not_restore_up(
         patches.append(body)
         live["body"] = body
 
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         cfg,
         supervisor=None,
@@ -1226,7 +1226,7 @@ def test_agent_deletes_ticked_line_with_verified_at_restores_up(
     body = prev.replace(CHECKBOX_CHECKED + "\n", "")
     patches: list[str] = []
 
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         cfg,
         supervisor=None,
@@ -1263,7 +1263,7 @@ def test_adr15_get_failure_skips_restore(tmp_path: Path) -> None:
     def boom(**_):
         raise RuntimeError("github down")
 
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         cfg,
         supervisor=None,

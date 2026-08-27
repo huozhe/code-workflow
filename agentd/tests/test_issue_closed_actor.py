@@ -7,7 +7,7 @@ from pathlib import Path
 
 from agentd.config import Config
 from agentd.db import Store
-from agentd.design_loop import DesignLoop
+from agentd.session_loop import SessionLoop
 
 
 def _cfg(tmp_path: Path) -> Config:
@@ -73,7 +73,7 @@ def test_agent_close_session_reopens_and_escalates(tmp_path: Path) -> None:
     def fake_reopen(*, repo, issue_num, token):
         reopens.append({"repo": repo, "issue_num": issue_num, "token": token})
 
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         cfg,
         supervisor=None,
@@ -137,7 +137,7 @@ def test_developer_close_also_escalates(tmp_path: Path) -> None:
     posts: list[str] = []
     reopens: list[str] = []
 
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         cfg,
         supervisor=None,
@@ -184,7 +184,7 @@ def test_owner_close_session_no_escalate_no_reopen(tmp_path: Path) -> None:
     posts: list[dict] = []
     reopens: list[dict] = []
 
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         cfg,
         supervisor=None,
@@ -226,7 +226,7 @@ def test_agent_close_non_session_issue_no_escalation(tmp_path: Path) -> None:
     posts: list[dict] = []
     reopens: list[dict] = []
 
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         cfg,
         supervisor=None,

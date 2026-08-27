@@ -1,4 +1,4 @@
-"""Dispatcher — intake gate + design-loop drain (M1/M3)."""
+"""Dispatcher — intake gate + session-loop drain (M1/M3)."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from agentd.db import Store, decompress_payload
 from agentd.intake import evaluate_intake
 
 if TYPE_CHECKING:
-    from agentd.design_loop import DesignLoop
+    from agentd.session_loop import SessionLoop
 
 log = logging.getLogger("agentd.dispatcher")
 
@@ -21,7 +21,7 @@ class Dispatcher:
     """Scan ``status='queued'``; pause when the disk breaker is open.
 
     Unhandled events become ``deferred`` (not ``routed``). ``routed`` means
-    handed to a sessions row (M3 design loop). See §15.1.
+    handed to a sessions row (M3 session loop). See §15.1.
     """
 
     def __init__(
@@ -31,13 +31,13 @@ class Dispatcher:
         nudge: threading.Event,
         *,
         idle_wait_s: float = 5.0,
-        design_loop: DesignLoop | None = None,
+        session_loop: SessionLoop | None = None,
     ) -> None:
         self.store = store
         self.config = config
         self.nudge = nudge
         self.idle_wait_s = idle_wait_s
-        self.design_loop = design_loop
+        self.session_loop = session_loop
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -69,12 +69,12 @@ class Dispatcher:
             self._handle(row)
             n += 1
         # M3: promote deferred deliveries into sessions / turns
-        if self.design_loop is not None and not self.store.is_disk_paused():
+        if self.session_loop is not None and not self.store.is_disk_paused():
             try:
-                n += self.design_loop.process_resuming_turns()
-                n += self.design_loop.process_deferred_batch(limit=20)
+                n += self.session_loop.process_resuming_turns()
+                n += self.session_loop.process_deferred_batch(limit=20)
             except Exception:
-                log.exception("design_loop batch failed")
+                log.exception("session_loop batch failed")
         return n
 
     def _loop(self) -> None:

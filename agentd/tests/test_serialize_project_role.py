@@ -8,7 +8,7 @@ from pathlib import Path
 
 from agentd.config import Config
 from agentd.db import Store
-from agentd.design_loop import DesignLoop, _lock_for_project_role
+from agentd.session_loop import SessionLoop, _lock_for_project_role
 
 
 def test_project_role_lock_is_shared() -> None:
@@ -88,12 +88,12 @@ def test_two_issues_same_role_serialize(tmp_path: Path) -> None:
                 order.append(f"end:{sk}")
             return {"status": "done", "summary": sk}
 
-    import agentd.design_loop as dl
+    import agentd.session_loop as dl
 
     orig = dl.RunnerClient
     dl.RunnerClient = FakeClient  # type: ignore[misc, assignment]
     try:
-        loop = DesignLoop(store, cfg, supervisor=None, dispatch_turns=True)
+        loop = SessionLoop(store, cfg, supervisor=None, dispatch_turns=True)
 
         def run(sk: str, issue: int) -> None:
             loop._dispatch_turn(

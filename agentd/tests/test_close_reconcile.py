@@ -9,10 +9,10 @@ from typing import ClassVar
 
 from agentd.config import Config
 from agentd.db import Store
-from agentd.design_loop import (
+from agentd.session_loop import (
     CLOSE_RECONCILE_GRACE_S,
     CLOSE_RECONCILE_PREFIX,
-    DesignLoop,
+    SessionLoop,
     _close_grace_warned,
 )
 from agentd.verification import (
@@ -226,7 +226,7 @@ def _loop(
     live_body: str | None = None,
     live_state: str = "closed",
     get_issue_fn=None,
-) -> DesignLoop:
+) -> SessionLoop:
     def _post(**k):
         if posts is not None:
             posts.append(k)
@@ -251,7 +251,7 @@ def _loop(
             "state": live_state,
         }
 
-    return DesignLoop(
+    return SessionLoop(
         store,
         _cfg(tmp),
         supervisor=object() if dispatch else None,
@@ -294,7 +294,7 @@ def test_grace_survives_attempt_counter_reset(tmp_path: Path) -> None:
     )
     _loop(store, tmp_path).process_deferred_batch()
     assert _status(store, "d-restart") == "deferred"
-    import agentd.design_loop as dl
+    import agentd.session_loop as dl
 
     dl._delivery_attempts.clear()
     _loop(store, tmp_path).process_deferred_batch()
@@ -383,7 +383,7 @@ def test_failed_read_skips_patch_still_escalates(tmp_path: Path) -> None:
     def boom(**_):
         raise RuntimeError("github down")
 
-    DesignLoop(
+    SessionLoop(
         store,
         _cfg(tmp_path),
         supervisor=None,
@@ -445,7 +445,7 @@ def test_owner_reopen_lifts_hold_no_dispatch(tmp_path: Path) -> None:
     )
     store.open_escalation(session_key=sk, role="system", reason="hold")
     _insert_reopen(store, did="d-reopen", sender="huozhe")
-    import agentd.design_loop as dl
+    import agentd.session_loop as dl
 
     _RecordingClient.calls = []
     orig = dl.RunnerClient
@@ -476,7 +476,7 @@ def test_non_owner_reopen_lifts_hold_done_not_deferred(tmp_path: Path) -> None:
     )
     store.open_escalation(session_key=sk, role="system", reason="hold")
     _insert_reopen(store, did="d-agent-reopen", sender="huozhegrok")
-    import agentd.design_loop as dl
+    import agentd.session_loop as dl
 
     _RecordingClient.calls = []
     orig = dl.RunnerClient
@@ -657,7 +657,7 @@ def test_mirror_fetch_fail_classifies_from_payload(tmp_path: Path) -> None:
     def boom(**_):
         raise RuntimeError("github down")
 
-    DesignLoop(
+    SessionLoop(
         store,
         _cfg(tmp_path),
         supervisor=None,

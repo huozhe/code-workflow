@@ -10,12 +10,12 @@ from typing import Any
 
 import pytest
 
-import agentd.design_loop as design_loop_mod
+import agentd.session_loop as session_loop_mod
 import agentd.verify as vmod
 from agentd.config import Config
 from agentd.db import SCHEMA_VERSION, Store
-from agentd.design_loop import DesignLoop
 from agentd.gitops import role_branch_name
+from agentd.session_loop import SessionLoop
 from agentd.verify import verify_design_approval, verify_feature_merge
 
 _REPO = "huozhe/code-workflow"
@@ -25,11 +25,11 @@ _OLD = "oldsha0000001"
 
 @pytest.fixture(autouse=True)
 def _clear() -> None:
-    design_loop_mod._spent_prs.clear()
-    design_loop_mod._merge_auth_attempts.clear()
+    session_loop_mod._spent_prs.clear()
+    session_loop_mod._merge_auth_attempts.clear()
     yield
-    design_loop_mod._spent_prs.clear()
-    design_loop_mod._merge_auth_attempts.clear()
+    session_loop_mod._spent_prs.clear()
+    session_loop_mod._merge_auth_attempts.clear()
 
 
 def _cfg(tmp: Path, *, required_checks: list[str] | None = None) -> Config:
@@ -289,7 +289,7 @@ class _Sup:
         return None
 
 
-def _loop(store: Store, tmp: Path, *, fake_get: Any) -> DesignLoop:
+def _loop(store: Store, tmp: Path, *, fake_get: Any) -> SessionLoop:
     real_feat = vmod.verify_feature_merge
     real_des = vmod.verify_design_approval
 
@@ -308,7 +308,7 @@ def _loop(store: Store, tmp: Path, *, fake_get: Any) -> DesignLoop:
     vmod.verify_feature_merge = patch_feat  # type: ignore[assignment]
     vmod.verify_design_approval = patch_des  # type: ignore[assignment]
     posts: list[str] = []
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         _cfg(tmp),
         supervisor=_Sup(),
@@ -332,7 +332,7 @@ def _loop(store: Store, tmp: Path, *, fake_get: Any) -> DesignLoop:
     return loop
 
 
-def _unpatch(loop: DesignLoop) -> None:
+def _unpatch(loop: SessionLoop) -> None:
     real_feat, real_des = loop._unpatch  # type: ignore[attr-defined]
     vmod.verify_feature_merge = real_feat
     vmod.verify_design_approval = real_des
@@ -498,7 +498,7 @@ def test_queued_row_on_paused_session_does_not_read_defer_count(
         ).encode(),
         status="queued",
     )
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         _cfg(tmp_path),
         supervisor=None,
@@ -543,7 +543,7 @@ def test_paused_defer_backs_off_and_is_skipped_in_between(tmp_path: Path) -> Non
         ).encode(),
         status="deferred",
     )
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         _cfg(tmp_path),
         supervisor=None,
@@ -653,7 +653,7 @@ def test_owner_reply_clears_clock(tmp_path: Path) -> None:
         ).encode(),
         status="deferred",
     )
-    loop = DesignLoop(
+    loop = SessionLoop(
         store,
         _cfg(tmp_path),
         supervisor=_Sup(),

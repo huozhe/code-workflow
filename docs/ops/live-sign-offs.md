@@ -168,6 +168,9 @@ hard to verify.
    above, so a pass line is not in the file the plist names as stderr. **The
    runner logs to neither** — it runs in the container, so #208 and #210 are read
    with `docker logs` / `docker exec`, not with `grep` over the gateway log.
+   From the merge of this Feature PR (2026-08-27), the lifecycle module logs as
+   `agentd.session_loop`; archives older than that carry `agentd.design_loop`.
+   The documented greps in this file key on message text and are unaffected.
 
 ### The four windows
 
