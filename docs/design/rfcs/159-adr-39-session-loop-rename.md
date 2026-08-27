@@ -6,7 +6,7 @@
 | **Issue** | [#159](https://github.com/huozhe/code-workflow/issues/159) |
 | **Decision of record** | ADR-39 — [`../unified_design_spec.md`](../unified_design_spec.md) §16 (new), spec 1.39.0 |
 | **Baseline** | `main` @ `90ccc65` (spec 1.38.0). Every count and line number below is measured against that commit. |
-| **Touches** | `agentd/src/agentd/{design_loop,dispatcher,server,verify,reconciler,fsm}.py` — `dispatcher` and `server` carry **log messages *and* prose** (§2, §5″); `verify` carries **prose only** — one line, `:215`, and no log message; `reconciler` and `fsm` are import/comment only · 37 files under `agentd/tests/` · `docs/design/unified_design_spec.md` (2 lines + 1 ADR) · `docs/ops/live-sign-offs.md` (1 note) |
+| **Touches** | **This PR:** `docs/design/unified_design_spec.md` (ADR-39 + §16 naming note + 1.39.0 row) · this RFC. **Implementation PR:** `agentd/src/agentd/{design_loop,dispatcher,server,verify,reconciler,fsm}.py` — `dispatcher` and `server` carry **log messages *and* prose** (§2, §5″); `verify` carries **prose only** — one line, `:215`, and no log message; `reconciler` and `fsm` are import/comment only · 37 files under `agentd/tests/` · `docs/design/unified_design_spec.md` (the 2 current-tense citations only — §5.5.2 `:447`, §12.3 `:1015`) · `docs/ops/live-sign-offs.md` (1 note) |
 | **Produced by** | Architect turn `t-889ec5ce7199`, session #159 (§5.5.2 stamp) |
 
 ## 0. What this RFC is
@@ -43,10 +43,19 @@ not: the measurement was correct, the binding was correct, and the two were writ
 implied the other. The remedy is that (1″) now carries **two commands with two regexes and two expected
 numbers**, each runnable verbatim, and reads its result in both directions.
 
-The taxonomy is now four classes plus two boundaries — identifiers (§5), split constants (§5′),
-colloquial prose (§5″), and dated citations that live inside the sweep and so cannot be frozen (§5‴).
-Everything in §5″ and §5‴ came from review, as did the correction to (1″) and the `verify.py` line in
-`Touches`.
+**A fourth instance of the same class, caught before push and worth recording as such.** Adding ADR-39
+to the spec in this PR moved two of the numbers acceptance items are stated against: the frozen-record
+count (55 → **64** spec lines) and the docs mirror's fixed point (5 → **8**, since ADR-39 and its
+revision row quote the phrase three times). Both items now name the base they run against — `main` after
+the Design PR merges, not `90ccc65` — because an acceptance item whose expected number was measured on a
+different tree is the defect this RFC has now hit three times from review and once from its own author.
+§4's and §5″'s tables remain the `90ccc65` measurement and are correct as such; (1″) and (6) are the two
+items that run later, and they say so.
+
+The taxonomy is four classes plus two boundaries — identifiers (§5), split constants (§5′), colloquial
+prose (§5″), and dated citations that live inside the sweep and so cannot be frozen (§5‴). Everything in
+§5″ and §5‴ came from review, as did the correction to (1″), the `verify.py` line in `Touches`, and
+(c′)'s promotion into the decision of record.
 
 ## 1. The issue's numbers, re-measured at `90ccc65`
 
@@ -436,9 +445,24 @@ deploy-verification rule that names a logger, mirror the sentence there — an a
 cannot see that file to check, and this RFC does not claim it has.
 
 **(g) Spec 1.39.0, ADR-39, plus the two rewrites and the pointer in §4.** ADR-39's body is short by
-construction and should stay short: the decision is (a)–(f), the alternatives are the issue's own two
-logger options, and the rejected-alternative worth recording is the blanket sweep — because it is what a
-careful person does by default and it is green when it is wrong.
+construction and should stay short: the decision is **(a)–(f) including (c′)**, the alternatives are the
+issue's own two logger options, and the rejected-alternative worth recording is the blanket sweep —
+because it is what a careful person does by default and it is green when it is wrong.
+
+**(c′) is in that list deliberately, and the review had to ask for it.** An earlier draft wrote the
+decision set as "(a)–(f)", which reads as a range and silently drops the primed member — and (c′) is the
+only decision that puts `verify.py:215` in the work at all. A decision of record that omits it leaves
+the one site where #159's defect is stated *as documentation* resting on §6 and §7 alone. Reviewer
+finding on the approving review; carried into ADR-39's body as its own bullet, not folded into (c).
+
+**Which PR each artifact lands in, since the RFC did not say and the two are not interchangeable.**
+ADR-39, the §16 naming note and the 1.39.0 revision row are **design artifacts and land in the Design
+PR** — the convention every prior binding RFC follows (RFC 57 shipped `unified_design_spec.md` and its
+RFC file in one commit, `8d28414`; RFC 169 likewise, `6b117e3`), and §8.3's reason for merging the
+Design PR at all is that the Feature PR's base must contain the approved design. The **two current-tense
+citation rewrites in §5.5.2 and §12.3 cannot**: `:447`'s new number is `1119 + Δ`, and Δ does not exist
+until the rename does. They land in the **implementation PR**, with §5.5.2 verified by content per
+acceptance (7).
 
 ## 7. Acceptance
 
@@ -461,31 +485,42 @@ four a green suite does not cover**, and they are the reason this is not a one-l
    returns **321** — 315 identifier lines plus the 6 prose lines of §5″ — so this is a post-condition,
    not a count to reconcile against six.
 
-   **(b) The docs mirror, a fixed point of five — and the regex is deliberately narrower:**
+   **(b) The docs mirror — a fixed point, and the regex is deliberately narrower:**
 
    ```bash
    grep -rniE 'design[- ]loop' docs README.md CLAUDE.md \
-        --exclude=159-adr-39-session-loop-rename.md            # want: 5, unchanged
+        --exclude=159-adr-39-session-loop-rename.md            # want: 8, unchanged
    ```
 
    Hyphen **or space only**: no `_`, and no `?` making the separator optional. Both of those were in an
    earlier draft of this item and both are wrong here, because they make the query match `design_loop`
    and `DesignLoop` — which drags in **64** identifier citations that §4 has just bound as frozen
-   records. Measured at `90ccc65`, RFC excluded: the broad form returns **69**, the narrow form returns
-   **5**. *(Developer finding. The earlier draft told the implementer to run the broad query and expect
-   the narrow query's answer; the "5 / 16" pair it quoted came from a third procedure again — a
-   two-stage pipeline subtracting identifier hits — which is why its numbers matched neither. Under the
-   narrow query the true pair is 5 excluding this RFC and **18** including it.)*
+   records. Measured at `90ccc65`, RFC excluded: the broad form returns **69**, the narrow form **5**.
+   *(Developer finding. The earlier draft told the implementer to run the broad query and expect the
+   narrow query's answer; the "5 / 16" pair it quoted came from a third procedure again — a two-stage
+   pipeline subtracting identifier hits — which is why its numbers matched neither.)*
 
-   **Excluding this RFC is load-bearing**, hence the `--exclude`: this file is itself full of the
-   phrase, and an unfiltered run returns 18 and looks like a finding.
+   **Why 8 and not 5, and this is the same base problem as item (6).** Five is the `90ccc65` figure. The
+   Design PR then adds ADR-39 and its revision row, which quote the phrase three times — spec `:21`
+   (revision row), `:2775` ((c′) quoting `verify.py:215`) and `:2785` (the boundary paragraph saying the
+   sweep must never match the bare phrase). None of the three is a protocol reference and none is a site
+   to edit. So against the base the implementer actually branches from, the fixed point is **8**:
 
-   **Read the result in both directions.** *Below* five: the sweep was widened to the bare phrase and
+   | Line | What it is |
+   |---|---|
+   | `unified_design_spec.md:2865` | M3 milestone row *(was `:2832` at `90ccc65`; ADR-39 shifted it)* |
+   | `unified_design_spec.md:243` | §11 M3 session-creation language *(was `:242`)* |
+   | `proposals/claude_design_spec.md:881` | M3 milestone row, superseded draft |
+   | `rfcs/57-adr-36-…:223` | the standing design loop — the protocol |
+   | `live-sign-offs.md:51` | *"the ordinary design loop yields it whenever a Feature PR is reviewed"* |
+   | `unified_design_spec.md:21`, `:2775`, `:2785` | ADR-39 and its revision row, describing this change |
+
+   **Read the result in both directions.** *Below* eight: the sweep was widened to the bare phrase and
    has renamed an M3 milestone or rewritten `live-sign-offs.md:51`'s captured observation — §4's
-   falsification class. *Above* five: the mirror was run with the broad regex, and the number it reports
-   is mostly the frozen records themselves. Neither reading is available from the count alone, so print
-   the five lines and check they are the two M3 milestone rows, spec `:242`, `rfcs/57-adr-36-…:223`, and
-   `live-sign-offs.md:51`.
+   falsification class. *Above* eight: the mirror was run with the broad regex, and the number it
+   reports is mostly the frozen records themselves. Neither reading is available from the count alone,
+   so **print the eight lines and check them against the table**, which is the only form of this check
+   that cannot go stale silently.
 
 1′. **The same, resolved through the parser, because (1) cannot see a split string (§5′).** Walk
    `ast.Constant` over every `.py` under `src/` and `tests/` and assert no constant's *value* contains
@@ -509,12 +544,23 @@ four a green suite does not cover**, and they are the reason this is not a one-l
    of the three strings to `"agentd.design_loop"` and run that single test: it must **pass**. That
    demonstrates the suite cannot see the logger name, which is why (e) was a binding rather than a
    suggestion. If it fails, §3 is wrong — say so in the review and keep the strings correct anyway.
-6. **The four frozen records are byte-identical.** `git diff origin/main -- docs/design/rfcs/
-   docs/ops/live-sign-offs.md` shows changes only in this RFC and only in item 4 of *Running the
-   exercise* — and in particular **`live-sign-offs.md:158`'s quoted log line is untouched**. Then, in the
-   spec: `git diff` touches exactly two lines outside §16's new ADR — `:447` and `:1015` — and the
-   Revision history's eleven old rows are unchanged while a 1.39.0 row is added. Fifty-three of the 55
-   `design_loop`-bearing spec lines survive the PR untouched; count them.
+6. **The four frozen records are byte-identical — and the base to diff against is `main` *after* this
+   Design PR merges, not `90ccc65`.** ADR-39, the §16 naming note and the 1.39.0 revision row land in
+   the Design PR (decision (g)), so by the time the implementation branches they are already history and
+   the Feature PR must not touch them either.
+
+   `git diff origin/main -- docs/design/rfcs/ docs/ops/live-sign-offs.md` shows changes only in item 4
+   of *Running the exercise* — and in particular **`live-sign-offs.md:158`'s quoted log line is
+   untouched**; this RFC itself should not change in the Feature PR at all. Then, in the spec:
+   **`git diff origin/main -- docs/design/unified_design_spec.md` touches exactly two lines, `:447` and
+   `:1015`.** Not "two lines outside §16" — §16 is finished by then.
+
+   Counted: the spec carries **64** `design_loop`-bearing lines once the Design PR is in (42 in older
+   §16 ADR bodies, 12 revision rows, 8 in ADR-39 itself, 2 current-tense). **62 of the 64 survive the
+   Feature PR untouched.** Count them; a third changed line is a sweep that reached a frozen record.
+   *(These numbers replace the 53-of-55 pair an earlier draft carried, which was measured at `90ccc65`
+   — before this PR added nine lines of its own. §4's table is still the `90ccc65` measurement and is
+   correct as such; this item is the only one that runs against the later base, and it says so.)*
 7. **`:447` cites `session_loop.py:1119 + Δ`, where Δ is (d)'s docstring line delta — and the check is
    the content, not the number.** Open `session_loop.py` at whatever line §5.5.2 now cites and confirm
    the `public_actions are claims (tool_use)` comment is on it. Δ is `0` only if (d)'s docstring stays
