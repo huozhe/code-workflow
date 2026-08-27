@@ -6,7 +6,7 @@
 | **Issue** | [#159](https://github.com/huozhe/code-workflow/issues/159) |
 | **Decision of record** | ADR-39 — [`../unified_design_spec.md`](../unified_design_spec.md) §16 (new), spec 1.39.0 |
 | **Baseline** | `main` @ `90ccc65` (spec 1.38.0). Every count and line number below is measured against that commit. |
-| **Touches** | **This PR:** `docs/design/unified_design_spec.md` (ADR-39 + §16 naming note + 1.39.0 row) · this RFC. **Implementation PR:** `agentd/src/agentd/{design_loop,dispatcher,server,verify,reconciler,fsm}.py` — `dispatcher` and `server` carry **log messages *and* prose** (§2, §5″); `verify` carries **prose only** — one line, `:215`, and no log message; `reconciler` and `fsm` are import/comment only · 37 files under `agentd/tests/` · `docs/design/unified_design_spec.md` (the 2 current-tense citations only — §5.5.2 `:447`, §12.3 `:1015`) · `docs/ops/live-sign-offs.md` (1 note) |
+| **Touches** | **This PR:** `docs/design/unified_design_spec.md` (ADR-39 + §16 naming note + 1.39.0 row) · this RFC. **Implementation PR:** `agentd/src/agentd/{design_loop,dispatcher,server,verify,reconciler,fsm}.py` — `dispatcher` and `server` carry **log messages *and* prose** (§2, §5″); `verify` carries **prose only** — one line, `:215`, and no log message; `reconciler` and `fsm` are import/comment only · 37 files under `agentd/tests/` · `docs/design/unified_design_spec.md` (the 2 current-tense citations only — §5.5.2 **`:448`**, §12.3 **`:1016`** *on the post-merge base; `:447`/`:1015` at `90ccc65`*) · `docs/ops/live-sign-offs.md` (1 note) |
 | **Produced by** | Architect turn `t-889ec5ce7199`, session #159 (§5.5.2 stamp) |
 
 ## 0. What this RFC is
@@ -43,12 +43,23 @@ not: the measurement was correct, the binding was correct, and the two were writ
 implied the other. The remedy is that (1″) now carries **two commands with two regexes and two expected
 numbers**, each runnable verbatim, and reads its result in both directions.
 
-**A fourth instance of the same class, caught before push and worth recording as such.** Adding ADR-39
-to the spec in this PR moved two of the numbers acceptance items are stated against: the frozen-record
-count (55 → **64** spec lines) and the docs mirror's fixed point (5 → **8**, since ADR-39 and its
-revision row quote the phrase three times). Both items now name the base they run against — `main` after
-the Design PR merges, not `90ccc65` — because an acceptance item whose expected number was measured on a
-different tree is the defect this RFC has now hit three times from review and once from its own author.
+**The same class four times, and the fourth is the instructive one.** Adding ADR-39 to the spec moved
+several numbers the acceptance items are stated against. I caught two of them before pushing — the
+frozen-record count (55 → **64** spec lines) and the docs mirror's fixed point (5 → **8**) — rewrote (6)
+and (1″) to name the base they run against, said so in the commit message, **and in that same commit
+left `:447` / `:1015` standing in (6), (7) and `Touches`, and left ADR-39's own Acceptance paragraph
+publishing the superseded `→ 5`.** The 1.39.0 revision row shifts every spec line below it by one, so
+the correct pair is **`:448` / `:1016`**; on the post-merge base `:447` is a blank line. Both were the
+Developer's finding on `770fab4`.
+
+That is worth more than the fix. Knowing the failure mode, naming it in prose, and rewriting two items to
+prevent it did **not** stop me from committing two more instances of it in the same breath — because the
+knowledge was applied where I was looking and the remaining copies were somewhere else. The structural
+remedy, not the vigilance one: **each number now lives in exactly one place.** ADR-39 no longer restates
+any count and points at §7 instead (the decision of record and the binding cannot drift if only one of
+them carries the figure); §4's table is explicitly captioned as the `90ccc65` measurement and keeps the
+old pair; and every item that runs later verifies by **content** — the paragraph at `:448`, the sentence
+at `:1016`, the eight enumerated mirror rows — because a number checks nothing about the thing it names.
 §4's and §5″'s tables remain the `90ccc65` measurement and are correct as such; (1″) and (6) are the two
 items that run later, and they say so.
 
@@ -196,6 +207,11 @@ each to its enclosing heading inverts the task rather than multiplying it eightf
 | **ADR-14, 23, 26, 27, 28, 29, 30, 31, 32, 34, 36, 37, 38** (§16 bodies) | 42 | 51 | Dated record |
 | **§5.5.2** `:447` | 1 | 1 | Current-tense normative |
 | **§12.3** `:1015` | 1 | 1 | Current-tense normative |
+
+*Line numbers in this table are `90ccc65`, this RFC's stated baseline, and stay that way. The Design PR
+inserts the 1.39.0 revision row, which moves everything below it by one: on the base the implementation
+branches from, these two are **`:448`** and **`:1016`**. Acceptance (6), (7) and `Touches` use the later
+pair, because they are the items that run later — see the note in §0.*
 
 Forty-nine of the 72 are line-numbered citations of the form `design_loop.py:NNN`. Those line numbers are
 already wrong — the file has grown 461 lines since most of them were written — and they are wrong in the
@@ -460,7 +476,7 @@ ADR-39, the §16 naming note and the 1.39.0 revision row are **design artifacts 
 PR** — the convention every prior binding RFC follows (RFC 57 shipped `unified_design_spec.md` and its
 RFC file in one commit, `8d28414`; RFC 169 likewise, `6b117e3`), and §8.3's reason for merging the
 Design PR at all is that the Feature PR's base must contain the approved design. The **two current-tense
-citation rewrites in §5.5.2 and §12.3 cannot**: `:447`'s new number is `1119 + Δ`, and Δ does not exist
+citation rewrites in §5.5.2 and §12.3 cannot**: §5.5.2's new number is `1119 + Δ`, and Δ does not exist
 until the rename does. They land in the **implementation PR**, with §5.5.2 verified by content per
 acceptance (7).
 
@@ -552,8 +568,13 @@ four a green suite does not cover**, and they are the reason this is not a one-l
    `git diff origin/main -- docs/design/rfcs/ docs/ops/live-sign-offs.md` shows changes only in item 4
    of *Running the exercise* — and in particular **`live-sign-offs.md:158`'s quoted log line is
    untouched**; this RFC itself should not change in the Feature PR at all. Then, in the spec:
-   **`git diff origin/main -- docs/design/unified_design_spec.md` touches exactly two lines, `:447` and
-   `:1015`.** Not "two lines outside §16" — §16 is finished by then.
+   **`git diff origin/main -- docs/design/unified_design_spec.md` touches exactly two lines, `:448` and
+   `:1016`.** Not "two lines outside §16" — §16 is finished by then. **Not `:447`/`:1015`** — those are
+   the `90ccc65` numbers, and on the post-merge base `:447` is a blank line. The 1.39.0 revision row this
+   Design PR inserts shifts everything below it by one. *(Developer finding: (6) had just been rewritten
+   to name its base and then quoted numbers measured on the other one.)* Verify by content, not by
+   number: `:448` is the `turns.public_actions` / `design_loop.py:1035` paragraph, `:1016` is the
+   `DesignLoop` with a bare `Config()` sentence.
 
    Counted: the spec carries **64** `design_loop`-bearing lines once the Design PR is in (42 in older
    §16 ADR bodies, 12 revision rows, 8 in ADR-39 itself, 2 current-tense). **62 of the 64 survive the
@@ -561,7 +582,8 @@ four a green suite does not cover**, and they are the reason this is not a one-l
    *(These numbers replace the 53-of-55 pair an earlier draft carried, which was measured at `90ccc65`
    — before this PR added nine lines of its own. §4's table is still the `90ccc65` measurement and is
    correct as such; this item is the only one that runs against the later base, and it says so.)*
-7. **`:447` cites `session_loop.py:1119 + Δ`, where Δ is (d)'s docstring line delta — and the check is
+7. **§5.5.2 — at `:448` on the post-merge base, `:447` at `90ccc65` — cites `session_loop.py:1119 + Δ`,
+   where Δ is (d)'s docstring line delta, and the check is
    the content, not the number.** Open `session_loop.py` at whatever line §5.5.2 now cites and confirm
    the `public_actions are claims (tool_use)` comment is on it. Δ is `0` only if (d)'s docstring stays
    one line, which decision (d) says it will not. This is the one place a
