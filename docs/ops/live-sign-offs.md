@@ -190,8 +190,8 @@ C needs the session idle and D is terminal, so **the order is A → B → C → 
 last. D no longer discharges anything: the close is how the session ends, not how #172
 is observed — see *Why the descendant clause is not a live observation*.
 
-**Window A.** Sample the zombie count once per turn; the acceptance is *flat*, not
-*small*:
+**Window A.** Sample the zombie count **while a turn is running**, at least twice,
+and the acceptance is *flat*, not *small*:
 
 ```bash
 docker exec agentd-huozhe-code-workflow sh -c \
@@ -201,6 +201,16 @@ docker exec agentd-huozhe-code-workflow sh -c \
 Check that probe against its own case before trusting a `0` — in
 `session-runner:1.4.0` a forked orphan makes it report `1` with `state=Z` in
 `/proc/<pid>/stat`. A healthy container and a broken probe both print `0`.
+
+**And then check *when* you ran it, which is the half that actually went wrong.**
+A sample taken between turns reads `0` on a container that is accumulating
+hundreds, because zombies are produced only while turns fork. #210 was closed on
+exactly that reading, and two later mid-turn samples on the same container and
+image showed **79** and **44** — the 44 taken 40 s into a single turn, so that is
+the accrual rate, not a backlog. A verified probe run at the wrong moment is
+still a null result; eliminating "broken probe" is not the same as eliminating
+"nothing to see yet".
+
 For #208, both halves:
 
 ```bash
