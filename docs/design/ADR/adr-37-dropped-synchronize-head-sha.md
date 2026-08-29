@@ -95,7 +95,7 @@ Do not compare to `CHANGES_REQUESTED.commit_id` as the primary rule. It does not
 - **The Tailscale funnel.** Transport. Owner ops. Reducing loss rate does not close the class.
 - **Hook redelivery / `admin:repo_hook`.** Option D. A different component, a scope we do not have, and not a substitute.
 - **The rest of #209.** The review-branch `user.login` hole is already patched; remaining sign-off on that issue is not this ADR. The payload rule here exists so the new synth does not reintroduce it.
-- **Dropped `pull_request.opened`.** ADR-21 residual: a PR not yet on `sessions.design_pr` / `feature_pr` is invisible to both halves. Unchanged.
+- **Dropped `pull_request.opened`.** ADR-21 residual: a PR not yet on `sessions.design_pr` / `feature_pr` is invisible to both halves. ~~Unchanged.~~ **Closed by ADR-40 (#229)**, which also narrows the spent-SHA gate above to `*_revised`: it was applied to the two `opened` kinds as well, and dropped a delivered `design_pr_opened` because the drain was 4m23s behind a turn that had moved the head.
 - **`check_suite` as a kind.** Option C, rejected.
 - **Repairing session #57's recorded unauthorized merge.** Data. `@huozhe`.
 - **A host-side comment on a busy PR consuming silent-turn budget.** Named in the issue, not this subject.

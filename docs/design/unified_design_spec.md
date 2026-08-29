@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | **Status** | Proposed for formal approval (Phase 3 exit) |
-| **Version** | 1.39.0 — see [Revision history](#revision-history) |
+| **Version** | 1.40.0 — see [Revision history](#revision-history) |
 | **Implements** | [`docs/requirements/SRS_async_multiagent_ai_coding_system.md`](../requirements/SRS_async_multiagent_ai_coding_system.md) **v1.3** |
 | **Supersedes** | [`proposals/claude_design_spec.md`](proposals/claude_design_spec.md) (#4) · [`proposals/grok_design_spec.md`](proposals/grok_design_spec.md) (#2) · [`proposals/gemini_design_spec.md`](proposals/gemini_design_spec.md) (#3) |
 | **Ref** | Issue #1 |
@@ -20,6 +20,7 @@ Amendments are also marked inline at the point they apply, which is where an imp
 
 | Version | Date | Change |
 |---|---|---|
+| **1.40.0** | 2026-08-29 | **A `*_pr_opened` the FSM never sees strands the session permanently, and one session produced it twice by two unrelated causes** (#229, ADR-40). → [ADR-40](ADR/adr-40-untracked-pr-opened.md) |
 | **1.39.0** | 2026-08-27 | **`design_loop.py` is named for one phase of the session and owns all of them** (#159, ADR-39). → [ADR-39](ADR/adr-39-session-loop-rename.md) |
 | **1.38.0** | 2026-08-25 | **A `CHANGES_REQUESTED` that replaces an approval paused the session, and the delivery carrying that verdict was 19 ms behind it in the same batch** (#214, ADR-38). → [ADR-38](ADR/adr-38-superseded-approval-defer-clock.md) |
 | **1.37.1** | 2026-08-25 | **ADR-37's spent-SHA gate is before the FSM, not after** (#211, found reviewing #223). → [ADR-37](ADR/adr-37-dropped-synchronize-head-sha.md) |
@@ -980,6 +981,8 @@ Because the sweep also derives FSM state from the full fetch (step 4), a session
 
 **It also does not extend to `pull_request.synchronize`.** Adopting `DESIGN_REWORK` → `DESIGN_REVIEW` (or `CODE_REWORK` → `CODE_REVIEW`) without a turn is not convergence: the reviewer is never asked, `silent_turns` still climbs on whatever else arrives, and a later legitimate merge reads as a §8.4 bypass. Membership cannot see a second action on a PR node, so step 5 cannot regenerate it either. That is ADR-37: a head-SHA watermark, and a synthesized `synchronize` that drains through the ordinary handlers.
 
+**And it does not extend to `pull_request.opened` either, for the opposite reason (ADR-40).** Membership cannot see a second action on a PR node; here it cannot see the node at all, because `fetch_session_snapshot` fetches only the PRs `sessions.design_pr` / `feature_pr` already name. An untracked PR is therefore invisible to the set-diff *and* to step 4 at once — ADR-21 named that residual and left it, and it stranded a session twice in one day. The sweep now computes the role branch name and asks the forge for an open PR on it, synthesizing `pull_request.opened` when the session's column is NULL and the FSM would accept the event. The other half of the same defect is in the drain: ADR-37's spent-SHA gate guarded the two `opened` kinds as well as the two `revised` ones, and which SHA a PR was opened at is not a review cue.
+
 **Step 8 is a correction to a mistake worth naming.** An earlier draft justified blind at-least-once re-dispatch on the grounds that agent actions are idempotent at the GitHub level. That is true for GitHub and **false for everything else** — a turn interrupted midway through `npm install`, a database migration, or a `git rebase` is not idempotent, and replaying it can leave a worktree in a state neither side can reason about.
 
 So the gateway never blind-replays. `turn.resume` carries the interrupted turn's declared intent, and the runner re-derives actual state from what survived the crash — `git status`, `git log`, the worktree itself, PR state on GitHub — before deciding what remains. **The workspace is the checkpoint.**
@@ -1343,6 +1346,7 @@ Read the ADR, not the issue it names: several issues' own diagnoses were correct
 | **[37](ADR/adr-37-dropped-synchronize-head-sha.md)** | **A dropped `synchronize` is not an adopt.** Recover it as a head-SHA delivery, because adopt writes state and dispatches nothing. Hashes are not ordered, so "newer" is not a rule — compare to the forge's live head. Fixes #211. |
 | **[38](ADR/adr-38-superseded-approval-defer-clock.md)** | **A withdrawn approval is not an unverifiable one.** `CHANGES_REQUESTED`, `DISMISSED` or a stale-head `APPROVED` supersede the delivery: drop it, do not escalate, still do not merge. Also gives `defer` a clock — 4,466 log lines became 79. Fixes #214. |
 | **[39](ADR/adr-39-session-loop-rename.md)** | **`design_loop.py` owns the whole lifecycle — rename it.** The name had been wrong since M4-1 added the code half to the same module, and it had already caused a wrong inference during review. Ref #159. |
+| **[40](ADR/adr-40-untracked-pr-opened.md)** | **A `*_pr_opened` the FSM never sees is unrecoverable, and the sweep cannot reach the PR that proves it.** ADR-37's spent-SHA gate narrows to `*_revised`; the reconciler discovers an untracked PR by computing the role branch name. Closes ADR-21's untracked-PR residual. Fixes #229. |
 ---
 
 ## 17. Open Spikes & Owner Items
