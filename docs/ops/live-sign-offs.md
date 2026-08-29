@@ -1,6 +1,6 @@
 # Live sign-offs — what is still unproven, and the one session that proves most of it
 
-**Status:** 2026-08-26. Six items discharged on the live session for #57 (2026-08-24/25).
+**Status:** 2026-08-29. Six items discharged on the live session for #57 (2026-08-24/25).
 **#173 and #172 are not.** The seven defects that run surfaced are now fixed and deployed, and each
 carries a live acceptance of its own — so the list of what is unproven grew rather than shrank. They
 are one session, and it is scheduled per [Running the exercise](#running-the-exercise). Owner action
@@ -27,7 +27,7 @@ It does **not** produce all of it, and the gaps are not obvious:
 | Immediately | `DEFAULT_IMAGE = 1.3.0` creates a container; **#171** | Both are `ensure_session` facts. `_prepare_project_issue_layout` (`supervisor.py:823`) runs `resolve_base_ref` + `worktree_add` for both roles, and its only callers are `_ensure_session_locked` (`:407`) and `_adopt_or_promote` (`:595`) — **before any turn is dispatched**. #171's acceptance says the same: *of a fresh session, with no agent action* |
 | During, **on the first turn that opens the Design PR** | **#156** | The counter's subject is that turn. A session whose early turns defer, hit `role_busy`, or are intake turns leaves #156 unproven while the exercise looks like it is progressing |
 | Only if it outlives a **5-minute** reconcile pass, landing while **no turn is open** | **#116** | The reconciler is a timer (`RECONCILE_INTERVAL_S`), not something a session triggers — a short session never shows them. For #116 duration is necessary and not sufficient: `_probe_attachments` (`reconciler.py:377`) skips any project in `inflight` with `reason="open turn"` and reports `probe_skipped`, never `attached`, because a runner busy in a turn can miss the 2 s timeout and emit a WARNING that lies. A continuously busy session never produces `attached=1`, however long it runs |
-| At close, **and only if a CLI has a live child** | **#172** | ~~`session.teardown` → `shutdown_all()` → `_kill_unlocked` is the reliable half~~ — the gateway did not send that verb, and the kill had no caller. **#221 (`101c3c1`) wired it**, so the path is now reachable and this row is no longer "nothing". What is still missing is a case that can *fail*: both CLIs had **zero children** at #57's close, so a kill there satisfies "no descendant survived" vacuously. The close has to land while a CLI has a live child, which makes this the one window you have to create rather than wait for |
+| At close | **#172, partly** | **#221 (`101c3c1`) wired the caller, and #159's teardown ran it: no vendor CLI for either role remained.** That half is observed. The *descendant* half is not, and this row is no longer the route to it — `_run_teardown_turns` runs **two full LLM turns before** the kill (`session_loop.py:2630` vs `:2920`), so a child alive at close is dead long before `_kill_unlocked`. Attempting it on #159 captured a real `claude → bash → pip` tree at close and a kill minutes later that met nothing. See *Why the descendant clause is not a live observation* |
 
 **On what "cannot be forced" turned out to mean.** This section used to name two
 such items. Both were wrong, in opposite directions.
@@ -39,9 +39,11 @@ not treat it as out of reach.
 
 **#172 was called an error path that a healthy turn never enters.** The real
 reason was worse: the kill had **no caller at all**, so no turn of any kind could
-reach it. Length was never the obstacle. **#221 (`101c3c1`) wired the caller**, so
-the path is reachable now and the obstacle has moved — it is the *live child*, not
-the call. Window D below.
+reach it. Length was never the obstacle. **#221 (`101c3c1`) wired the caller**, and
+#159 then ran the kill five times — so the obstacle moved twice: first to the *live
+child*, and then, once three attempts at that failed, out of live observation
+altogether. The remaining clause is a fixture question, not a session question. See
+*Why the descendant clause is not a live observation*.
 
 **#57 was a different exercise, and it needed no planning at all.** The operator
 half of M4-A is a Feature PR opened by the Developer and approved by an Architect
@@ -60,7 +62,7 @@ the `Result` column says which. Evidence for each is in the issue.
 | Issue | ADR | What must be observed | Result |
 |---|---|---|---|
 | **#116** | ADR-34 | The reconciler's probe reaching a runner **inside a real container over a published port**: `attached=1` with a real `rss_bytes` in the pass report | **Discharged** 22:26:12 — `attached=1 probe_skipped=0`, payload `rss_bytes=25440256` over `127.0.0.1:33083`, reproduced on three later passes. Read #212 before writing a rule against those numbers: `rss_bytes` is a high-water mark and `cli_rss_kb` is frozen at turn end |
-| **#172** | ADR-35 | A **real vendor CLI** (`claude`/`grok`) killed by the runner, with no descendant surviving | **Not discharged; now reachable.** This row said the kill had no caller and that wiring it must come first. That was true when written and is not now — **#221 (`101c3c1`) calls `session.teardown` at close**. The remaining gap is the other half the row already named: both CLIs had **zero children** at #57's close, so a kill there proves the acceptance only vacuously. Discharge needs a close that lands while a CLI has a live child — window D in [Running the exercise](#running-the-exercise). `grep -ic kill` over #57's 12-hour log returned **0**; a repeat of that is not a discharge |
+| **#172** | ADR-35 | A **real vendor CLI** (`claude`/`grok`) killed by the runner, with no descendant surviving | **Kill observed five times; descendant clause not, and not reachable live.** On #159 the path ran for the first time in production — `grep -ic kill` over #57's whole log had returned **0**. Three turn-deadline kills (pids `20149`, `22817`, `25154`, each confirmed absent from `/proc` after, `status=failed` / `cli killed`, nothing orphaned, role respawnable) and one `session.teardown` leaving **no vendor CLI for either role**. What remains is *no descendant survived*, and three attempts show live observation cannot reach it — see the section below. Needs an in-image fixture that holds a child open deliberately. Teardown also surfaced **#233** |
 | **#171** | ADR-31 | Both role worktrees `behind=0` on the live clone, observed on a **fresh** session with no agent action | **Discharged** 22:52:19 with both sides captured: clone at `85107b4` with `FETCH_HEAD` 4 days stale before the label, `bb8aa5c` and both worktrees `behind=0 ahead=0` after. The fetch happened inside `ensure_session`, and the triggering delivery was dropped `self-echo`, so *no agent action* is literal |
 | **#156** | ADR-32 | A real turn that opens a Design PR leaves `silent_turns` at 0 | **Discharged** 22:06:46 — turn opened Design PR #207, `silent_turns` 0. `turn_count` 0→1 proves `bump_turn_counters` ran (same SQL statement), `status='done'` rules out `keep`, and `inc` would have read 1 — so the mode was `reset`, from observed progress |
 | **#173** | ADR-30 | A rework round logs `author-sent PR event, no turn`, and `silent_turns` never exceeds 1 | **Failed.** First half held on webhooks (two kinds took the branch). Second half did not: the reconciler synthesised the same reviews with no `pull_request.user`, so `_pr_author_login` returned `None`, the guard short-circuited, and two no-op turns pushed `silent_turns` to **2**. See #209 — the one-line fix there is a trap |
@@ -87,7 +89,7 @@ column below is what would make it verification.
 | #211 | A dropped `pull_request.synchronize` strands a session, and the reconciler has no node kind to regenerate it | ADR-37, #222 + #223. A completed rework round leaves `silent_turns` 0 or 1, never 3, and records no `unauthorized` on a merge that had Architect approval on the live head |
 | #212 | The probe's `rss_bytes` is a high-water mark and `cli_rss_kb` is frozen at turn end — unfit for M6-3's memory rule | Runner **1.4.0** (#219). `rss_bytes`, `rss_peak_bytes` and `sampled_at` all present **and `rss_bytes` moving between two passes**. One sample cannot show movement |
 | #214 | `CHANGES_REQUESTED` pauses the session instead of dispatching Developer rework; the pending delivery then re-defers every 5 s (**4,417 times**) | ADR-38, #224 + #225, schema v11. An Architect verdict that replaces an approval dispatches a Developer rework turn, the session stays out of `PAUSED_HUMAN`, one `merge_auth superseded` logs, and no delivery id exceeds ~20 `route defer` lines an hour |
-| #172 | *(as filed)* The kill path has no caller | **#221** gave it one. Needs a close landing while a CLI has a **live child** — window D |
+| #172 | *(as filed)* The kill path has no caller | **#221** gave it one, and #159 ran it five times. Only *no descendant survived* is left, and it needs an in-image fixture rather than a session |
 
 **#211 was the one to fix first, and it was.** Webhook delivery failed five times in
 one evening (`failed to connect to host` — the ingress is a Tailscale funnel). Four
@@ -182,10 +184,11 @@ developer.
 | **A** — any real turn | #208, #210 | passive; the vendor CLI only has to run | — |
 | **B** — a completed rework round | #211, #214 | a `synchronize` (real or synthesised) that yields a review turn | — |
 | **C** — a reconcile pass landing with **no turn open** | #212, and #209/#173 if forced | the session must sit **idle ≥ 5 min** | D |
-| **D** — close while a turn has a **live CLI child** | #172 | must be busy, and it ends the session | C |
+| **D** — close the issue | *(nothing — see below)* | ends the session | — |
 
-C needs the session idle, D needs it busy, and D is terminal. **Order is A → B → C
-→ D**, and D is last. This is the part that cannot be recovered by running longer.
+C needs the session idle and D is terminal, so **the order is A → B → C → D** and D is
+last. D no longer discharges anything: the close is how the session ends, not how #172
+is observed — see *Why the descendant clause is not a live observation*.
 
 **Window A.** Sample the zombie count once per turn; the acceptance is *flat*, not
 *small*:
@@ -250,18 +253,43 @@ the grep does not stand in for it. On #57 the log half held and the counter reac
 **Record in both issues that it was forced.** It proves the drop, which is what both
 acceptances name. It does not prove the loss.
 
-**Window D.** Find a CLI with a live child *before* closing — the table is
-`pid ppid state comm`, and you want a row whose `ppid` is a CLI's pid:
+**Window D.** Just close the issue. Tick the §10.1 block first — closing unticked
+classifies the session `ABANDONED` rather than `VERIFIED`. Teardown takes minutes:
+two LLM turns, then the kill.
 
-```bash
-docker exec agentd-huozhe-code-workflow sh -c \
-  'for s in /proc/[0-9]*/stat; do set -- $(cat "$s" 2>/dev/null); echo "$1 ppid=$4 state=$3 $2"; done'
-```
+## Why the descendant clause is not a live observation
 
-Close only on a child. Then re-run it: no vendor CLI for either role may remain, and
-the kill has to appear **as a kill**. On #57 `grep -ic kill` over a 12-hour log
-returned **0** and the CLIs died when the reconciler removed the container 2m25s
-after close. A repeat of that is not a discharge.
+Session #159 tried three times to observe #172's *"no descendant survived"* and could
+not. The three failures have different causes and together they are the finding.
+
+| attempt | route | why it could not reach the clause |
+|---|---|---|
+| 1 | close while a CLI held a child | `_run_teardown_turns` (`session_loop.py:2630`) runs **two full LLM turns before** `teardown_session` (`:2920`) issues the kill. The proc table at close was captured and held a real `claude → bash → pip/tail` tree; it was dead long before `_kill_unlocked` ran |
+| 2 | turn-deadline kill, `turn_deadline_s = 60` | CLI was between tool calls. The sample taken within 300 ms of death showed **no children** |
+| 3 | turn-deadline kill, `turn_deadline_s = 40` | same — and that sample carried **44 zombies**, so 44 subprocesses had been spawned and had already exited during those 40 s |
+
+Attempt 3 settles it. The CLI was working tools hard the whole time; vendor tool
+subprocesses are simply short — sub-second to a few seconds — while the kill lands at
+a fixed wall-clock offset. **The overlap is not controllable from outside the
+container.** A fourth attempt would be luck, not method.
+
+What the same three runs *did* establish is most of the exit condition: five kills,
+each confirmed by the CLI's absence from `/proc` rather than by the kill returning;
+`status=failed` with `cli killed`; nothing orphaned; the role respawnable; and after
+`session.teardown`, no vendor CLI for either role.
+
+**So the remaining clause belongs in an in-image fixture**, which is what #172's own
+checklist item 6 asks for: spawn a stand-in for the role CLI holding a child open,
+call `_kill_unlocked` as the role, assert `/proc/<child>` is gone. The fixture must
+first assert the capability set it runs under — measured in the live container,
+`CapEff: 00000000000000c9` (CHOWN, FOWNER, SETGID, SETUID; **no** `DAC_OVERRIDE`, **no**
+`KILL`) — or it is testing a host that cannot reach the case, which is the trap item 6
+names.
+
+**A note for whoever reads the teardown log while working on this.** #159's teardown
+logged `session.teardown did not kill cleanly`, and that line is **false**: the kill
+succeeded and the tmpfs secret wipe after it crashed, taking the RPC down with it
+(**#233**). Do not read that warning as evidence about the kill.
 
 ## Why this list keeps being written down wrong
 
