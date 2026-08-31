@@ -6,6 +6,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -296,6 +297,31 @@ def fetch_session_snapshot(
         "feature_head_sha": feature_head_sha,
         "design_head_sha": design_head_sha,
     }
+
+
+def fetch_open_prs_by_head(
+    *,
+    repo: str,
+    head: str,
+    token: str | None,
+    http_get: Callable[..., Any] | None = None,
+) -> list[dict[str, Any]]:
+    """REST GET /repos/{repo}/pulls?state=open&head=<owner>:<branch> (ADR-40)."""
+    if not token or not repo or not head:
+        return []
+    get = http_get or _gh_get
+    url = (
+        f"https://api.github.com/repos/{repo}/pulls"
+        f"?state=open&head={quote(head, safe=':')}&per_page=100"
+    )
+    try:
+        body = get(url, token=token)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("open-PR list failed repo=%s head=%s: %s", repo, head, exc)
+        return []
+    if not isinstance(body, list):
+        return []
+    return [p for p in body if isinstance(p, dict)]
 
 
 def fetch_pull(

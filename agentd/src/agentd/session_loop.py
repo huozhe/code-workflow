@@ -897,13 +897,29 @@ class SessionLoop:
             )
             return
 
-        # ADR-37 (a″): spent-SHA before FSM. A stale synchronize must not
-        # run design_revised. Shares the GET with ADR-30 (c) below.
+        # ADR-37 (a″): spent-SHA before FSM. Stale/duplicate arms are for
+        # *_revised. *_pr_opened has one arm: already tracked (ADR-40 (a)).
+        # Shares the GET with ADR-30 (c) below; opened still fetches for (b).
         wm_field = _HEAD_WM.get(kind)
         payload_sha = _payload_head_sha(data) if event == "pull_request" else None
         live_pr: dict[str, Any] | None = None
         pr_n_live = _pr_number_from_payload(event, data, int(issue_num))
-        if wm_field and payload_sha and pr_n_live is not None:
+        opened = kind in ("design_pr_opened", "feature_pr_opened")
+        if opened and pr_n_live is not None:
+            live_pr = self._fetch_live_pr(repo, pr_n_live)
+            col = "design_pr" if kind == "design_pr_opened" else "feature_pr"
+            tracked = sess.get(col)
+            if tracked is not None and int(tracked) == int(pr_n_live):
+                self.store.set_delivery_status(delivery_id, "done")
+                log.info(
+                    "no turn id=%s session=%s — already tracked pr=%s (%s) (#229)",
+                    delivery_id,
+                    session_key,
+                    pr_n_live,
+                    kind,
+                )
+                return
+        elif wm_field and payload_sha and pr_n_live is not None:
             live_pr = self._fetch_live_pr(repo, pr_n_live)
             stored_wm = str(sess.get(wm_field) or "")
             if stored_wm and payload_sha == stored_wm:
@@ -991,9 +1007,15 @@ class SessionLoop:
                 return
 
         # ADR-37 (a): stamp the taken head after both spent gates, before dispatch.
-        if wm_field and payload_sha:
-            self.store.update_session_fields(session_key, **{wm_field: payload_sha})
-            sess[wm_field] = payload_sha
+        # ADR-40 (b): *_pr_opened stamps the live head; GET fail falls back to payload.
+        if wm_field:
+            stamp_sha = payload_sha
+            if opened:
+                live_sha = str((live_pr or {}).get("head_sha") or "")
+                stamp_sha = live_sha or payload_sha
+            if stamp_sha:
+                self.store.update_session_fields(session_key, **{wm_field: stamp_sha})
+                sess[wm_field] = stamp_sha
 
         # ADR-17: hold blocks every ordinary turn (reopen included).
         if _close_reconcile_held(state, sess):

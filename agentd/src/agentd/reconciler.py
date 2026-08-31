@@ -14,7 +14,14 @@ from pathlib import Path
 from typing import Any
 
 from agentd.db import Store
+from agentd.digest import json_obj
 from agentd.fsm import transition
+from agentd.gitops import (
+    is_design_head_ref,
+    is_feature_head_ref,
+    parse_role_branch,
+    role_branch_name,
+)
 from agentd.rpc_client import ProbeResult
 from agentd.rpc_client import probe_runner as _probe_runner_default
 from agentd.session_loop import (
@@ -42,6 +49,7 @@ ProbeFn = Callable[[dict[str, Any]], ProbeResult]
 RemoveContainer = Callable[[str], None]
 NudgeFn = Callable[[], None]
 FetchSnapshot = Callable[[dict[str, Any]], dict[str, Any] | None]
+FetchOpenPrs = Callable[[str, str], list[dict[str, Any]]]
 EscalateFn = Callable[..., None]
 ResumeTurnFn = Callable[[dict[str, Any]], None]
 NotifyMissedFn = Callable[[str, list[dict[str, Any]]], None]
@@ -153,6 +161,7 @@ class Reconciler:
         probe_runner: ProbeFn | None = None,
         nudge: NudgeFn | None = None,
         fetch_snapshot: FetchSnapshot | None = None,
+        fetch_open_prs: FetchOpenPrs | None = None,
         escalate: EscalateFn | None = None,
         resume_turn: ResumeTurnFn | None = None,
         notify_missed: NotifyMissedFn | None = None,
@@ -166,6 +175,7 @@ class Reconciler:
         self.probe_runner = probe_runner or _probe_runner_default
         self.nudge = nudge
         self.fetch_snapshot = fetch_snapshot
+        self.fetch_open_prs = fetch_open_prs
         self.escalate = escalate
         self.resume_turn = resume_turn
         self.notify_missed = notify_missed
@@ -610,6 +620,9 @@ class Reconciler:
         remaining = self._synth_head_drift(
             sess, snap, report, dry_run=dry_run, remaining=remaining
         )
+        remaining = self._synth_untracked_opened(
+            sess, report, dry_run=dry_run, remaining=remaining
+        )
 
         body = snap.get("issue_body")
         if isinstance(body, str) and body:
@@ -789,6 +802,135 @@ class Reconciler:
             status="queued",
         )
 
+    def _synth_untracked_opened(
+        self,
+        sess: dict[str, Any],
+        report: dict[str, Any],
+        *,
+        dry_run: bool,
+        remaining: int,
+    ) -> int:
+        """ADR-40: enqueue pull_request.opened for an untracked role-branch PR."""
+        if self.fetch_open_prs is None:
+            return remaining
+        state = str(sess.get("state") or "")
+        repo = str(sess.get("repo") or "")
+        sk = str(sess.get("session_key") or "")
+        try:
+            issue_num = int(sess.get("issue_num") or 0)
+        except (TypeError, ValueError):
+            return remaining
+        if not repo or not issue_num:
+            return remaining
+        owner, _, _ = repo.partition("/")
+        for pr_key, role, kind in (
+            ("design_pr", "architect", "design_pr_opened"),
+            ("feature_pr", "developer", "feature_pr_opened"),
+        ):
+            # AWAITING_VERIFICATION admits feature_pr_opened, but feature_pr
+            # is always set there so this skip fires first (ADR-40 residual).
+            if sess.get(pr_key):
+                continue
+            if transition(state, kind) is None:
+                continue
+            if remaining <= 0:
+                report["capped"] = int(report["capped"]) + 1
+                continue
+            branch = role_branch_name(repo, issue_num, role)
+            head = f"{owner}:{branch}"
+            try:
+                listed = self.fetch_open_prs(repo, head) or []
+            except Exception:
+                log.exception(
+                    "untracked PR fetch failed session=%s half=%s", sk, role
+                )
+                continue
+            matches: list[dict[str, Any]] = []
+            for pr in listed:
+                if not isinstance(pr, dict):
+                    continue
+                if pr.get("merged") or str(pr.get("state") or "open") != "open":
+                    continue
+                href = str(json_obj(pr.get("head")).get("ref") or "")
+                owned = (
+                    is_design_head_ref(href, repo)
+                    if role == "architect"
+                    else is_feature_head_ref(href, repo)
+                )
+                if not owned:
+                    continue
+                parsed = parse_role_branch(href, repo)
+                if parsed is None or parsed[0] != issue_num:
+                    continue
+                matches.append(pr)
+            if not matches:
+                continue
+            matches.sort(key=lambda p: int(p.get("number") or 0))
+            if len(matches) > 1:
+                extras = [int(p.get("number") or 0) for p in matches[1:]]
+                log.warning(
+                    "reconcile untracked opened session=%s half=%s extra_prs=%s",
+                    sk,
+                    role,
+                    extras,
+                )
+            chosen = matches[0]
+            if dry_run:
+                report["synthesized"] = int(report["synthesized"]) + 1
+                remaining -= 1
+                continue
+            inserted = self._synthesize_opened(sess, chosen)
+            if inserted:
+                report["synthesized"] = int(report["synthesized"]) + 1
+                remaining -= 1
+                sha = str(json_obj(chosen.get("head")).get("sha") or "")
+                log.info(
+                    "reconcile untracked opened session=%s half=%s pr=%s "
+                    "branch=%s head=%s (#229)",
+                    sk,
+                    role,
+                    int(chosen.get("number") or 0),
+                    branch,
+                    sha,
+                )
+        return remaining
+
+    def _synthesize_opened(self, sess: dict[str, Any], pr: dict[str, Any]) -> bool:
+        repo = str(sess.get("repo") or "")
+        issue_num = int(sess.get("issue_num") or 0)
+        head = json_obj(pr.get("head"))
+        sha = str(head.get("sha") or "")
+        ref = str(head.get("ref") or "")
+        number = int(pr.get("number") or 0)
+        user = json_obj(pr.get("user"))
+        author = str(user.get("login") or "")
+        payload = {
+            "action": "opened",
+            "pull_request": {
+                "node_id": str(pr.get("node_id") or ""),
+                "number": number,
+                "merged": False,
+                "title": str(pr.get("title") or ""),
+                "html_url": str(
+                    pr.get("html_url") or f"https://github.com/{repo}/pull/{number}"
+                ),
+                "user": {"login": author},
+                "head": {"ref": ref, "sha": sha},
+            },
+            "sender": {"login": author},
+            "repository": {"full_name": repo},
+        }
+        return self.store.insert_delivery(
+            delivery_id=f"recon:open:{number}:{sha}",
+            event="pull_request",
+            action="opened",
+            repo=repo,
+            issue_num=issue_num,
+            sender=author,
+            payload=json.dumps(payload).encode(),
+            status="queued",
+        )
+
     def _synthesize_node(
         self, sess: dict[str, Any], snap: dict[str, Any], node: dict[str, Any]
     ) -> None:
@@ -827,7 +969,10 @@ class Reconciler:
                     "merged": bool(node.get("merged")),
                     "title": str(node.get("title") or ""),
                     "user": {"login": author},
-                    "head": {"ref": str(node.get("head_ref") or "")},
+                    "head": {
+                        "ref": str(node.get("head_ref") or ""),
+                        "sha": str(node.get("head_sha") or ""),
+                    },
                 },
                 "sender": {"login": author},
                 "repository": {"full_name": repo},

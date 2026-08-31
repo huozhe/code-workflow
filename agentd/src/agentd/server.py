@@ -102,7 +102,10 @@ def create_app(
             state.governor.start()
             state.dispatcher.start()
             try:
-                from agentd.github_fetch import fetch_session_snapshot
+                from agentd.github_fetch import (
+                    fetch_open_prs_by_head,
+                    fetch_session_snapshot,
+                )
                 from agentd.keychain import get_password
                 from agentd.reconciler import Reconciler
 
@@ -113,6 +116,11 @@ def create_app(
                         feature_pr=sess.get("feature_pr"),
                         design_pr=sess.get("design_pr"),
                         token=get_password("gateway"),
+                    )
+
+                def _fetch_open(repo: str, head: str) -> list[dict[str, Any]]:
+                    return fetch_open_prs_by_head(
+                        repo=repo, head=head, token=get_password("gateway")
                     )
 
                 def _escalate(sk: str, reason: str, **kw: Any) -> None:
@@ -136,6 +144,7 @@ def create_app(
                     store,
                     nudge=state.nudge.set,
                     fetch_snapshot=_fetch,
+                    fetch_open_prs=_fetch_open,
                     escalate=_escalate,
                     notify_missed=(
                         session_loop.report_missed if session_loop is not None else None

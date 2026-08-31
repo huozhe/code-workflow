@@ -108,21 +108,6 @@ def _feature_sync_payload(*, sender: str = "huozhegrok") -> dict[str, Any]:
     }
 
 
-def _design_open_payload() -> dict[str, Any]:
-    return {
-        "action": "opened",
-        "pull_request": {
-            "number": DESIGN_PR,
-            "title": "Design: x",
-            "user": {"login": "huozheclaude"},
-            "head": {"sha": "abc", "ref": role_branch_name(REPO, ISSUE, "architect")},
-            "merged": False,
-        },
-        "sender": {"login": "huozheclaude"},
-        "repository": {"full_name": REPO},
-    }
-
-
 def _insert(
     store: Store,
     *,
@@ -382,21 +367,36 @@ def test_backlog_delivery_in_the_same_second_is_not_this_turn_s_progress(
 def test_progress_kind_trigger_still_resets(tmp_path: Path) -> None:
     """(4) The trigger term is retained.
 
-    A turn woken by ``design_pr_opened`` with nothing in the window and no state
-    change must still reset. Fails against a two-term reading that measures only
-    the window and the state, and nothing else in this suite detects that.
+    A progress kind that does not move the FSM must still reset. ADR-40 spends
+    already-tracked ``design_pr_opened`` before that site (acceptance (3): no
+    turn, silent_turns unchanged), so the kind here is ``design_revised`` on
+    ``DESIGN_REVIEW``. Fails against a two-term reading that measures only the
+    window and the state.
     """
     store = Store(tmp_path / "state.db")
     sk = _seed(store, state="DESIGN_REVIEW", silent_turns=2)
     loop = _loop(store, tmp_path, plant=None)
     _insert(
         store,
-        did="d-design-open",
+        did="d-design-rev",
         event="pull_request",
-        action="opened",
+        action="synchronize",
         sender="huozheclaude",
         issue=DESIGN_PR,
-        payload=_design_open_payload(),
+        payload={
+            "action": "synchronize",
+            "pull_request": {
+                "number": DESIGN_PR,
+                "user": {"login": "huozheclaude"},
+                "head": {
+                    "sha": "abc",
+                    "ref": role_branch_name(REPO, ISSUE, "architect"),
+                },
+                "merged": False,
+            },
+            "sender": {"login": "huozheclaude"},
+            "repository": {"full_name": REPO},
+        },
     )
     loop.process_deferred_batch(limit=1)
 

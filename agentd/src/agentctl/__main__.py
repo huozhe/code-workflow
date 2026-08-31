@@ -218,7 +218,7 @@ def main(argv: list[str] | None = None) -> None:
             print(json.dumps({"integrity": integrity}, indent=2))
             sys.exit(1)
         store = Store(db_path)
-        from agentd.github_fetch import fetch_session_snapshot
+        from agentd.github_fetch import fetch_open_prs_by_head, fetch_session_snapshot
         from agentd.keychain import get_password
 
         def _fetch(sess: dict[str, Any]) -> dict[str, Any] | None:
@@ -233,9 +233,14 @@ def main(argv: list[str] | None = None) -> None:
             except Exception:  # noqa: BLE001 — dry-run snapshot
                 return None
 
-        report = Reconciler(store, fetch_snapshot=_fetch).reconcile_once(
-            dry_run=True
-        )
+        def _fetch_open(repo: str, head: str) -> list[dict[str, Any]]:
+            return fetch_open_prs_by_head(
+                repo=repo, head=head, token=get_password("gateway")
+            )
+
+        report = Reconciler(
+            store, fetch_snapshot=_fetch, fetch_open_prs=_fetch_open
+        ).reconcile_once(dry_run=True)
         report["integrity"] = integrity
         print(json.dumps(report, indent=2, default=str))
         store.close()
