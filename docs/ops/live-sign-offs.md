@@ -171,11 +171,16 @@ hard to verify.
    state=PLANNING`, and `turn_count` stayed 0 until the owner commented.
 
    File anything you do not want run as unlabelled.
-3. Duration alone is not a plan. The open acceptances fall into **four windows**,
-   and two of them contradict each other — see *The four windows* below. Do not
+3. Duration alone is not a plan. The open acceptances fall into **five windows**,
+   and two of them contradict each other — see *The five windows* below. Do not
    also carry a second copy of the timing rules in your head: a session run
-   "until it looks done" gets the first two windows and silently misses the
-   other two, which is how #57 discharged six and left two.
+   "until it looks done" gets **0 and A** and silently misses C and D, which is
+   how #57 discharged six and left two. **Window 0 is the trap in that sentence.**
+   It is the *first* window and it is spent the instant the Design PR exists, so a
+   session you join, resume, or start after that PR is open has already lost it —
+   and every later turn still looks green, because the code that runs then was
+   never the broken code. If you did not watch the `opened` drain behind a running
+   turn, you do not have #229; you have A.
 4. INFO goes to `~/.agentd/logs/agentd.log`. `gateway.err.log` is WARNING and
    above, so a pass line is not in the file the plist names as stderr. **The
    runner logs to neither** — it runs in the container, so #208 and #210 are read
@@ -184,7 +189,7 @@ hard to verify.
    `agentd.session_loop`; archives older than that carry `agentd.design_loop`.
    The documented greps in this file key on message text and are unaffected.
 
-### The four windows
+### The five windows
 
 Container `agentd-huozhe-code-workflow`; roles are uid **1001** architect, **1002**
 developer.
