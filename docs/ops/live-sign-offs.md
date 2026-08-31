@@ -224,8 +224,15 @@ disk is healthy, so it gives an uncontrolled sub-30-second window and is not the
 
 **Use a real turn as the lag.** It costs one turn and buys 15 s to ~12 min.
 
-1. Confirm nothing is live (step 1 above), then label a throwaway issue `agentd`.
-   The session is created in `PLANNING` and the Architect turn dispatches. **That
+1. Confirm nothing is live (step 1 above), then have **the owner** label a throwaway
+   issue `agentd`. **The actor is load-bearing and it is not the Architect.** Step 2
+   above has the rule and the instance: `route_for_recipient` drops sender == recipient
+   as `self-echo` (rule 1, ahead of everything), `issue_opened` routes to the Architect,
+   so an Architect-applied label brings the session up complete and dispatches **no
+   turn at all** — `turn_count` stayed 0 on #57. No turn, no lag, and window 0 is
+   spent without ever being entered. Owner (rule 2) or any other human (rule 7) works;
+   a Developer label routes too, since sender ≠ recipient. Only the Architect must not.
+   The session comes up in `PLANNING` and the first Architect turn dispatches. **That
    turn is the lag** — the drain is now behind it, for every session, not just this one.
 2. While it runs, push a commit to `agentd/<proj>/<issue>/architect` and open a PR
    from it. The `opened` queues at SHA **X**.
@@ -257,12 +264,34 @@ is not a check; this one does.
 Only when the SHAs differ, assert:
 
 ```bash
-grep -E "fsm .*→ DESIGN_REVIEW" ~/.agentd/logs/agentd.log      # exactly one
-grep -c "stale head .*design_pr_opened" ~/.agentd/logs/agentd.log   # must be 0
+SK="huozhe/code-workflow#<throwaway issue>"
+grep -hF "fsm $SK → DESIGN_REVIEW" ~/.agentd/logs/agentd.log*    # one, on this session
+grep -hF "$SK" ~/.agentd/logs/agentd.log* | grep -c "stale head .*design_pr_opened"  # 0
 ```
 
-plus `design_pr` non-NULL and `roles_locked=1` on the session row **within that
-drain**, not eventually.
+**Read `agentd.log*`, not `agentd.log`.** The log rotates at ~1 MB and keeps `.1`–`.5`;
+a rotation inside the exercise moves the line you are looking for into a file the plain
+path does not name. That failure is silent in the worst direction — a `stale head` count
+of `0` then means *wrong file*, not *not dropped*, and window 0 cannot be re-run to find
+out. Checked while writing this: `agentd.log` currently holds **zero** `fsm … →` lines;
+every one of them is in `agentd.log.1`.
+
+**Scope both greps to the throwaway session key.** An unscoped `DESIGN_REVIEW` count is
+wrong the moment any session does a rework round — `fsm huozhe/code-workflow#159 →
+DESIGN_REVIEW` appears **twice** across the logs — and an unscoped `stale head` count
+picks up other sessions' legitimate drops of `*_revised`, which this acceptance does not
+touch. Scoped, expect exactly one for this exercise because the throwaway session stops
+at window 0; carry it into a rework round and a second line is correct, not a failure.
+
+**Both greps are known to reach their case, on the same instance the SHA check uses.**
+Run scoped to `huozhe/code-workflow#159` across `agentd.log*` they return **2** for
+`DESIGN_REVIEW` (the initial take plus the rework round) and — the one that matters —
+**1** for `stale head … design_pr_opened`. That single line *is* #229: the drop this
+acceptance exists to prove no longer happens. A "must be 0" check that has never
+produced a 1 anywhere is indistinguishable from a typo.
+
+Plus `design_pr` non-NULL and `roles_locked=1` on the session row **within that drain**,
+not eventually.
 
 Cost is ~2–3 vendor turns: the Architect turn that creates the lag, and the Developer
 review turn the take dispatches. No image rebuild. If the turn ends before step 3
