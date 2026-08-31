@@ -827,6 +827,8 @@ class Reconciler:
             ("design_pr", "architect", "design_pr_opened"),
             ("feature_pr", "developer", "feature_pr_opened"),
         ):
+            # AWAITING_VERIFICATION admits feature_pr_opened, but feature_pr
+            # is always set there so this skip fires first (ADR-40 residual).
             if sess.get(pr_key):
                 continue
             if transition(state, kind) is None:

@@ -11,6 +11,7 @@ import pytest
 import agentd.session_loop as session_loop_mod
 from agentd.config import Config
 from agentd.db import Store, decompress_payload
+from agentd.github_fetch import fetch_open_prs_by_head
 from agentd.gitops import role_branch_name
 from agentd.reconciler import Reconciler
 from agentd.session_loop import SessionLoop
@@ -18,6 +19,7 @@ from agentd.session_loop import SessionLoop
 _REPO = "huozhe/code-workflow"
 _X = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 _Y = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+_Z = "cccccccccccccccccccccccccccccccccccccccc"
 _ISSUE = 159
 _DESIGN_PR = 227
 _FEAT_PR = 232
@@ -482,6 +484,35 @@ def test_second_sweep_inserts_zero(tmp_path: Path) -> None:
     store.close()
 
 
+def test_queued_synth_then_head_move_is_one_turn(tmp_path: Path) -> None:
+    """Acceptance (7) second half. SHA in the id so a push while queued is not sealed."""
+    store = Store(tmp_path / "state.db")
+    sk = _seed(store, state="IMPLEMENTING", design_pr=_DESIGN_PR)
+    shas = [_Y, _Z]
+    n = 0
+
+    def fetch(_repo: str, head: str) -> list[dict[str, Any]]:
+        nonlocal n
+        sha = shas[min(n, 1)]
+        n += 1
+        if head.endswith(_dev_ref()):
+            return [_gh_pr(number=_FEAT_PR, ref=_dev_ref(), sha=sha)]
+        return []
+
+    assert _sweep(store, fetch_open_prs=fetch)["synthesized"] == 1
+    assert _sweep(store, fetch_open_prs=fetch)["synthesized"] == 1
+    ids = {str(r["delivery_id"]) for r in store.list_queued()}
+    assert ids == {f"recon:open:{_FEAT_PR}:{_Y}", f"recon:open:{_FEAT_PR}:{_Z}"}
+    loop = _loop(store, tmp_path, live_sha=_Z)
+    _drain_queued(loop, store)
+    assert len(loop.dispatched) == 1  # type: ignore[attr-defined]
+    sess = store.get_session(sk)
+    assert sess is not None
+    assert sess["feature_pr"] == _FEAT_PR
+    assert sess["feature_pr_head"] == _Z
+    store.close()
+
+
 def test_after_drain_set_diff_does_not_reopen(tmp_path: Path) -> None:
     """Acceptance (8). Node row written; delete it and the set-diff opens again."""
     store = Store(tmp_path / "state.db")
@@ -586,19 +617,89 @@ def test_paused_human_issues_no_get_then_resume_synths(tmp_path: Path) -> None:
 
 
 def test_parse_rejects_other_session_and_merged(tmp_path: Path) -> None:
-    """Acceptance (10). Parse is the rule; the query filter is a convenience."""
+    """Acceptance (10). Parse is the rule; the query filter is a convenience.
+
+    List endpoint omits ``merged``; rejection of a closed PR is by ``state``.
+    ``merged=True`` with ``state=open`` is the defensive arm, not live-reachable.
+    """
     store = Store(tmp_path / "state.db")
     _seed(store, state="IMPLEMENTING", design_pr=_DESIGN_PR)
+    closed = _gh_pr(number=998, ref=_dev_ref(), state="closed")
+    closed.pop("merged", None)
 
     def fetch(_repo: str, head: str) -> list[dict[str, Any]]:
         if head.endswith(_dev_ref()):
             return [
                 _gh_pr(number=999, ref=_dev_ref(160)),
-                _gh_pr(number=998, ref=_dev_ref(), merged=True, state="closed"),
+                closed,
+                _gh_pr(number=997, ref=_dev_ref(), merged=True, state="open"),
             ]
         return []
 
     assert _sweep(store, fetch_open_prs=fetch)["synthesized"] == 0
+    store.close()
+
+
+def test_awaiting_verification_issues_no_get(tmp_path: Path) -> None:
+    """Acceptance (13). Predicate 1 skips; do not widen the dead FSM arm."""
+    store = Store(tmp_path / "state.db")
+    _seed(
+        store,
+        state="AWAITING_VERIFICATION",
+        design_pr=_DESIGN_PR,
+        feature_pr=_FEAT_PR,
+    )
+    calls: list[str] = []
+
+    def fetch(_repo: str, head: str) -> list[dict[str, Any]]:
+        calls.append(head)
+        return [_gh_pr(number=240, ref=_dev_ref())]
+
+    assert _sweep(store, fetch_open_prs=fetch)["synthesized"] == 0
+    assert calls == []
+    store.close()
+
+
+def test_fetch_open_prs_url_and_list_shape(tmp_path: Path) -> None:
+    """The only GitHub talker: pin the URL and a list-endpoint envelope (no merged)."""
+    captured: list[str] = []
+    branch = _dev_ref()
+    head = f"huozhe:{branch}"
+
+    def http_get(url: str, *, token: str) -> list[dict[str, Any]]:
+        captured.append(url)
+        return [
+            {
+                "number": _FEAT_PR,
+                "node_id": f"PR_{_FEAT_PR}",
+                "state": "open",
+                "title": "feat",
+                "html_url": f"https://github.com/{_REPO}/pull/{_FEAT_PR}",
+                "user": {"login": "huozhegrok"},
+                "head": {"ref": branch, "sha": "d382d3637864a30e703579a4c1ab2107841790ca"},
+            }
+        ]
+
+    listed = fetch_open_prs_by_head(
+        repo=_REPO, head=head, token="tok", http_get=http_get
+    )
+    assert captured
+    url = captured[0]
+    assert "state=open" in url
+    assert "per_page=100" in url
+    assert "%2F" in url
+    assert f"head={head.split(':')[0]}:" in url or "head=huozhe%3A" in url
+    assert "merged" not in listed[0]
+
+    store = Store(tmp_path / "state.db")
+    sk = _seed(store, state="IMPLEMENTING", design_pr=_DESIGN_PR)
+    report = _sweep(store, fetch_open_prs=lambda _r, _h: listed)
+    assert report["synthesized"] == 1
+    data = json.loads(decompress_payload(dict(store.list_queued()[0])["payload"]))
+    assert data["pull_request"]["head"]["sha"] == listed[0]["head"]["sha"]
+    assert data["pull_request"]["user"]["login"] == "huozhegrok"
+    assert data["pull_request"]["node_id"] == f"PR_{_FEAT_PR}"
+    assert store.get_session(sk)["state"] == "IMPLEMENTING"
     store.close()
 
 
