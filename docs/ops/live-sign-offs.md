@@ -1,6 +1,6 @@
 # Live sign-offs — what is still unproven, and the one session that proves most of it
 
-**Status:** 2026-08-29. Six items discharged on the live session for #57 (2026-08-24/25).
+**Status:** 2026-08-31. Six items discharged on the live session for #57 (2026-08-24/25).
 **#173 and #172 are not.** The seven defects that run surfaced are now fixed and deployed, and each
 carries a live acceptance of its own — so the list of what is unproven grew rather than shrank. They
 are one session, and it is scheduled per [Running the exercise](#running-the-exercise). Owner action
@@ -90,6 +90,16 @@ column below is what would make it verification.
 | #212 | The probe's `rss_bytes` is a high-water mark and `cli_rss_kb` is frozen at turn end — unfit for M6-3's memory rule | Runner **1.4.0** (#219). `rss_bytes`, `rss_peak_bytes` and `sampled_at` all present **and `rss_bytes` moving between two passes**. One sample cannot show movement |
 | #214 | `CHANGES_REQUESTED` pauses the session instead of dispatching Developer rework; the pending delivery then re-defers every 5 s (**4,417 times**) | ADR-38, #224 + #225, schema v11. An Architect verdict that replaces an approval dispatches a Developer rework turn, the session stays out of `PAUSED_HUMAN`, one `merge_auth superseded` logs, and no delivery id exceeds ~20 `route defer` lines an hour |
 | #172 | *(as filed)* The kill path has no caller | **#221** gave it one, and #159 ran it five times. Only *no descendant survived* is left, and it needs an in-image fixture rather than a session |
+| #229 | A `*_pr_opened` the FSM never sees strands the session permanently — the gate dropped a delivered one, the funnel lost another | ADR-40, **#237**, deployed 2026-08-31. A Design PR opened **while a turn is running** transitions on the first drain of its `opened`: one `fsm … → DESIGN_REVIEW`, `design_pr` non-NULL and `roles_locked=1` within that drain, and **no** `stale head … (design_pr_opened)` anywhere in the log. A PR that opened onto an idle drain is the case that already worked and discharges nothing |
+
+**#229 is window 0, and it is the one that cannot be retried.** The gate half only misbehaves when the
+drain is behind a turn, so the observation has to be made at the moment the Architect's first turn opens
+the Design PR — on #159 that turn ran 601 s and the delivery waited 4m23s while the head moved. Open the
+PR onto an idle drain and the event is taken correctly by code that was never broken, which is exactly the
+green signal the defect produced eight turns in a row. The second half of #229 — a lost `opened` recovered
+by the sweep's discovery — has no window at all: it needs a *dropped* delivery, which cannot be arranged
+from this side. Unit acceptance covers it; a live observation would be luck, not a test, and it is not
+listed as one.
 
 **#211 was the one to fix first, and it was.** Webhook delivery failed five times in
 one evening (`failed to connect to host` — the ingress is a Tailscale funnel). Four
@@ -161,11 +171,16 @@ hard to verify.
    state=PLANNING`, and `turn_count` stayed 0 until the owner commented.
 
    File anything you do not want run as unlabelled.
-3. Duration alone is not a plan. The open acceptances fall into **four windows**,
-   and two of them contradict each other — see *The four windows* below. Do not
+3. Duration alone is not a plan. The open acceptances fall into **five windows**,
+   and two of them contradict each other — see *The five windows* below. Do not
    also carry a second copy of the timing rules in your head: a session run
-   "until it looks done" gets the first two windows and silently misses the
-   other two, which is how #57 discharged six and left two.
+   "until it looks done" gets **0 and A** and silently misses C and D, which is
+   how #57 discharged six and left two. **Window 0 is the trap in that sentence.**
+   It is the *first* window and it is spent the instant the Design PR exists, so a
+   session you join, resume, or start after that PR is open has already lost it —
+   and every later turn still looks green, because the code that runs then was
+   never the broken code. If you did not watch the `opened` drain behind a running
+   turn, you do not have #229; you have A.
 4. INFO goes to `~/.agentd/logs/agentd.log`. `gateway.err.log` is WARNING and
    above, so a pass line is not in the file the plist names as stderr. **The
    runner logs to neither** — it runs in the container, so #208 and #210 are read
@@ -174,20 +189,21 @@ hard to verify.
    `agentd.session_loop`; archives older than that carry `agentd.design_loop`.
    The documented greps in this file key on message text and are unaffected.
 
-### The four windows
+### The five windows
 
 Container `agentd-huozhe-code-workflow`; roles are uid **1001** architect, **1002**
 developer.
 
 | Window | Discharges | Condition | Conflicts with |
 |---|---|---|---|
+| **0** — the Design PR opens *while a turn is running* | #229 | the drain must be **behind a turn** when the `opened` arrives | — |
 | **A** — any real turn | #208, #210 | passive; the vendor CLI only has to run | — |
 | **B** — a completed rework round | #211, #214 | a `synchronize` (real or synthesised) that yields a review turn | — |
 | **C** — a reconcile pass landing with **no turn open** | #212, and #209/#173 if forced | the session must sit **idle ≥ 5 min** | D |
 | **D** — close the issue | *(nothing — see below)* | ends the session | — |
 
-C needs the session idle and D is terminal, so **the order is A → B → C → D** and D is
-last. D no longer discharges anything: the close is how the session ends, not how #172
+Window 0 happens once, at the start, and cannot be re-run without a new session. C needs the
+session idle and D is terminal, so **the order is 0 → A → B → C → D** and D is last. D no longer discharges anything: the close is how the session ends, not how #172
 is observed — see *Why the descendant clause is not a live observation*.
 
 **Window A.** Sample the zombie count **while a turn is running**, at least twice,
