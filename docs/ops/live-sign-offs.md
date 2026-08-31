@@ -90,16 +90,23 @@ column below is what would make it verification.
 | #212 | The probe's `rss_bytes` is a high-water mark and `cli_rss_kb` is frozen at turn end — unfit for M6-3's memory rule | Runner **1.4.0** (#219). `rss_bytes`, `rss_peak_bytes` and `sampled_at` all present **and `rss_bytes` moving between two passes**. One sample cannot show movement |
 | #214 | `CHANGES_REQUESTED` pauses the session instead of dispatching Developer rework; the pending delivery then re-defers every 5 s (**4,417 times**) | ADR-38, #224 + #225, schema v11. An Architect verdict that replaces an approval dispatches a Developer rework turn, the session stays out of `PAUSED_HUMAN`, one `merge_auth superseded` logs, and no delivery id exceeds ~20 `route defer` lines an hour |
 | #172 | *(as filed)* The kill path has no caller | **#221** gave it one, and #159 ran it five times. Only *no descendant survived* is left, and it needs an in-image fixture rather than a session |
-| #229 | A `*_pr_opened` the FSM never sees strands the session permanently — the gate dropped a delivered one, the funnel lost another | ADR-40, **#237**, deployed 2026-08-31. A Design PR opened **while a turn is running** transitions on the first drain of its `opened`: one `fsm … → DESIGN_REVIEW`, `design_pr` non-NULL and `roles_locked=1` within that drain, and **no** `stale head … (design_pr_opened)` anywhere in the log. A PR that opened onto an idle drain is the case that already worked and discharges nothing |
+| #229 | A `*_pr_opened` the FSM never sees strands the session permanently — the gate dropped a delivered one, the funnel lost another | ADR-40, **#237**, deployed 2026-08-31. A real `design_pr_opened` whose **payload `head.sha` is not the PR's live head at drain time** is taken: one `fsm … → DESIGN_REVIEW`, `design_pr` non-NULL and `roles_locked=1` within that drain, and **no** `stale head … (design_pr_opened)` anywhere in the log. **Show the two SHAs differ before reading the outcome** — equal SHAs mean the case was never reached, whatever the FSM did. See *Window 0 — how to run it* |
 
 **#229 is window 0, and it is the one that cannot be retried.** The gate half only misbehaves when the
-drain is behind a turn, so the observation has to be made at the moment the Architect's first turn opens
-the Design PR — on #159 that turn ran 601 s and the delivery waited 4m23s while the head moved. Open the
-PR onto an idle drain and the event is taken correctly by code that was never broken, which is exactly the
-green signal the defect produced eight turns in a row. The second half of #229 — a lost `opened` recovered
-by the sweep's discovery — has no window at all: it needs a *dropped* delivery, which cannot be arranged
-from this side. Unit acceptance covers it; a live observation would be luck, not a test, and it is not
-listed as one.
+payload SHA is stale by the time the delivery drains, so the observation has to be made on a PR whose head
+moved inside that gap. On #159 the gap was 4m23s, because the Architect's first turn ran 601 s and the drain
+is one thread behind it. Open the PR onto an idle drain and the gap is a couple of seconds: the event is
+taken correctly by code that was never broken, which is exactly the green signal the defect produced eight
+turns in a row.
+
+**ADR-40 puts the serialized drain out of scope — "the trigger, not the defect" — so the turn is not the
+condition; the stale SHA is.** Item 12 was first written as "while a turn is running", which describes how
+#159 produced it rather than what has to be true. Any honest way of parking the drain counts, which is what
+makes this schedulable at all: waiting for an agent to push at the right moment is luck, not a procedure.
+
+The second half of #229 — a lost `opened` recovered by the sweep's discovery — has no window at all: it needs
+a *dropped* delivery, which cannot be arranged from this side. Unit acceptance covers it; a live observation
+would be luck, not a test, and it is not listed as one.
 
 **#211 was the one to fix first, and it was.** Webhook delivery failed five times in
 one evening (`failed to connect to host` — the ingress is a Tailscale funnel). Four
@@ -179,8 +186,9 @@ hard to verify.
    It is the *first* window and it is spent the instant the Design PR exists, so a
    session you join, resume, or start after that PR is open has already lost it —
    and every later turn still looks green, because the code that runs then was
-   never the broken code. If you did not watch the `opened` drain behind a running
-   turn, you do not have #229; you have A.
+   never the broken code. If you cannot show the payload SHA differed from the live
+   head at drain time, you do not have #229; you have A. **And window 0 does not
+   happen by itself** — the lag has to be staged, see *Window 0 — how to run it*.
 4. INFO goes to `~/.agentd/logs/agentd.log`. `gateway.err.log` is WARNING and
    above, so a pass line is not in the file the plist names as stderr. **The
    runner logs to neither** — it runs in the container, so #208 and #210 are read
@@ -196,7 +204,7 @@ developer.
 
 | Window | Discharges | Condition | Conflicts with |
 |---|---|---|---|
-| **0** — the Design PR opens *while a turn is running* | #229 | the drain must be **behind a turn** when the `opened` arrives | — |
+| **0** — a Design PR `opened` drains **stale** | #229 | the head must move **before the drain reaches the `opened`**; staging the lag is the whole exercise | — |
 | **A** — any real turn | #208, #210 | passive; the vendor CLI only has to run | — |
 | **B** — a completed rework round | #211, #214 | a `synchronize` (real or synthesised) that yields a review turn | — |
 | **C** — a reconcile pass landing with **no turn open** | #212, and #209/#173 if forced | the session must sit **idle ≥ 5 min** | D |
@@ -205,6 +213,61 @@ developer.
 Window 0 happens once, at the start, and cannot be re-run without a new session. C needs the
 session idle and D is terminal, so **the order is 0 → A → B → C → D** and D is last. D no longer discharges anything: the close is how the session ends, not how #172
 is observed — see *Why the descendant clause is not a live observation*.
+
+**Window 0 — how to run it.** Everything is real: real gateway, real ingress, real
+PR on a real role branch, real session row. The only staged thing is the lag, and it
+has to be staged because the drain is **one thread** — `drain_once` → `process_deferred_batch`
+→ `_process_one`, which blocks inside the turn RPC. Nothing else parks it. An
+open-turn row in the DB does not: the block is the thread, not a flag. The disk
+breaker does, but `Governor.sample_once` resets it within **≤ 30 s** whenever free
+disk is healthy, so it gives an uncontrolled sub-30-second window and is not the tool.
+
+**Use a real turn as the lag.** It costs one turn and buys 15 s to ~12 min.
+
+1. Confirm nothing is live (step 1 above), then label a throwaway issue `agentd`.
+   The session is created in `PLANNING` and the Architect turn dispatches. **That
+   turn is the lag** — the drain is now behind it, for every session, not just this one.
+2. While it runs, push a commit to `agentd/<proj>/<issue>/architect` and open a PR
+   from it. The `opened` queues at SHA **X**.
+3. Push again. The head moves to **Y**; the `synchronize` queues behind the `opened`.
+4. Let the turn end. The drain resumes and reaches the `opened`.
+
+**Read the fixture before the outcome.** This is the step that separates the
+observation from #159's green log, where every signal read fine for eight turns:
+
+```bash
+# payload SHA the delivery carries (X) — must NOT equal the live head (Y)
+cd agentd && AGENTD_ROOT=$HOME/.agentd uv run python -c "
+from agentd.db import Store, decompress_payload
+import json, pathlib
+s = Store(pathlib.Path.home()/'.agentd'/'state.db')
+for r in s.list_deliveries_for('<repo>', [<PR>]):
+    d = json.loads(decompress_payload(r['payload']))
+    if d.get('action') == 'opened' and 'pull_request' in d:
+        print(r['delivery_id'][:12], r['issue_num'], d['pull_request']['head']['sha'])"
+gh api repos/<repo>/pulls/<PR> --jq .head.sha      # live head (Y)
+```
+
+**The check is known to reach its case, because the case exists in this database.**
+Run against #159's own stranded delivery it prints `420fa4e0-a1d 227 2f9d710e3371`,
+while PR #227's head is `0da33933fa03` — differing SHAs, on the delivery the gate
+actually dropped. A check that cannot produce a positive on the one instance we have
+is not a check; this one does.
+
+Only when the SHAs differ, assert:
+
+```bash
+grep -E "fsm .*→ DESIGN_REVIEW" ~/.agentd/logs/agentd.log      # exactly one
+grep -c "stale head .*design_pr_opened" ~/.agentd/logs/agentd.log   # must be 0
+```
+
+plus `design_pr` non-NULL and `roles_locked=1` on the session row **within that
+drain**, not eventually.
+
+Cost is ~2–3 vendor turns: the Architect turn that creates the lag, and the Developer
+review turn the take dispatches. No image rebuild. If the turn ends before step 3
+lands, the `opened` drains onto an idle gap and window 0 is spent — start a new issue
+rather than reading the green line.
 
 **Window A.** Sample the zombie count **while a turn is running**, at least twice,
 and the acceptance is *flat*, not *small*:
