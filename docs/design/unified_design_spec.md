@@ -20,7 +20,7 @@ Amendments are also marked inline at the point they apply, which is where an imp
 
 | Version | Date | Change |
 |---|---|---|
-| **1.40.1** | 2026-08-29 | **Named residual: `AWAITING_VERIFICATION` does not discover a second Feature PR** (#229, found reviewing #237). → [ADR-40](ADR/adr-40-untracked-pr-opened.md) |
+| **1.40.1** | 2026-08-31 | **Named residual: `AWAITING_VERIFICATION` does not discover a second Feature PR** (#229, found reviewing #237). → [ADR-40](ADR/adr-40-untracked-pr-opened.md) |
 | **1.40.0** | 2026-08-29 | **A `*_pr_opened` the FSM never sees strands the session permanently, and one session produced it twice by two unrelated causes** (#229, ADR-40). → [ADR-40](ADR/adr-40-untracked-pr-opened.md) |
 | **1.39.0** | 2026-08-27 | **`design_loop.py` is named for one phase of the session and owns all of them** (#159, ADR-39). → [ADR-39](ADR/adr-39-session-loop-rename.md) |
 | **1.38.0** | 2026-08-25 | **A `CHANGES_REQUESTED` that replaces an approval paused the session, and the delivery carrying that verdict was 19 ms behind it in the same batch** (#214, ADR-38). → [ADR-38](ADR/adr-38-superseded-approval-defer-clock.md) |
