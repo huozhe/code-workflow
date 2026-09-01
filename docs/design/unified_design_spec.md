@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | **Status** | Proposed for formal approval (Phase 3 exit) |
-| **Version** | 1.40.2 — see [Revision history](#revision-history) |
+| **Version** | 1.40.3 — see [Revision history](#revision-history) |
 | **Implements** | [`docs/requirements/SRS_async_multiagent_ai_coding_system.md`](../requirements/SRS_async_multiagent_ai_coding_system.md) **v1.3** |
 | **Supersedes** | [`proposals/claude_design_spec.md`](proposals/claude_design_spec.md) (#4) · [`proposals/grok_design_spec.md`](proposals/grok_design_spec.md) (#2) · [`proposals/gemini_design_spec.md`](proposals/gemini_design_spec.md) (#3) |
 | **Ref** | Issue #1 |
@@ -20,6 +20,7 @@ Amendments are also marked inline at the point they apply, which is where an imp
 
 | Version | Date | Change |
 |---|---|---|
+| **1.40.3** | 2026-09-01 | **`turn.resume` heard no runner notifications, and §12.3's crash window names an RPC that has never run** (#246). |
 | **1.40.2** | 2026-09-01 | **ADR-38's clock has a third return site: `role held`, which knows its own deadline** (#230). → [ADR-38](ADR/adr-38-superseded-approval-defer-clock.md) |
 | **1.40.1** | 2026-08-31 | **Named residual: `AWAITING_VERIFICATION` does not discover a second Feature PR** (#229, found reviewing #237). → [ADR-40](ADR/adr-40-untracked-pr-opened.md) |
 | **1.40.0** | 2026-08-29 | **A `*_pr_opened` the FSM never sees strands the session permanently, and one session produced it twice by two unrelated causes** (#229, ADR-40). → [ADR-40](ADR/adr-40-untracked-pr-opened.md) |
@@ -1029,7 +1030,9 @@ Hourly, **on GC's own timer and never on the reconciler thread** (ADR-23; `git g
 
 **Archive deletion is deliberately not routed through the `artifacts` ledger below.** That ledger exists to catch artifacts that can leak *before* teardown completes — the crash-mid-`git worktree add` case that motivates this section's filesystem set-diff. An archive is not that kind of artifact: it is written *as part of* teardown (§10.5 step 3), not a side effect that can precede or outlive it, so there is no crash window for a ledger row to close over — a directory `mtime` listing already gives the same answer, for less machinery. (Full rationale: ADR-12, §16.)
 
-**Orphan reconciliation — the artifact ledger is not sufficient on its own.** §10.5 tracks worktrees, branches, and scratch paths via `artifact.register`, but that RPC is sent *after* the runner performs the action. A hard crash between `git worktree add` and the register call — an OOM kill is the realistic case — leaves a worktree on disk that the ledger has never heard of, so teardown cannot remove it and the "zero rows with `removed_at IS NULL`" check reports success while leaking disk.
+**Orphan reconciliation — the artifact ledger is not sufficient on its own.** ~~§10.5 tracks worktrees, branches, and scratch paths via `artifact.register`, but that RPC is sent *after* the runner performs the action.~~ **Amended (#246): the mechanism named here has never run.** No code in the runner image sends `artifact.register` — the only occurrence there is a defensive *inbound* handler — because M3-C (`dd35b68`) moved the ledger to **supervisor-observed** registration at `ensure_session`, "not model-reported artifacts — empty by construction on real adapters". Measured on this host: **zero** `artifact.register notify` lines across every rotated log, against **94** artifact rows, all supervisor-observed. The RPC remains in §14.2 as a contract surface with no emitter.
+
+**The conclusion survives; the crash window is a different one.** The gap is inside `ensure_session`, between the supervisor's `git worktree add` and its own `register_artifact` call — an OOM kill is still the realistic case — which leaves a worktree on disk the ledger has never heard of, so teardown cannot remove it and the "zero rows with `removed_at IS NULL`" check reports success while leaking disk. §12.3's filesystem set-diff is therefore still required, for a window one component wide rather than two. Do not read this paragraph as evidence that the runner reports its own artifacts.
 
 GC therefore reconciles against the filesystem rather than trusting the ledger:
 
@@ -1123,7 +1126,7 @@ First frame after connect must be `session.attach` carrying the bearer token; an
 | Method | Purpose |
 |---|---|
 | `notify.progress` | Streaming turn progress (notification; no `id`) — partial CLI output while a turn is open |
-| `artifact.register` | Declare a worktree/branch/scratch path for the cleanup ledger |
+| `artifact.register` | Declare a worktree/branch/scratch path for the cleanup ledger. **No emitter today** (#246) — the ledger is supervisor-observed (§12.3); kept as a contract surface, and the gateway handles it identically on `turn.dispatch` and `turn.resume` |
 | `escalate.human` | Request human input; pauses the session (FR-3.3/3.4) |
 
 **`turn.dispatch` on a held pipe (#25).** The runner does not `exec` a new CLI per turn for real adapters. It writes one user message (claude stream-json) or one `session/prompt` (grok ACP) on the existing stdin, reads until turn-end (`{"type":"result"}` / `stopReason: end_turn`), and may emit `notify.progress` frames before the JSON-RPC response. **The stream carries no turn boundary of its own, and the runner must supply one (ADR-29 / #162).** "Reads until turn-end" is only correct if exactly one end-of-turn frame is produced per message written, and that invariant is the vendor's to keep, not ours to assume: a claude session-limit refusal emits an `is_error` `result` and then emits the *real* `result` for the same message once the limit resets. Because the stdout queue lives for the CLI process's lifetime and is shared by every turn, one surplus frame shifts every later turn by one, permanently, until the process respawns. The runner therefore **drains the queue before writing a prompt** — anything already there is by construction from an earlier exchange, and is discarded with a WARNING naming the turn — and **respawns the role's CLI after any `is_error` result**, because an error frame does not prove the vendor is finished with the prompt. Where the wire protocol offers a correlator the adapter must use it instead: grok ACP already matches the `session/prompt` id and needs only the log. The gateway client must drain notification frames until the matching response `id`. Per-turn `deadline_s` still bounds the wait; on expiry the child is killed and the result is `failed` so the role lock can release. Crash or kill → next dispatch respawns with vendor `-c` / session store + transcript under §14.5.

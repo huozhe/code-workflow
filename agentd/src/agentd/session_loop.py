@@ -14,7 +14,7 @@ import threading
 import time
 import uuid
 import zlib
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -1463,46 +1463,12 @@ class SessionLoop:
             summary=None,
         )
         with _inflight(turn_id), _progress_summary(turn_id, role) as progress:
-
-            def _on_runner_notify(method: str, params: dict[str, Any]) -> None:
-                # Runner → gateway: artifact.register (M3-C / §14.2),
-                # notify.progress (§14.2 / #228).
-                if method == "notify.progress":
-                    # Never the chunk itself: it is model output, the log is not
-                    # the transcript, and it is already truncated for a different
-                    # reason at cli_session.py:1038.
-                    if progress.record(str(params.get("chunk") or "")):
-                        log.info(
-                            "turn progress turn=%s role=%s chunks=%s bytes=%s "
-                            "quiet=%.0fs max_quiet=%.0fs",
-                            turn_id,
-                            role,
-                            progress.chunks,
-                            progress.bytes,
-                            progress.quiet,
-                            progress.max_quiet,
-                        )
-                    return
-                if method != "artifact.register":
-                    return
-                ref = str(params.get("ref") or "").strip()
-                if not ref:
-                    return
-                art_role = str(params.get("role") or role)
-                kind = str(params.get("kind") or "scratch")
-                self.store.register_artifact(
-                    session_key=session_key,
-                    role=art_role,
-                    kind=kind,
-                    ref=ref,
-                )
-                log.info(
-                    "artifact.register notify session=%s role=%s kind=%s ref=%s",
-                    session_key,
-                    art_role,
-                    kind,
-                    ref,
-                )
+            _on_runner_notify = self._runner_notify(
+                session_key=session_key,
+                role=role,
+                turn_id=turn_id,
+                progress=progress,
+            )
 
             lock = _lock_for_project_role(project_key, role)
             # True only after turn.dispatch is in flight — connect failures are not
@@ -1813,7 +1779,7 @@ class SessionLoop:
         deadline_s = int(self.config.turn_deadline_s)
         started = time.time()
         call_started = False
-        with _inflight(turn_id):
+        with _inflight(turn_id), _progress_summary(turn_id, role) as progress:
             lock = _lock_for_project_role(project_key, role)
             try:
                 with lock, RunnerClient(
@@ -1821,6 +1787,12 @@ class SessionLoop:
                     int(port_s),
                     bearer,
                     timeout_s=float(self.config.rpc_timeout_s),
+                    on_notification=self._runner_notify(
+                        session_key=sk,
+                        role=role,
+                        turn_id=turn_id,
+                        progress=progress,
+                    ),
                 ) as cli:
                     call_started = True
                     result = cli.call(
@@ -1857,6 +1829,18 @@ class SessionLoop:
             self.store.finish_turn(
                 turn_id, ended_at=ended, status=status, summary=summary
             )
+            # #246: the dispatch path has done this since M3-C and resume never
+            # did. Inert in practice — the runner returns "artifacts": [] on
+            # every path — but leaving one of the two asymmetric is how the
+            # notification gap got here.
+            for art in (result or {}).get("artifacts") or []:
+                if isinstance(art, dict) and art.get("ref"):
+                    self.store.register_artifact(
+                        session_key=sk,
+                        role=role,
+                        kind=str(art.get("kind") or "scratch"),
+                        ref=str(art["ref"]),
+                    )
             if status not in ("gateway_timeout", "quota_exhausted", "role_busy"):
                 fresh = self.store.get_session(sk) or {}
                 budget = BudgetState(
@@ -1871,6 +1855,75 @@ class SessionLoop:
                     consec_agent_turns=budget.consec_agent_turns,
                 )
             return True
+
+    def _runner_notify(
+        self,
+        *,
+        session_key: str,
+        role: str,
+        turn_id: str,
+        progress: _ProgressCounter,
+    ) -> Callable[[str, dict[str, Any]], None]:
+        """One answer to "what does the gateway do with a runner notification".
+
+        Both `turn.dispatch` and `turn.resume` use this (#246). Two call sites
+        answering that question differently is the shape ADR-21 warns about, and
+        `turn.resume` answered it by not asking: it passed no `on_notification`
+        at all, so a resumed turn would have reported `chunks=0` however much it
+        streamed — worse than reporting nothing, because `chunks=0` is the signal
+        #228 added.
+
+        **`artifact.register` is inert today and wired anyway.** Nothing in the
+        runner image sends it — the only occurrence there is a defensive inbound
+        handler — because M3-C moved the ledger to supervisor-observed
+        registration, "not model-reported artifacts — empty by construction on
+        real adapters" (`dd35b68`). Zero `artifact.register notify` lines exist
+        across every rotated log on this host, against 94 supervisor-observed
+        artifact rows. It is wired for symmetry, so a future emitter cannot be
+        heard by one call site and ignored by the other.
+        """
+
+        def _on_runner_notify(method: str, params: dict[str, Any]) -> None:
+            # Runner → gateway: artifact.register (M3-C / §14.2),
+            # notify.progress (§14.2 / #228).
+            if method == "notify.progress":
+                # Never the chunk itself: it is model output, the log is not
+                # the transcript, and it is already truncated for a different
+                # reason at cli_session.py:1038.
+                if progress.record(str(params.get("chunk") or "")):
+                    log.info(
+                        "turn progress turn=%s role=%s chunks=%s bytes=%s "
+                        "quiet=%.0fs max_quiet=%.0fs",
+                        turn_id,
+                        role,
+                        progress.chunks,
+                        progress.bytes,
+                        progress.quiet,
+                        progress.max_quiet,
+                    )
+                return
+            if method != "artifact.register":
+                return
+            ref = str(params.get("ref") or "").strip()
+            if not ref:
+                return
+            art_role = str(params.get("role") or role)
+            kind = str(params.get("kind") or "scratch")
+            self.store.register_artifact(
+                session_key=session_key,
+                role=art_role,
+                kind=kind,
+                ref=ref,
+            )
+            log.info(
+                "artifact.register notify session=%s role=%s kind=%s ref=%s",
+                session_key,
+                art_role,
+                kind,
+                ref,
+            )
+
+        return _on_runner_notify
 
     def report_missed(
         self, session_key: str, notices: list[dict[str, Any]]
