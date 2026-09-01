@@ -3,14 +3,18 @@
 `CAP_DAC_OVERRIDE` is what lets root read the role's `0700` token dir; `CAP_KILL`
 is what lets it signal the role's CLI. §7.2 drops both, so the runner must borrow
 the role's identity for each. The kill learned that (ADR-35 / #221); the wipe did
-not (#233).
+not (#233), and this file is the wipe's half.
+
+The kill's half is **already** `test_adr35_kill_in_image.py::test_2_no_descendant_survives_the_kill`,
+which drives `_kill_unlocked` with a child held open — item 6's actual ask. Do not
+add a second, helper-level answer to that question here: a test calling
+`_killpg_as_role` stays green when `_kill_unlocked` stops calling it.
 
 **These fixtures must run inside the image with the production capability set.**
-On an unprivileged host where the runner and the role share a uid, neither `EPERM`
-ever happens and both assertions pass against the broken code — which is the trap
-#172's checklist item 6 and #233's acceptance both name. So each test asserts the
-capability set *first*, and a host that cannot reach the case fails rather than
-passes.
+On an unprivileged host where the runner and the role share a uid, the `EPERM`
+never happens and the assertions pass against the broken code — which is the trap
+#233's acceptance names. So each test asserts the capability set *first*, and a
+host that cannot reach the case fails rather than passes.
 """
 
 from __future__ import annotations
@@ -24,7 +28,6 @@ import pytest
 
 # Linux capability bit numbers (`man 7 capabilities`).
 _CAP_DAC_OVERRIDE = 1
-_CAP_KILL = 5
 
 _UID_ARCHITECT = 1001
 
@@ -95,10 +98,9 @@ def _cap_eff(container: str) -> int:
 
 
 def test_the_container_actually_denies_uid_0(prod_caps_container: str) -> None:
-    """Guard for both tests below. If this fails, they prove nothing."""
+    """Guard for every test below. If this fails, they prove nothing."""
     caps = _cap_eff(prod_caps_container)
     assert not caps & (1 << _CAP_DAC_OVERRIDE), f"CapEff {caps:#018x} has DAC_OVERRIDE"
-    assert not caps & (1 << _CAP_KILL), f"CapEff {caps:#018x} has KILL"
 
 
 def test_root_cannot_read_the_role_token_dir(prod_caps_container: str) -> None:
@@ -234,70 +236,3 @@ print(json.dumps(resp))
         "the third consequence #233 names"
     )
     assert "cli still running" in resp["error"]["message"]
-
-
-def test_kill_as_the_role_takes_the_cli_s_descendants(
-    prod_caps_container: str,
-) -> None:
-    """#172's remaining clause, the one three live attempts could not reach.
-
-    The overlap between a vendor tool subprocess and a wall-clock kill is not
-    controllable from outside the container (session #159, three attempts), so
-    the stand-in holds a child open deliberately: the group is what must die,
-    not the leader. Asserts `/proc/<child>` is gone, not that kill was called.
-    """
-    caps = _cap_eff(prod_caps_container)
-    assert not caps & (1 << _CAP_KILL)
-
-    out = _exec(
-        prod_caps_container,
-        f"""
-import json, os, signal, subprocess, time
-from agentd_runner.cli_session import _killpg_as_role
-# Stand-in for the role CLI: a leader in its own process group holding a child.
-leader = subprocess.Popen(
-    ['sh', '-c', 'sleep 300 & echo $!; wait'],
-    stdout=subprocess.PIPE, text=True, preexec_fn=os.setsid,
-    user={_UID_ARCHITECT}, group={_UID_ARCHITECT},
-)
-child = int(leader.stdout.readline().strip())
-
-def alive(p):
-    # /proc/<pid> survives death: a reaped-pending process is a zombie and the
-    # directory stays until someone wait()s it. pid 1 in this container is the
-    # entrypoint, which reaps nothing (that is #210), so a SIGKILLed group member
-    # would read as alive on an existence check and the assertion would be
-    # meaningless. State Z is dead.
-    try:
-        with open('/proc/%d/stat' % p) as f:
-            return f.read().rsplit(') ', 1)[1].split()[0] != 'Z'
-    except FileNotFoundError:
-        return False
-
-res = {{'child_alive_before': alive(child), 'leader_alive_before': alive(leader.pid)}}
-res['root_direct_errno'] = 0
-try:
-    os.kill(child, 0)          # signal 0 still runs the permission check
-except OSError as e:
-    res['root_direct_errno'] = e.errno
-rc = _killpg_as_role(leader.pid, {_UID_ARCHITECT}, signal.SIGKILL)
-for _ in range(50):
-    if not alive(child) and not alive(leader.pid):
-        break
-    time.sleep(0.1)
-res['rc'] = rc
-res['child_alive_after'] = alive(child)
-res['leader_alive_after'] = alive(leader.pid)
-leader.wait()                  # reap our own child; the group kill is the subject
-print(json.dumps(res))
-""",
-    )
-    got = json.loads(out)
-    assert got["child_alive_before"] is True, "the stand-in never held a child"
-    assert got["root_direct_errno"] != 0, (
-        "root signalled the role's process directly — CAP_KILL is present, so "
-        "this host cannot reach #172's case"
-    )
-    assert got["rc"] == 0, f"_killpg_as_role returned errno {got['rc']}"
-    assert got["leader_alive_after"] is False
-    assert got["child_alive_after"] is False, "the descendant survived the group kill"
