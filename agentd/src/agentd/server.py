@@ -96,6 +96,11 @@ def create_app(
                 )
             except Exception:
                 log.exception("session_loop init failed; deferred deliveries stay parked")
+            # #230: next_attempt_at is persisted, the holds that justify it are
+            # in-memory and forgotten here. Clearing on startup keeps the two
+            # from disagreeing — otherwise a role-held clock outlives its hold
+            # and parks the delivery for the remainder of a dead deadline.
+            store.clear_deferred_clocks()
             state.dispatcher = Dispatcher(
                 store, config, state.nudge, session_loop=session_loop
             )

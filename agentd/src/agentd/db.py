@@ -952,6 +952,25 @@ class Store:
             )
             self._conn.commit()
 
+    def defer_delivery_until(self, delivery_id: str, next_attempt_at: int) -> None:
+        """Set the clock to a known deadline (#230), not a guessed backoff.
+
+        ``defer_delivery`` computes ``now + backoff(defer_count)`` in SQL and
+        would ignore a deadline the caller already holds. ``role held`` holds
+        one: ``_role_busy_until`` is the exact time the role frees up.
+        ``defer_count`` still advances so a row's history stays readable.
+        """
+        with self._lock:
+            self._conn.execute(
+                """
+                UPDATE deliveries
+                SET next_attempt_at = ?, defer_count = defer_count + 1
+                WHERE delivery_id = ?
+                """,
+                (int(next_attempt_at), delivery_id),
+            )
+            self._conn.commit()
+
     def clear_deferred_clocks(self) -> None:
         """ADR-38 (g): global, because deliveries.issue_num for a PR event is the PR."""
         with self._lock:
