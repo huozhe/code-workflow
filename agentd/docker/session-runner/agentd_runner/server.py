@@ -103,6 +103,39 @@ def write_role_token(role: str, token: str) -> Path:
     return write_role_secret(role, "token", token)
 
 
+def _wipe_role_tokens_as_role(role_dir: Path, uid: int) -> int:
+    """Unlink the role's tmpfs secrets from a forked helper that is the role (#233).
+
+    Pid 1 is root, and §7.2's ``--cap-drop ALL`` removes ``CAP_DAC_OVERRIDE``, so
+    uid 0 does **not** bypass the ``0700`` on ``/run/agent/<role>``: ``iterdir()``
+    raises ``EPERM``. Same wall ``_killpg_as_role`` works around for ``CAP_KILL``,
+    reached through a different syscall — the kill learned the trick, the wipe
+    never did. Returns 0 on success, otherwise an errno.
+
+    Inside the fork, nothing that is not async-signal-safe, and **no logging**:
+    the fork happens in a threaded process and another thread may hold the
+    logging lock. ``_killpg_as_role`` and ``_run_as_role`` avoid it for the same
+    reason.
+    """
+    pid = os.fork()
+    if pid == 0:
+        try:
+            os.setgid(uid)
+            os.setuid(uid)
+            for name in os.listdir(role_dir):
+                try:
+                    os.unlink(os.path.join(role_dir, name))
+                except OSError:
+                    pass
+            os._exit(0)
+        except OSError as exc:
+            os._exit(exc.errno or 1)
+        except BaseException:
+            os._exit(1)
+    _, status = os.waitpid(pid, 0)
+    return os.WEXITSTATUS(status) if os.WIFEXITED(status) else 1
+
+
 def _run_as_role(uid: int, fn_name: str, paths: list[str]) -> int:
     """Fork, setuid(role), create 0700 dirs. Returns child exit code."""
     pid = os.fork()
@@ -452,16 +485,27 @@ def handle_request(req: dict[str, Any], authed: bool) -> dict[str, Any]:
         from agentd_runner import cli_session as _cli
 
         kill_failures = _cli.shutdown_all()
-        # Best-effort: wipe secrets from tmpfs
-        for role in ROLE_UIDS:
+        # Best-effort: wipe secrets from tmpfs, as the role (#233). Root cannot
+        # read the 0700 dir without CAP_DAC_OVERRIDE, so this ran as root, raised
+        # EPERM from iterdir() *outside* the try below, and took the whole RPC
+        # down — reporting a clean kill as -32000 and masking -32003. The wipe
+        # must never decide teardown's result: it is logged, not returned.
+        for role, uid in ROLE_UIDS.items():
             role_dir = TOKEN_ROOT / role
-            if not role_dir.is_dir():
-                continue
-            for p in role_dir.iterdir():
-                try:
-                    p.unlink()
-                except OSError:
-                    pass
+            try:
+                if not role_dir.is_dir():
+                    continue
+                rc = _wipe_role_tokens_as_role(role_dir, uid)
+            except OSError as exc:  # is_dir() on an unreadable parent
+                rc = exc.errno or 1
+            if rc:
+                log.warning(
+                    "teardown could not wipe tokens role=%s dir=%s errno=%s "
+                    "— secrets remain until the container stops",
+                    role,
+                    role_dir,
+                    rc,
+                )
         STATE.initialized = False
         if kill_failures:
             # FR-4.3's "kill held CLI children" is a claim about the container,

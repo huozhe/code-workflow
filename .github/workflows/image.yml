@@ -14,6 +14,9 @@ on:
     paths:
       - "agentd/docker/session-runner/**"
       - "agentd/tests/test_image_agent_clis.py"
+      - "agentd/tests/test_image_role_privilege_boundary.py"
+      - "agentd/tests/test_adr35_kill_in_image.py"
+      - "agentd/tests/probes/**"
       - "agentd/tests/conftest.py"
       - "agentd/src/agentd/supervisor.py"
       - ".github/workflows/image.yml"
@@ -22,6 +25,9 @@ on:
     paths:
       - "agentd/docker/session-runner/**"
       - "agentd/tests/test_image_agent_clis.py"
+      - "agentd/tests/test_image_role_privilege_boundary.py"
+      - "agentd/tests/test_adr35_kill_in_image.py"
+      - "agentd/tests/probes/**"
       - "agentd/tests/conftest.py"
       - "agentd/src/agentd/supervisor.py"
       - ".github/workflows/image.yml"
@@ -47,4 +53,11 @@ jobs:
           enable-cache: true
           python-version: "3.12"
       - run: uv sync --all-extras
-      - run: uv run pytest -q tests/test_image_agent_clis.py
+      # Every test that needs Docker runs here, because pr.yml stubs `docker`
+      # and these skip there. ADR-35's kill fixture had never run in CI at all
+      # since #199 added it (#244) — a fixture no job runs is not a guard.
+      - run: >
+          uv run pytest -q
+          tests/test_image_agent_clis.py
+          tests/test_image_role_privilege_boundary.py
+          tests/test_adr35_kill_in_image.py
