@@ -1052,6 +1052,11 @@ class SessionLoop:
                 recipient_role,
                 held_until - time.time(),
             )
+            # #230: this site knows the answer, so it does not need ADR-38's
+            # backoff — one attempt when the hold expires, not 2,065 guesses.
+            # The clock is persisted and the hold is not (`:271`), so a restart
+            # must clear it; server.py does, on startup.
+            self.store.defer_delivery_until(delivery_id, int(held_until))
             return
 
         # Stall only when a turn would be routed — self-echo under §5.3 adapter
