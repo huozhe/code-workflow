@@ -149,25 +149,48 @@ def test_role_held_delivery_is_repicked_once_after_the_hold(tmp_path: Path) -> N
 
 
 def test_a_restart_does_not_strand_the_delivery_the_hold_parked(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The trap. `_role_busy_until` is in-memory and forgotten on restart
-    (`session_loop.py:271` says so); `next_attempt_at` is persisted. Writing the
-    exact hold without clearing it on startup turns 2,065 noisy lines into a
-    silently stranded delivery — a worse bug than the one being fixed."""
+    """The trap, driven through the real entry point.
+
+    `_role_busy_until` is in-memory and forgotten on restart
+    (`session_loop.py:271` says so); `next_attempt_at` is a column. Writing the
+    exact hold without clearing it at startup turns 2,065 noisy lines into a
+    silently stranded delivery — worse than the bug, and the same class as
+    #211 and #229.
+
+    This must drive `create_app`'s lifespan, not `Store.clear_deferred_clocks`.
+    Calling the store method here would only prove the method unparks a row,
+    and would still pass with the startup call deleted — which is the shape
+    this file exists to reject. Delete `server.py`'s call and this test fails.
+    """
+    from fastapi.testclient import TestClient
+
+    from agentd.dispatcher import Dispatcher
+    from agentd.governor import ResourceGovernor
+    from agentd.server import create_app
+
     store = Store(tmp_path / "state.db")
     _seed(store)
     _insert_comment(store, did="d-restart")
-    _role_busy_until.clear()
-    _hold(store, seconds=4 * 3600)
+    until = _hold(store, seconds=4 * 3600)
 
     loop = _loop(store, tmp_path)
     loop.process_deferred_batch()
     assert store.list_deferred() == []
+    row = store._conn.execute(
+        "SELECT next_attempt_at FROM deliveries WHERE delivery_id='d-restart'"
+    ).fetchone()
+    assert int(row["next_attempt_at"]) == int(until)  # the fixture reached the case
 
-    # Restart: the in-memory hold is gone, the DB clock is not.
+    # The restart itself: in-memory hold gone, DB clock still in the future.
     _role_busy_until.clear()
-    store.clear_deferred_clocks()
+    monkeypatch.setattr(ResourceGovernor, "start", lambda self: None)
+    monkeypatch.setattr(Dispatcher, "start", lambda self: None)
+
+    app = create_app(_cfg(tmp_path), store, b"secret", start_workers=True)
+    with TestClient(app):
+        pass
 
     assert [r["delivery_id"] for r in store.list_deferred()] == ["d-restart"]
     store.close()
