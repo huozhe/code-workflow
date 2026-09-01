@@ -1,7 +1,7 @@
 # Live sign-offs — what is still unproven, and the one session that proves most of it
 
-**Status:** 2026-08-31. Six items discharged on the live session for #57 (2026-08-24/25); **#229 discharged on throwaway session #240**, the first item deliberately staged rather than waited for.
-**#173 and #172 are not.** The seven defects that run surfaced are now fixed and deployed, and each
+**Status:** 2026-09-01. Six items discharged on the live session for #57 (2026-08-24/25); **#229** on throwaway session #240, the first item deliberately staged rather than waited for; **#209, #173 and #210** on the full exercise for #248. **#214 is the one this list is now waiting on**, and #248 could not reach it — see the note under the ledger.
+~~**#173 and #172 are not.**~~ **Both are now discharged** — #172 by fixture (#244), #173 on #248. The seven defects that run surfaced are now fixed and deployed, and each
 carries a live acceptance of its own — so the list of what is unproven grew rather than shrank. They
 are one session, and it is scheduled per [Running the exercise](#running-the-exercise). Owner action
 (`@huozhe`).
@@ -83,14 +83,31 @@ column below is what would make it verification.
 | # | Defect as filed | Fixed in — and what must now be observed |
 |---|---|---|
 | #208 | Stale-drain logs benign vendor notifications at WARNING, burying the discarded-`result` signal the level exists for | Runner **1.4.0** (#219). No `WARNING … stale frame discarded … _x.ai`, **and** at least one INFO `stale frames discarded … notifications=N of M`. Both halves: zero warnings with no `notifications=` line means the drain never ran |
-| #209 | Reconciler-synthesised reviews omit `pull_request.user`, bypassing ADR-30's author-sent guard. The obvious one-line fix silently stalls the loop instead | **#220**. A synthesised review from the PR's own author logged `author-sent PR event, no turn (#173)` |
-| #173 | *(re-opened by the above)* A rework round logs `author-sent PR event, no turn`, and `silent_turns` never exceeds 1 | Same **event** as #209, **two reads.** The log line is #209's half; #173's is `SELECT silent_turns` on the session row, and the grep does not stand in for it. On #57 the log half held and the counter half failed at `silent_turns` **2** |
-| #210 | Runner pid 1 never reaps adopted children: **175 zombies** in one session, against a `pids.max` of 1024 | Runner **1.4.0** (#219). Zombie count **flat** across turns, not merely small |
+| #209 | Reconciler-synthesised reviews omit `pull_request.user`, bypassing ADR-30's author-sent guard. The obvious one-line fix silently stalls the loop instead | **#220**. **DISCHARGED 2026-09-01** on session #248. The funnel was dropping heavily, so the synthesised reviews arose naturally rather than being forced. **Verified in both directions, which a drops-only result cannot do** — a guard that dropped everything would look identical: three synths with `sender == pull_request.user` (`huozheclaude` on his own PR #250) logged `author-sent PR event, no turn`, while a fourth with `sender=huozhegrok` on the same PR **routed** as `design_changes_requested` |
+| #173 | *(re-opened by the above)* A rework round logs `author-sent PR event, no turn`, and `silent_turns` never exceeds 1 | Same **event** as #209, **two reads.** **DISCHARGED 2026-09-01** on session #248, and the counter was read independently of the log: `silent_turns` was **0 at every observation** across 5 turns, a completed design rework round and a merge — `PLANNING → DESIGN_REVIEW → DESIGN_REWORK → DESIGN_REVIEW → DESIGN_APPROVED → IMPLEMENTING`. On #57 the log half held and this counter reached **2** |
+| #210 | Runner pid 1 never reaps adopted children: **175 zombies** in one session, against a `pids.max` of 1024 | Runner **1.4.0** (#219). ~~Zombie count **flat** across turns, not merely small.~~ **Amended 2026-09-01: flat is the wrong shape and a run looking for it would read as a failure.** What non-accumulation actually looks like is **bounded per turn and cleared**: on #248, 0 → 2 across the design half, then **77 → 89 in 41 s** during a code-half turn, back to **0**, and **0 with 4 processes total** in the container after teardown against the 1024 limit. **DISCHARGED 2026-09-01** on that reading |
 | #211 | A dropped `pull_request.synchronize` strands a session, and the reconciler has no node kind to regenerate it | ADR-37, #222 + #223. A completed rework round leaves `silent_turns` 0 or 1, never 3, and records no `unauthorized` on a merge that had Architect approval on the live head |
 | #212 | The probe's `rss_bytes` is a high-water mark and `cli_rss_kb` is frozen at turn end — unfit for M6-3's memory rule | Runner **1.4.0** (#219). `rss_bytes`, `rss_peak_bytes` and `sampled_at` all present **and `rss_bytes` moving between two passes**. One sample cannot show movement |
 | #214 | `CHANGES_REQUESTED` pauses the session instead of dispatching Developer rework; the pending delivery then re-defers every 5 s (**4,417 times**) | ADR-38, #224 + #225, schema v11. An Architect verdict that replaces an approval dispatches a Developer rework turn, the session stays out of `PAUSED_HUMAN`, one `merge_auth superseded` logs, and no delivery id exceeds ~20 `route defer` lines an hour |
 | #172 | *(as filed)* The kill path has no caller | **#221** gave it one, and #159 ran it five times. *No descendant survived* was the remainder, and it was **already pinned by a fixture** — `tests/test_adr35_kill_in_image.py::test_2_no_descendant_survives_the_kill`, added by #199, which drives `_kill_unlocked` with a child held open and asserts by `/proc` **State**, never by the pid's existence. This row said it *needed* one for two months after it had one. **DISCHARGED 2026-09-01**, and what actually changed is that the fixture now runs in CI (#244) — it never had |
 | #229 | A `*_pr_opened` the FSM never sees strands the session permanently — the gate dropped a delivered one, the funnel lost another | ADR-40, **#237**, deployed 2026-08-31. **DISCHARGED 2026-08-31** on throwaway session #240. Payload `head.sha` `6dadc103` vs live head `84de221c`, delivery queued 97 s behind an open turn — the fixture reached the case before the outcome was read. Then `fsm huozhe/code-workflow#240 → DESIGN_REVIEW`, `design_pr=241`, `roles_locked=1`, `stale head … design_pr_opened` count **0**. **Item 5 fell out with it:** the take stamped the *live* head, so the trailing `synchronize` logged `duplicate head 84de221c5d51 (design_revised)` instead of a second review turn |
+
+**What #248 left undone, and why it is not a scheduling problem.** The exercise for
+#248 discharged #209, #173 and #210 and then **could not reach #214**. Its Feature PR was
+merged by the Architect while the session sat in `CODE_REVIEW` — a real §8.4 bypass, which
+the gate recorded correctly (`unauthorized Feature PR merge: state=CODE_REVIEW expected
+MERGING`), and the first time that line has been **true** rather than the stale-FSM
+artefact ADR-37 fixed. With the PR merged there was no approval left to replace, so
+window B closed unreached.
+
+**#214 needs an approval that is then superseded**, and nothing in the loop produces that
+on its own — the natural order is `CHANGES_REQUESTED → APPROVED`, which #248 followed.
+Put the *submit the verdict, then re-read the checks* protocol in the brief, as this file
+already says, and expect to still need luck. Two further hazards #248 exposed: a lost
+approval webhook cannot be recovered by synthesis (the synth carries no head SHA), and a
+redelivered approval arriving **after** the merge burns five merge-auth attempts against a
+`mergeable_state` that will read `unknown` forever, then escalates. Both are open issues,
+not properties of the window.
 
 **#229 is window 0, and it is the one that cannot be retried.** *(Discharged 2026-08-31 on throwaway session #240 — kept in full because the window remains the shape any future `*_pr_opened` acceptance has to be observed in, and because the runbook below is what made it schedulable.)* The gate half only misbehaves when the
 payload SHA is stale by the time the delivery drains, so the observation has to be made on a PR whose head
@@ -209,9 +226,9 @@ developer.
 | Window | Discharges | Condition | Conflicts with |
 |---|---|---|---|
 | **0** — a Design PR `opened` drains **stale** | ~~#229~~ *(discharged 2026-08-31)* | the head must move **before the drain reaches the `opened`**; staging the lag is the whole exercise | — |
-| **A** — any real turn | #208, #210 | passive; the vendor CLI only has to run | — |
+| **A** — any real turn | ~~#208, #210~~ *(both discharged)* | passive; the vendor CLI only has to run | — |
 | **B** — a completed rework round | #211, #214 | a `synchronize` (real or synthesised) that yields a review turn | — |
-| **C** — a reconcile pass landing with **no turn open** | #212, and #209/#173 if forced | the session must sit **idle ≥ 5 min** | D |
+| **C** — a reconcile pass landing with **no turn open** | ~~#212, #209, #173~~ *(all discharged)* | the session must sit **idle ≥ 5 min** | D |
 | **D** — close the issue | *(nothing — see below)* | ends the session | — |
 
 Window 0 happens once, at the start, and cannot be re-run without a new session. C needs the
@@ -317,8 +334,19 @@ issue quoted. And the teardown logged `session.teardown did not kill cleanly …
 Permission denied: '/run/agent/architect'`, which is **#233** reproduced live on the
 deployed image, with its error text.
 
-**Window A.** Sample the zombie count **while a turn is running**, at least twice,
-and the acceptance is *flat*, not *small*:
+**Window A.** Sample the zombie count **while a turn is running**, at least twice.
+~~The acceptance is *flat*, not *small*.~~ **Amended 2026-09-01 (#248): it is not flat,
+and a run looking for flatness reads a healthy container as a failure.** The count rises
+inside a turn — measured **77 → 89 in 41 s** on a code-half turn — and the acceptance is
+**bounded per turn and cleared**, ending at 0 with nothing carried across the session.
+
+**Clearing happens when the *next turn starts*, not when a turn ends.** On #248 the
+architect turn ended at 06:40:46 with 89 outstanding, they were still 89 through the gap,
+and they went to 0 at 06:43:08 — one second after the next turn began. Two earlier
+boundaries looked like "reaped at turn end" only because the next turn started
+immediately. So a sample taken in a gap between turns is **not** evidence of a leak, and
+the honest end-state check is the container at rest after teardown (#248: **0 zombies,
+4 processes**, against `pids.max` 1024):
 
 ```bash
 docker exec agentd-huozhe-code-workflow sh -c \
@@ -374,8 +402,10 @@ Take **two** samples minutes apart — #212's acceptance is that the value moves
 `probe_skipped=1` is a skip, not a sample.
 
 #209 and #173 need a reconciler-*synthesised* review, which naturally requires the
-real webhook to be lost. If none is, force it in this window by deleting that
-review's node before a pass:
+real webhook to be lost. **On #248 no forcing was needed** — the funnel was dropping
+heavily and produced four synthesised reviews on its own. Keep the forcing recipe for a
+session where the transport behaves. If none is lost, delete that review's node before a
+pass:
 
 ```bash
 sqlite3 ~/.agentd/state.db "DELETE FROM delivery_nodes WHERE node_id='<PRR_… of that review>';"
@@ -385,7 +415,14 @@ sqlite3 ~/.agentd/state.db "SELECT silent_turns FROM sessions WHERE issue_num=<N
 
 **One event, two reads.** The log line discharges #209; #173 is the counter, and
 the grep does not stand in for it. On #57 the log half held and the counter reached
-**2**.
+**2**. On #248 both held: `silent_turns` was 0 at every observation.
+
+**And read the drops in both directions before believing them.** A guard that dropped
+*every* synthesised review would produce the same log lines as one that works. #248 is
+only evidence because the same pass routed a synth whose sender was **not** the PR author
+(`huozhegrok` → `design_changes_requested`) while dropping three whose sender **was**
+(`huozheclaude` on his own PR). Check the payload's `sender.login` against
+`pull_request.user.login` rather than counting lines.
 
 **Record in both issues that it was forced.** It proves the drop, which is what both
 acceptances name. It does not prove the loss.
