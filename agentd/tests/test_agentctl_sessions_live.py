@@ -155,7 +155,7 @@ def test_bare_sessions_byte_identical(
 def test_live_empty_prints_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Acceptance (4): empty DB, no header, exit 0, nothing on stderr."""
+    """Acceptance (4): empty table, no header, exit 0, nothing on stderr."""
     monkeypatch.setenv("AGENTD_ROOT", str(tmp_path))
     main(["sessions", "--live"])
     cap = capsys.readouterr()
@@ -163,6 +163,32 @@ def test_live_empty_prints_nothing(
     assert cap.err == ""
     assert "session" not in cap.out.lower()
     assert "None" not in cap.out
+
+
+def test_live_no_live_sessions_prints_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Issue acceptance: a DB with no live sessions — not an empty table.
+
+    CLOSED + TEARDOWN is the runbook's second-line scenario: --live is all-clear
+    while grep still finds TEARDOWN.
+    """
+    monkeypatch.setenv("AGENTD_ROOT", str(tmp_path))
+    store = _store(tmp_path)
+    _seed_row(store, f"{REPO}#57", "CLOSED", 58, 59, 99, 0)
+    _seed_row(store, f"{REPO}#159", "TEARDOWN", 160, 161, 40, 0)
+    assert store.list_nonterminal_sessions() == []
+    store.close()
+
+    out, err = _run_live(capsys)
+    assert out == ""
+    assert err == ""
+    assert "None" not in out
+
+    main(["sessions"])
+    bare = capsys.readouterr().out
+    assert '"state": "TEARDOWN"' in bare
+    assert '"state": "CLOSED"' in bare
 
 
 def test_live_ascii_with_null_prs(

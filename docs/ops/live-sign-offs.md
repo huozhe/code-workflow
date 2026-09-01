@@ -155,8 +155,8 @@ hard to verify.
    binary. `grep` exits 1 when it matches nothing — here that is the all-clear,
    not a failure:
    ```bash
-   agentctl sessions --live                         # sessions still in the loop
-   agentctl sessions | grep '"state": "TEARDOWN"'   # a closed session still tearing down
+   cd agentd && AGENTD_ROOT=$HOME/.agentd uv run agentctl sessions --live
+   cd agentd && AGENTD_ROOT=$HOME/.agentd uv run agentctl sessions | grep '"state": "TEARDOWN"'
    ```
 2. **Labelling an issue `agentd` opens a live session** (#67) — but the label
    alone does not start any work. Two separate things have to happen, and the
