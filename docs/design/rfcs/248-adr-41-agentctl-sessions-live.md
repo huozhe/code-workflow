@@ -268,8 +268,8 @@ predicate for the same reason, so the replacement has to preserve it, not discar
 with:
 
 ```bash
-cd agentd && AGENTD_ROOT=$HOME/.agentd uv run agentctl sessions --live
-cd agentd && AGENTD_ROOT=$HOME/.agentd uv run agentctl sessions | grep '"state": "TEARDOWN"'
+(cd agentd && AGENTD_ROOT=$HOME/.agentd uv run agentctl sessions --live)
+(cd agentd && AGENTD_ROOT=$HOME/.agentd uv run agentctl sessions) | grep '"state": "TEARDOWN"'
 ```
 
 and one sentence saying `--live` deliberately omits `TEARDOWN` and `CLOSED`; that a `TEARDOWN` session
@@ -289,11 +289,14 @@ no open turn (§1.4), and a dry reconcile pass is read-only but *not offline* �
 observation.
 
 The Python snippet goes — no `agentd` import, no `Store`. The commands use this file's
-`uv run agentctl` form (`live-sign-offs.md:368`), because that runbook never establishes that
-`agentctl` is on `PATH`. `AGENTD_ROOT=$HOME/.agentd` is how every other `agentctl` invocation in
-it is spelled; `agentd_root()` falls back to the same path, but the prefix stays so step 1 is not
-the one line that looks different. What must not happen is step 1 quietly answering a narrower
-question than it did before while reading as an improvement.
+`uv run agentctl` form, because that runbook never establishes that `agentctl` is on `PATH`.
+`AGENTD_ROOT=$HOME/.agentd` is how every other `agentctl` invocation in it is spelled. Each
+line is independently pastable from the repo root and must not leave the shell inside `agentd/`
+— a `cd agentd` on both lines makes line 2's `cd` fail, `&&` short-circuits, grep never runs,
+and exit 1 is the same code this step documents as the all-clear. Subshells (`(cd agentd &&
+…)`) keep cwd. `grep` is outside the second subshell so it still sees the JSON. What must not
+happen is step 1 quietly answering a narrower question than it did before while reading as an
+improvement.
 
 **Run both lines against a real DB before opening the implementation PR.** A runbook command that has
 never been executed is the same class of artifact as a fixture that cannot reach its case.
@@ -394,3 +397,9 @@ Sort unchanged.
   fixture drives `list_nonterminal_sessions` to `[]` and is the runbook's second-line scenario.
 - **§1.2 rationale.** `updated_at DESC` is what bare `sessions` orders by; under ties they do not agree,
   because `list_sessions` has no second key. That is why `session_key ASC` exists. The sort is unchanged.
+
+**`t-7dd32bc68fcd`, from the Architect's `CHANGES_REQUESTED` on Feature PR #251 (turn `t-1597fb82bc78`).**
+Each step-1 line is independently pastable. `(cd agentd && …)` so line 1 does not leave the shell in
+`agentd/` where line 2's `cd agentd` would fail, short-circuit, and report exit 1 — the documented
+all-clear — while a `TEARDOWN` session is present. `grep` sits outside the second subshell. Mirrored
+in RFC §3. Sort and `--live` code unchanged.
