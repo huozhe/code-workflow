@@ -5,7 +5,7 @@
 | | |
 |---|---|
 | **Status** | Proposed for formal approval (Phase 3 exit) |
-| **Version** | 1.40.3 — see [Revision history](#revision-history) |
+| **Version** | 1.41.0 — see [Revision history](#revision-history) |
 | **Implements** | [`docs/requirements/SRS_async_multiagent_ai_coding_system.md`](../requirements/SRS_async_multiagent_ai_coding_system.md) **v1.3** |
 | **Supersedes** | [`proposals/claude_design_spec.md`](proposals/claude_design_spec.md) (#4) · [`proposals/grok_design_spec.md`](proposals/grok_design_spec.md) (#2) · [`proposals/gemini_design_spec.md`](proposals/gemini_design_spec.md) (#3) |
 | **Ref** | Issue #1 |
@@ -20,6 +20,7 @@ Amendments are also marked inline at the point they apply, which is where an imp
 
 | Version | Date | Change |
 |---|---|---|
+| **1.41.0** | 2026-09-01 | **"Is anything live" is a copy-pasted snippet, and the one definition of live already exists in the sweep** (#248, ADR-41). → [ADR-41](ADR/adr-41-agentctl-sessions-live.md) |
 | **1.40.3** | 2026-09-01 | **`turn.resume` heard no runner notifications, and §12.3's crash window names an RPC that has never run** (#246). |
 | **1.40.2** | 2026-09-01 | **ADR-38's clock has a third return site: `role held`, which knows its own deadline** (#230). → [ADR-38](ADR/adr-38-superseded-approval-defer-clock.md) |
 | **1.40.1** | 2026-08-31 | **Named residual: `AWAITING_VERIFICATION` does not discover a second Feature PR** (#229, found reviewing #237). → [ADR-40](ADR/adr-40-untracked-pr-opened.md) |
@@ -1352,6 +1353,7 @@ Read the ADR, not the issue it names: several issues' own diagnoses were correct
 | **[38](ADR/adr-38-superseded-approval-defer-clock.md)** | **A withdrawn approval is not an unverifiable one.** `CHANGES_REQUESTED`, `DISMISSED` or a stale-head `APPROVED` supersede the delivery: drop it, do not escalate, still do not merge. Also gives `defer` a clock — 4,466 log lines became 79. Fixes #214. |
 | **[39](ADR/adr-39-session-loop-rename.md)** | **`design_loop.py` owns the whole lifecycle — rename it.** The name had been wrong since M4-1 added the code half to the same module, and it had already caused a wrong inference during review. Ref #159. |
 | **[40](ADR/adr-40-untracked-pr-opened.md)** | **A `*_pr_opened` the FSM never sees is unrecoverable, and the sweep cannot reach the PR that proves it.** ADR-37's spent-SHA gate narrows to `*_revised`; the reconciler discovers an untracked PR by computing the role branch name. Closes ADR-21's untracked-PR residual. Fixes #229. |
+| **[41](ADR/adr-41-agentctl-sessions-live.md)** | **`agentctl sessions --live` — the set from `list_nonterminal_sessions`, the fields from the row it does not carry.** Membership is the sweep's own method, called rather than re-expressed; ordering, ASCII output and the absent-PR placeholder are CLI decisions, each one measured. Names why `--live` is not a drop-in for the runbook's "is anything live" check: `TEARDOWN` dispatches agent turns, so *in the loop* and ADR-20's *container-live* (`live_project_keys`) are two readings of the word that differ by exactly that state. Fixes #248. |
 ---
 
 ## 17. Open Spikes & Owner Items

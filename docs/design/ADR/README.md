@@ -48,3 +48,4 @@ Several ADRs correct the issue they cite: read the ADR, not the issue.
 | **38** | [A Withdrawn Approval Is Not an Unverifiable One — Supersede the Delivery, and Give `defer` a Clock](adr-38-superseded-approval-defer-clock.md) |
 | **39** | [`design_loop.py` Owns the Whole Lifecycle — Rename It, and the Four Record Classes a Sweep Would Falsify](adr-39-session-loop-rename.md) |
 | **40** | [A `*_pr_opened` the FSM Never Sees — Take It Unconditionally, and Discover the PR the Sweep Cannot Reach](adr-40-untracked-pr-opened.md) |
+| **41** | [`agentctl sessions --live` — the Set From `list_nonterminal_sessions`, the Fields From the Row It Does Not Carry](adr-41-agentctl-sessions-live.md) |
