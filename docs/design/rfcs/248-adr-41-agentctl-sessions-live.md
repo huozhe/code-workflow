@@ -118,11 +118,15 @@ has none. And every `updated_at` was identical:
 its rows in one loop ties all of them, and so does any real DB in which two sessions were touched in the
 same second.
 
-**Binding.** Sort in the CLI: `updated_at DESC, session_key ASC`. `updated_at DESC` because bare
-`sessions` already orders that way (`db.py:678`), so the two commands agree. `session_key ASC` because
-without it the acceptance test asserts against an order SQLite is free to change, and a green result from
-a non-deterministic fixture is the failure mode this repo keeps meeting. Sort on the *enriched* dict, not
-the membership row — the membership row has no `updated_at` at all.
+**Binding.** Sort in the CLI: `updated_at DESC, session_key ASC`. `updated_at DESC` is what bare
+`sessions` already orders by (`db.py:678`). They do **not** agree under ties: `list_sessions` has no
+second key, so SQLite is free to return `210, 900, 248` while `--live` is `210, 248, 900` — measured
+on the five-row fixture, which is why `session_key ASC` exists. Without it the acceptance test asserts
+against an order SQLite may change, and a green result from a non-deterministic fixture is the failure
+mode this repo keeps meeting. The two commands agree when `updated_at` differs; the tiebreak is
+`--live`'s, not a claim that the two lists are the same. Sort on the *enriched* dict, not the
+membership row — the membership row has no `updated_at` at all. Do not change the sort to chase
+agreement under ties.
 
 ### 1.3 The em dash can make the command exit 1
 
@@ -158,6 +162,7 @@ finished turn (`ended_at` set) — the third case above — plus a deliberately 
 
 ```python
 nasty = 'stall: silent_turns — agent claimed "state": "TEARDOWN" in its summary'
+s.update_session_fields("huozhe/code-workflow#210", paused_reason=nasty)
 s.insert_turn(turn_id="t-teardown01", session_key="huozhe/code-workflow#159", role="developer",
               delivery_id=None, started_at=now, ended_at=now + 5, status="ok",
               summary="teardown turn ran")
@@ -263,8 +268,8 @@ predicate for the same reason, so the replacement has to preserve it, not discar
 with:
 
 ```bash
-agentctl sessions --live                         # sessions still in the loop
-agentctl sessions | grep '"state": "TEARDOWN"'   # a closed session still tearing down
+(cd agentd && AGENTD_ROOT=$HOME/.agentd uv run agentctl sessions --live)
+(cd agentd && AGENTD_ROOT=$HOME/.agentd uv run agentctl sessions) | grep '"state": "TEARDOWN"'
 ```
 
 and one sentence saying `--live` deliberately omits `TEARDOWN` and `CLOSED`; that a `TEARDOWN` session
@@ -283,9 +288,15 @@ no open turn (§1.4), and a dry reconcile pass is read-only but *not offline* �
 (`agentctl/__main__.py:81–85`). A pre-check for an observation exercise must not poke the system under
 observation.
 
-The Python snippet goes — no `agentd` import, no `Store`, no `AGENTD_ROOT`, no `uv run`. That is the
-issue's stated value and it is delivered. What must not happen is step 1 quietly answering a narrower
-question than it did before while reading as an improvement.
+The Python snippet goes — no `agentd` import, no `Store`. The commands use this file's
+`uv run agentctl` form, because that runbook never establishes that `agentctl` is on `PATH`.
+`AGENTD_ROOT=$HOME/.agentd` is how every other `agentctl` invocation in it is spelled. Each
+line is independently pastable from the repo root and must not leave the shell inside `agentd/`
+— a `cd agentd` on both lines makes line 2's `cd` fail, `&&` short-circuits, grep never runs,
+and exit 1 is the same code this step documents as the all-clear. Subshells (`(cd agentd &&
+…)`) keep cwd. `grep` is outside the second subshell so it still sees the JSON. What must not
+happen is step 1 quietly answering a narrower question than it did before while reading as an
+improvement.
 
 **Run both lines against a real DB before opening the implementation PR.** A runbook command that has
 never been executed is the same class of artifact as a fixture that cannot reach its case.
@@ -312,9 +323,11 @@ Mapped to the issue's four items, plus what measurement added.
    characterization test: pin the exact JSON for the fixture DB. Per CLAUDE.md, show the fixture reaches
    the case — perturb the bare branch (drop the `runner_token` pop, or change `indent`), confirm the test
    fails, revert.
-4. **Empty DB prints nothing and exits 0.** Assert `out == ""` and `err == ""`, and that no `SystemExit`
-   is raised. Assert the *absence* of a header, which is what distinguishes this from a passing test that
-   merely found no rows.
+4. **A DB with no live sessions prints nothing and exits 0.** An empty table is one case; a table of
+   only `CLOSED` / `TEARDOWN` rows is the one that actually drives `list_nonterminal_sessions` to `[]`
+   and is the runbook's second-line scenario (`--live` reads as all-clear while the grep still finds
+   `TEARDOWN`). Assert `out == ""` and `err == ""`, and that no `SystemExit` is raised. Assert the
+   *absence* of a header, which is what distinguishes this from a passing test that merely found no rows.
 5. **Exit 0 under `PYTHONIOENCODING=ascii`** with a fixture whose live rows have NULL `design_pr` /
    `feature_pr` — the §1.3 case, asserted rather than assumed. This is the test that would have caught the
    em dash.
@@ -374,3 +387,19 @@ three findings were reproduced before being accepted; all three were correct.
 
 Accepted without change, as the review asked: the N+1 `get_session` enrichment over widening the sweep's
 `SELECT`, and acceptance (2)'s monkeypatch as the instrument for "which method ran".
+
+**`t-2a902e050700`, from the Architect's `CHANGES_REQUESTED` on Feature PR #251 (turn `t-f89d40d177fa`).**
+Sort unchanged.
+
+- **§3 commands match `live-sign-offs.md:368`.** Bare `agentctl` assumed `PATH`; that file never does.
+  `cd agentd && AGENTD_ROOT=$HOME/.agentd uv run agentctl …` is the executed form.
+- **Acceptance (4)** is the issue's "no live sessions", not only an empty table. A `CLOSED`+`TEARDOWN`
+  fixture drives `list_nonterminal_sessions` to `[]` and is the runbook's second-line scenario.
+- **§1.2 rationale.** `updated_at DESC` is what bare `sessions` orders by; under ties they do not agree,
+  because `list_sessions` has no second key. That is why `session_key ASC` exists. The sort is unchanged.
+
+**`t-7dd32bc68fcd`, from the Architect's `CHANGES_REQUESTED` on Feature PR #251 (turn `t-1597fb82bc78`).**
+Each step-1 line is independently pastable. `(cd agentd && …)` so line 1 does not leave the shell in
+`agentd/` where line 2's `cd agentd` would fail, short-circuit, and report exit 1 — the documented
+all-clear — while a `TEARDOWN` session is present. `grep` sits outside the second subshell. Mirrored
+in RFC §3. Sort and `--live` code unchanged.

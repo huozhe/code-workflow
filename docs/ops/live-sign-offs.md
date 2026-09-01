@@ -148,11 +148,15 @@ hard to verify.
 ## Running the exercise
 
 1. Confirm nothing is live first — a session in flight makes every observation
-   below ambiguous:
+   below ambiguous. `agentctl sessions --live` is sessions still in the loop
+   (not `CLOSED`, not `TEARDOWN`). A `TEARDOWN` session still dispatches two
+   agent turns and can sit there across drains; that is ADR-20's container-live
+   set (`live_project_keys`), read from the same SQLite file through the same
+   binary. `grep` exits 1 when it matches nothing — here that is the all-clear,
+   not a failure:
    ```bash
-   cd agentd && AGENTD_ROOT=$HOME/.agentd uv run python -c "from agentd.db import Store; import pathlib; \
-     s=Store(pathlib.Path.home()/'.agentd'/'state.db'); \
-     print([(r['session_key'],r['state']) for r in s.list_sessions() if r['state']!='CLOSED'])"
+   (cd agentd && AGENTD_ROOT=$HOME/.agentd uv run agentctl sessions --live)
+   (cd agentd && AGENTD_ROOT=$HOME/.agentd uv run agentctl sessions) | grep '"state": "TEARDOWN"'
    ```
 2. **Labelling an issue `agentd` opens a live session** (#67) — but the label
    alone does not start any work. Two separate things have to happen, and the
