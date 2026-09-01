@@ -1,6 +1,6 @@
 # Live sign-offs — what is still unproven, and the one session that proves most of it
 
-**Status:** 2026-08-31. Six items discharged on the live session for #57 (2026-08-24/25).
+**Status:** 2026-08-31. Six items discharged on the live session for #57 (2026-08-24/25); **#229 discharged on throwaway session #240**, the first item deliberately staged rather than waited for.
 **#173 and #172 are not.** The seven defects that run surfaced are now fixed and deployed, and each
 carries a live acceptance of its own — so the list of what is unproven grew rather than shrank. They
 are one session, and it is scheduled per [Running the exercise](#running-the-exercise). Owner action
@@ -90,9 +90,9 @@ column below is what would make it verification.
 | #212 | The probe's `rss_bytes` is a high-water mark and `cli_rss_kb` is frozen at turn end — unfit for M6-3's memory rule | Runner **1.4.0** (#219). `rss_bytes`, `rss_peak_bytes` and `sampled_at` all present **and `rss_bytes` moving between two passes**. One sample cannot show movement |
 | #214 | `CHANGES_REQUESTED` pauses the session instead of dispatching Developer rework; the pending delivery then re-defers every 5 s (**4,417 times**) | ADR-38, #224 + #225, schema v11. An Architect verdict that replaces an approval dispatches a Developer rework turn, the session stays out of `PAUSED_HUMAN`, one `merge_auth superseded` logs, and no delivery id exceeds ~20 `route defer` lines an hour |
 | #172 | *(as filed)* The kill path has no caller | **#221** gave it one, and #159 ran it five times. Only *no descendant survived* is left, and it needs an in-image fixture rather than a session |
-| #229 | A `*_pr_opened` the FSM never sees strands the session permanently — the gate dropped a delivered one, the funnel lost another | ADR-40, **#237**, deployed 2026-08-31. A real `design_pr_opened` whose **payload `head.sha` is not the PR's live head at drain time** is taken: one `fsm … → DESIGN_REVIEW`, `design_pr` non-NULL and `roles_locked=1` within that drain, and **no** `stale head … (design_pr_opened)` anywhere in the log. **Show the two SHAs differ before reading the outcome** — equal SHAs mean the case was never reached, whatever the FSM did. See *Window 0 — how to run it* |
+| #229 | A `*_pr_opened` the FSM never sees strands the session permanently — the gate dropped a delivered one, the funnel lost another | ADR-40, **#237**, deployed 2026-08-31. **DISCHARGED 2026-08-31** on throwaway session #240. Payload `head.sha` `6dadc103` vs live head `84de221c`, delivery queued 97 s behind an open turn — the fixture reached the case before the outcome was read. Then `fsm huozhe/code-workflow#240 → DESIGN_REVIEW`, `design_pr=241`, `roles_locked=1`, `stale head … design_pr_opened` count **0**. **Item 5 fell out with it:** the take stamped the *live* head, so the trailing `synchronize` logged `duplicate head 84de221c5d51 (design_revised)` instead of a second review turn |
 
-**#229 is window 0, and it is the one that cannot be retried.** The gate half only misbehaves when the
+**#229 is window 0, and it is the one that cannot be retried.** *(Discharged 2026-08-31 on throwaway session #240 — kept in full because the window remains the shape any future `*_pr_opened` acceptance has to be observed in, and because the runbook below is what made it schedulable.)* The gate half only misbehaves when the
 payload SHA is stale by the time the delivery drains, so the observation has to be made on a PR whose head
 moved inside that gap. On #159 the gap was 4m23s, because the Architect's first turn ran 601 s and the drain
 is one thread behind it. Open the PR onto an idle drain and the gap is a couple of seconds: the event is
@@ -204,7 +204,7 @@ developer.
 
 | Window | Discharges | Condition | Conflicts with |
 |---|---|---|---|
-| **0** — a Design PR `opened` drains **stale** | #229 | the head must move **before the drain reaches the `opened`**; staging the lag is the whole exercise | — |
+| **0** — a Design PR `opened` drains **stale** | ~~#229~~ *(discharged 2026-08-31)* | the head must move **before the drain reaches the `opened`**; staging the lag is the whole exercise | — |
 | **A** — any real turn | #208, #210 | passive; the vendor CLI only has to run | — |
 | **B** — a completed rework round | #211, #214 | a `synchronize` (real or synthesised) that yields a review turn | — |
 | **C** — a reconcile pass landing with **no turn open** | #212, and #209/#173 if forced | the session must sit **idle ≥ 5 min** | D |
@@ -297,6 +297,21 @@ Cost is ~2–3 vendor turns: the Architect turn that creates the lag, and the De
 review turn the take dispatches. No image rebuild. If the turn ends before step 3
 lands, the `opened` drains onto an idle gap and window 0 is spent — start a new issue
 rather than reading the green line.
+
+**What window 0 actually cost, run once on 2026-08-31.** Throwaway issue #240, five
+turns and a teardown — more than the ~2–3 estimated above, because the Developer reviewed
+the fixture PR on its merits and the Architect began a rework round before the owner closed
+the issue. **Close the issue as soon as the observation is read**; the loop does not know
+the PR is scenery. The runbook's own staging held exactly as written: the branch pushed at
+X in advance, a watcher armed on the `turns` table, and the PR opened plus the head moved
+inside the first turn — 1 s and 4 s after it started, against a turn that ran 105 s.
+
+The run also produced two things it was not looking for, which is the argument for reading
+the whole log rather than the assertion. `session remap via design_pr=241 → …#240
+(event=issue_comment)` is the routing half of #229 working — the line whose *absence* the
+issue quoted. And the teardown logged `session.teardown did not kill cleanly … [Errno 13]
+Permission denied: '/run/agent/architect'`, which is **#233** reproduced live on the
+deployed image, with its error text.
 
 **Window A.** Sample the zombie count **while a turn is running**, at least twice,
 and the acceptance is *flat*, not *small*:
