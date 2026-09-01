@@ -158,6 +158,7 @@ finished turn (`ended_at` set) — the third case above — plus a deliberately 
 
 ```python
 nasty = 'stall: silent_turns — agent claimed "state": "TEARDOWN" in its summary'
+s.update_session_fields("huozhe/code-workflow#210", paused_reason=nasty)
 s.insert_turn(turn_id="t-teardown01", session_key="huozhe/code-workflow#159", role="developer",
               delivery_id=None, started_at=now, ended_at=now + 5, status="ok",
               summary="teardown turn ran")

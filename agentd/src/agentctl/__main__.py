@@ -29,7 +29,12 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="Print as JSON (default output is already JSON; flag kept for scripts)",
     )
-    sub.add_parser("sessions", help="List sessions")
+    p_sessions = sub.add_parser("sessions", help="List sessions")
+    p_sessions.add_argument(
+        "--live",
+        action="store_true",
+        help="Non-terminal sessions only, one line each (ADR-41)",
+    )
     p_logs = sub.add_parser("logs", help="Tail rotating app log (~/.agentd/logs/agentd.log)")
     p_logs.add_argument("-n", type=int, default=50)
     p_q = sub.add_parser(
@@ -134,6 +139,10 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.cmd == "sessions":
         store = Store(config.state_db)
+        if args.live:
+            _print_live_sessions(store)
+            store.close()
+            return
         rows = store.list_sessions()
         enriched = []
         for r in rows:
@@ -362,6 +371,44 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     parser.error(f"unknown {args.cmd}")
+
+
+def _pr_placeholder(value: Any) -> str:
+    """ASCII stand-in for a NULL design_pr / feature_pr (ADR-41)."""
+    if value is None:
+        return "-"
+    return str(int(value))
+
+
+def _print_live_sessions(store: Store) -> None:
+    """One line per non-terminal session; nothing if the set is empty (ADR-41).
+
+    Membership from ``list_nonterminal_sessions``; fields from ``get_session``.
+    Named fields only — never iterate the dict (``runner_token`` lives there).
+    """
+    membership = store.list_nonterminal_sessions()
+    enriched: list[dict[str, Any]] = []
+    for row in membership:
+        key = str(row.get("session_key") or "")
+        enriched.append(store.get_session(key) or row)
+    enriched.sort(
+        key=lambda r: (-int(r.get("updated_at") or 0), str(r.get("session_key") or ""))
+    )
+    if not enriched:
+        return
+    key_w = max(len(str(r.get("session_key") or "")) for r in enriched)
+    state_w = max(len(str(r.get("state") or "")) for r in enriched)
+    for r in enriched:
+        key = str(r.get("session_key") or "")
+        state = str(r.get("state") or "")
+        turns = int(r.get("turn_count") or 0)
+        silent = int(r.get("silent_turns") or 0)
+        print(
+            f"{key.ljust(key_w)}  {state.ljust(state_w)}  "
+            f"turns={turns}  silent={silent}  "
+            f"design_pr={_pr_placeholder(r.get('design_pr'))}  "
+            f"feature_pr={_pr_placeholder(r.get('feature_pr'))}"
+        )
 
 
 def _resolve_session(store: Store, key: str) -> dict | None:

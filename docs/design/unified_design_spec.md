@@ -20,7 +20,7 @@ Amendments are also marked inline at the point they apply, which is where an imp
 
 | Version | Date | Change |
 |---|---|---|
-| **1.41.0** | 2026-09-01 | **"Is anything live" is a copy-pasted snippet, and the one definition of live already exists in the sweep** (#248, ADR-41). → [ADR-41](ADR/adr-41-agentctl-sessions-live.md) |
+| **1.41.0** | 2026-09-01 | **"Is anything live" is a copy-pasted snippet; `--live` is the sweep's in-the-loop set, and ADR-20's container-live (`live_project_keys`) differs by exactly `TEARDOWN`** (#248, ADR-41). → [ADR-41](ADR/adr-41-agentctl-sessions-live.md) |
 | **1.40.3** | 2026-09-01 | **`turn.resume` heard no runner notifications, and §12.3's crash window names an RPC that has never run** (#246). |
 | **1.40.2** | 2026-09-01 | **ADR-38's clock has a third return site: `role held`, which knows its own deadline** (#230). → [ADR-38](ADR/adr-38-superseded-approval-defer-clock.md) |
 | **1.40.1** | 2026-08-31 | **Named residual: `AWAITING_VERIFICATION` does not discover a second Feature PR** (#229, found reviewing #237). → [ADR-40](ADR/adr-40-untracked-pr-opened.md) |
