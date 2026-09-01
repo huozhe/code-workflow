@@ -235,6 +235,33 @@ _inflight_turn_ids: set[str] = set()
 
 
 @contextlib.contextmanager
+def _progress_summary(turn_id: str, role: str) -> Iterator[_ProgressCounter]:
+    """Count for the turn's whole span and state the total on **every** exit.
+
+    A `finally`, not the success path (#228, raised reviewing #245). The turn this
+    issue is about ran 269 s in flight with a frozen CPU sample; if such a turn
+    times out, the `except` in `_dispatch_turn` returns before any success-path
+    logging, so `chunks=` was never written for exactly the case that motivated
+    the counter — and a missing line is indistinguishable from a gateway that
+    never counted, which is the reading the counter exists to remove.
+    """
+    counter = _ProgressCounter()
+    try:
+        yield counter
+    finally:
+        log.info(
+            "turn progress final turn=%s role=%s chunks=%s bytes=%s "
+            "max_quiet=%.0fs over=%.0fs",
+            turn_id,
+            role,
+            counter.chunks,
+            counter.bytes,
+            counter.max_quiet,
+            time.time() - counter.started_at,
+        )
+
+
+@contextlib.contextmanager
 def _inflight(turn_id: str) -> Iterator[None]:
     """ADR-28: mark turn_id in-flight in this process for the block's duration."""
     _inflight_turn_ids.add(turn_id)
@@ -1435,8 +1462,7 @@ class SessionLoop:
             status=None,
             summary=None,
         )
-        with _inflight(turn_id):
-            progress = _ProgressCounter()
+        with _inflight(turn_id), _progress_summary(turn_id, role) as progress:
 
             def _on_runner_notify(method: str, params: dict[str, Any]) -> None:
                 # Runner → gateway: artifact.register (M3-C / §14.2),
@@ -1610,16 +1636,6 @@ class SessionLoop:
                     self._escalate(session_key, role, summary or "needs_human")
 
             # Provenance footer helper for agent comments (agents should append; we log it)
-            log.info(
-                "turn progress final turn=%s role=%s chunks=%s bytes=%s "
-                "max_quiet=%.0fs over=%.0fs",
-                turn_id,
-                role,
-                progress.chunks,
-                progress.bytes,
-                progress.max_quiet,
-                time.time() - progress.started_at,
-            )
             log.info(
                 "turn complete id=%s public_actions=%s footer=%s",
                 turn_id,

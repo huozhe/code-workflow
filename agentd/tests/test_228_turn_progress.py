@@ -22,9 +22,21 @@ import pytest
 import agentd.session_loop as dl
 from agentd.config import Config
 from agentd.db import Store
-from agentd.session_loop import SessionLoop
+from agentd.session_loop import SessionLoop, _role_busy_until
 
 SESSION = "o/r#1"
+
+
+@pytest.fixture(autouse=True)
+def _clear_role_holds():
+    """A gateway timeout marks the role busy for 900 s (#34), and
+    `_role_busy_until` is a module global — so the timeout tests below would park
+    every later test in this file, and every later file, on `role held`. Same
+    leak as #230's suite; clearing either side is the fix, not per-test dodges.
+    """
+    _role_busy_until.clear()
+    yield
+    _role_busy_until.clear()
 
 
 def _cfg(tmp: Path) -> Config:
@@ -201,6 +213,62 @@ def test_a_turn_with_no_frames_still_reports_zero(
         _run(loop, monkeypatch)
     final = [r.getMessage() for r in caplog.records if "turn progress final" in r.getMessage()]
     assert len(final) == 1 and "chunks=0" in final[0], final
+    store.close()
+
+
+class _TimingOutClient(_StreamingClient):
+    """Streams, then the RPC dies — #159's shape: long in flight, then nothing."""
+
+    def call(self, method: str, params: dict[str, Any] | None = None) -> Any:
+        if method == "health.ping":
+            return {"ok": True, "initialized": True}
+        if method == "turn.dispatch":
+            assert self._notify is not None
+            for f in self.frames:
+                self._notify("notify.progress", f)
+            raise TimeoutError("deadline")
+        return {}
+
+
+@pytest.mark.parametrize(
+    ("frames", "expect"),
+    [([], "chunks=0"), ([{"role": "architect", "chunk": "abc"}], "chunks=1")],
+)
+def test_a_timed_out_turn_still_states_its_count(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    frames: list[dict[str, Any]],
+    expect: str,
+) -> None:
+    """The path that motivated #228, and the success-path log missed it.
+
+    #159 was a 269 s in-flight turn with a frozen CPU sample. If such a turn times
+    out, `_dispatch_turn`'s `except` returns before any success-path logging — so
+    `chunks=` was never written for exactly the case the counter exists for, and
+    the log still read like a gateway that never counted. **Raised by the
+    Architect on #245.** Both arms: no frames at all, and frames then a timeout.
+    """
+    store, loop = _seeded(tmp_path)
+    _TimingOutClient.artifacts = []
+    _TimingOutClient.frames = frames
+    monkeypatch.setattr(dl, "RunnerClient", _TimingOutClient)
+    with caplog.at_level(logging.INFO, logger="agentd.session_loop"):
+        out = loop._dispatch_turn(
+            session_key=SESSION,
+            role="architect",
+            turn_id="t-1",
+            delivery_id="d-1",
+            dig={},
+            issue_num=1,
+        )
+
+    # Fixture proof: this must be the timeout path, not a quiet success.
+    assert out.get("status") == "gateway_timeout", out
+
+    final = [r.getMessage() for r in caplog.records if "turn progress final" in r.getMessage()]
+    assert len(final) == 1, final
+    assert expect in final[0], final[0]
     store.close()
 
 
