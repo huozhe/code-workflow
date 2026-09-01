@@ -184,6 +184,51 @@ _role_locks_guard = threading.Lock()
 # Hold the role busy until started_at + deadline_s so a second dispatch
 # does not interleave (#34). Cleared when the wait elapses.
 _role_busy_until: dict[str, float] = {}
+# #228: notify.progress reaches the gateway and was dropped on one line. Counted,
+# never logged per frame — the runner emits one per streamed piece, and a line each
+# would recreate #208 one level up, in the gateway's log this time.
+_PROGRESS_LOG_EVERY_S = 30.0
+
+
+class _ProgressCounter:
+    """Bytes on the progress channel, summarised on a time throttle.
+
+    ``quiet`` is the gap before the frame being logged, and ``max_quiet`` the
+    largest gap so far. Both are recorded on frame arrival, which is the honest
+    limit of this shape: **a wedged turn emits no frames, so it emits no line.**
+    What the counter buys is that a *live* turn now says so — two lines with
+    rising ``bytes`` is streaming — and that the worst gap is on the record at
+    turn end. A live stall alarm needs a watchdog, which is §9.3's detector
+    question and deliberately not this change.
+    """
+
+    def __init__(self) -> None:
+        now = time.time()
+        self.chunks = 0
+        self.bytes = 0
+        self.started_at = now
+        self.last_at = now
+        self.quiet = 0.0
+        self.max_quiet = 0.0
+        # The first frame logs: "streaming started" is the answer to the question
+        # the operator is actually asking, and waiting a throttle to say it means
+        # a turn shorter than the throttle says nothing at all.
+        self._last_logged_at = now - _PROGRESS_LOG_EVERY_S
+
+    def record(self, chunk: str) -> bool:
+        """Count one frame. True when the throttle says to log."""
+        now = time.time()
+        self.quiet = now - self.last_at
+        self.max_quiet = max(self.max_quiet, self.quiet)
+        self.last_at = now
+        self.chunks += 1
+        self.bytes += len(chunk)
+        if now - self._last_logged_at < _PROGRESS_LOG_EVERY_S:
+            return False
+        self._last_logged_at = now
+        return True
+
+
 # ADR-27: process-local ids of turns this process is currently dispatching.
 # Empty after a restart, which is when a genuine orphan must still be caught.
 _inflight_turn_ids: set[str] = set()
@@ -1391,8 +1436,27 @@ class SessionLoop:
             summary=None,
         )
         with _inflight(turn_id):
+            progress = _ProgressCounter()
+
             def _on_runner_notify(method: str, params: dict[str, Any]) -> None:
-                # Runner → gateway: artifact.register (M3-C / §14.2).
+                # Runner → gateway: artifact.register (M3-C / §14.2),
+                # notify.progress (§14.2 / #228).
+                if method == "notify.progress":
+                    # Never the chunk itself: it is model output, the log is not
+                    # the transcript, and it is already truncated for a different
+                    # reason at cli_session.py:1038.
+                    if progress.record(str(params.get("chunk") or "")):
+                        log.info(
+                            "turn progress turn=%s role=%s chunks=%s bytes=%s "
+                            "quiet=%.0fs max_quiet=%.0fs",
+                            turn_id,
+                            role,
+                            progress.chunks,
+                            progress.bytes,
+                            progress.quiet,
+                            progress.max_quiet,
+                        )
+                    return
                 if method != "artifact.register":
                     return
                 ref = str(params.get("ref") or "").strip()
@@ -1546,6 +1610,16 @@ class SessionLoop:
                     self._escalate(session_key, role, summary or "needs_human")
 
             # Provenance footer helper for agent comments (agents should append; we log it)
+            log.info(
+                "turn progress final turn=%s role=%s chunks=%s bytes=%s "
+                "max_quiet=%.0fs over=%.0fs",
+                turn_id,
+                role,
+                progress.chunks,
+                progress.bytes,
+                progress.max_quiet,
+                time.time() - progress.started_at,
+            )
             log.info(
                 "turn complete id=%s public_actions=%s footer=%s",
                 turn_id,
