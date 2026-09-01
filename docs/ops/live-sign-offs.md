@@ -89,7 +89,7 @@ column below is what would make it verification.
 | #211 | A dropped `pull_request.synchronize` strands a session, and the reconciler has no node kind to regenerate it | ADR-37, #222 + #223. A completed rework round leaves `silent_turns` 0 or 1, never 3, and records no `unauthorized` on a merge that had Architect approval on the live head |
 | #212 | The probe's `rss_bytes` is a high-water mark and `cli_rss_kb` is frozen at turn end — unfit for M6-3's memory rule | Runner **1.4.0** (#219). `rss_bytes`, `rss_peak_bytes` and `sampled_at` all present **and `rss_bytes` moving between two passes**. One sample cannot show movement |
 | #214 | `CHANGES_REQUESTED` pauses the session instead of dispatching Developer rework; the pending delivery then re-defers every 5 s (**4,417 times**) | ADR-38, #224 + #225, schema v11. An Architect verdict that replaces an approval dispatches a Developer rework turn, the session stays out of `PAUSED_HUMAN`, one `merge_auth superseded` logs, and no delivery id exceeds ~20 `route defer` lines an hour |
-| #172 | *(as filed)* The kill path has no caller | **#221** gave it one, and #159 ran it five times. Only *no descendant survived* is left, and it needs an in-image fixture rather than a session |
+| #172 | *(as filed)* The kill path has no caller | **#221** gave it one, and #159 ran it five times. *No descendant survived* was the remainder and is **DISCHARGED 2026-09-01** by an in-image fixture, not a session — `tests/test_image_role_privilege_boundary.py`. Nothing here is left |
 | #229 | A `*_pr_opened` the FSM never sees strands the session permanently — the gate dropped a delivered one, the funnel lost another | ADR-40, **#237**, deployed 2026-08-31. **DISCHARGED 2026-08-31** on throwaway session #240. Payload `head.sha` `6dadc103` vs live head `84de221c`, delivery queued 97 s behind an open turn — the fixture reached the case before the outcome was read. Then `fsm huozhe/code-workflow#240 → DESIGN_REVIEW`, `design_pr=241`, `roles_locked=1`, `stale head … design_pr_opened` count **0**. **Item 5 fell out with it:** the take stamped the *live* head, so the trailing `synchronize` logged `duplicate head 84de221c5d51 (design_revised)` instead of a second review turn |
 
 **#229 is window 0, and it is the one that cannot be retried.** *(Discharged 2026-08-31 on throwaway session #240 — kept in full because the window remains the shape any future `*_pr_opened` acceptance has to be observed in, and because the runbook below is what made it schedulable.)* The gate half only misbehaves when the
@@ -412,17 +412,32 @@ each confirmed by the CLI's absence from `/proc` rather than by the kill returni
 `session.teardown`, no vendor CLI for either role.
 
 **So the remaining clause belongs in an in-image fixture**, which is what #172's own
-checklist item 6 asks for: spawn a stand-in for the role CLI holding a child open,
-call `_kill_unlocked` as the role, assert `/proc/<child>` is gone. The fixture must
-first assert the capability set it runs under — measured in the live container,
-`CapEff: 00000000000000c9` (CHOWN, FOWNER, SETGID, SETUID; **no** `DAC_OVERRIDE`, **no**
-`KILL`) — or it is testing a host that cannot reach the case, which is the trap item 6
-names.
+checklist item 6 asks for — and it now exists:
+`agentd/tests/test_image_role_privilege_boundary.py`. It runs a container with
+`supervisor.py`'s own flags, asserts `CapEff` lacks `KILL` *and* that root cannot
+signal the role's process, spawns a stand-in leader in its own process group holding
+a child, calls `_killpg_as_role`, and asserts `/proc/<child>` is gone.
 
-**A note for whoever reads the teardown log while working on this.** #159's teardown
-logged `session.teardown did not kill cleanly`, and that line is **false**: the kill
-succeeded and the tmpfs secret wipe after it crashed, taking the RPC down with it
-(**#233**). Do not read that warning as evidence about the kill.
+**Two things that fixture had to get right, both of which would have made it pass
+against a broken kill.** `/proc/<pid>` survives death — a SIGKILLed process stays as
+a zombie until reaped, and pid 1 in the test container reaps nothing (that is #210) —
+so an existence check reads a dead process as alive and the assertion means nothing;
+the fixture reads `State` from `/proc/<pid>/stat` instead. And the assertion was
+negative-controlled: signalling the *leader* only, rather than the group, leaves the
+child alive and fails the test. A group kill is what is being claimed, so a fixture
+that cannot tell the two apart is not evidence.
+
+**#233 is discharged the same way and in the same file**, against the sibling wall:
+`--cap-drop ALL` denies uid 0 the role's `0700` token dir, the teardown wipe now drops
+to the role uid, and the fixture drives `handle_request('session.teardown')` rather
+than the wipe helper — calling the helper would stay green with the call deleted from
+teardown.
+
+**A note for whoever reads a teardown log from before 2026-09-01.** #159's and #240's
+teardowns both logged `session.teardown did not kill cleanly`, and that line is
+**false**: the kill succeeded and the tmpfs secret wipe after it crashed, taking the
+RPC down with it (**#233**, fixed in runner **1.5.0**). Do not read that warning as
+evidence about the kill.
 
 ## Why this list keeps being written down wrong
 
