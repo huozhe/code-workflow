@@ -114,3 +114,28 @@ def test_create_logs_the_resolved_image(
         _drive_create(tmp_path / "b", monkeypatch)
     msgs = [r.getMessage() for r in caplog.records]
     assert any(f"container image {DEFAULT_IMAGE}" in m for m in msgs), msgs
+
+
+def test_runner_package_version_tracks_the_deployed_tag() -> None:
+    """`agentd_runner.__version__` is the same number as the tag it ships in.
+
+    It sat at 1.0.0 through 1.2.0 -> 1.3.0 -> 1.4.0 -> 1.5.0 while
+    `docs/ops/live-sign-offs.md` attributed fixes to "Runner 1.4.0". Nothing
+    imported the string, so nothing noticed: the drift was invisible precisely
+    because the field was dead. Tying it to `DEFAULT_IMAGE` here is what makes
+    the next bump notice — a deploy that moves the tag and not this string now
+    fails the suite rather than shipping a runner that misreports itself.
+    """
+    import sys
+    from pathlib import Path
+
+    runner_root = Path(__file__).resolve().parents[1] / "docker" / "session-runner"
+    sys.path.insert(0, str(runner_root))
+    import agentd_runner
+
+    assert DEFAULT_IMAGE.count(":") == 1, DEFAULT_IMAGE
+    tag = DEFAULT_IMAGE.split(":", 1)[1]
+    assert agentd_runner.__version__ == tag, (
+        f"runner package says {agentd_runner.__version__}, image tag says {tag} — "
+        "bump docker/session-runner/agentd_runner/__init__.py with the deploy"
+    )
