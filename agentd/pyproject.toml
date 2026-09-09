@@ -3,6 +3,7 @@ name = "agentd"
 version = "0.1.0"
 description = "Local orchestrator for async multi-agent AI coding (M0–M3)"
 readme = "README.md"
+license = "Apache-2.0"
 authors = [
     { name = "huozhegrok", email = "huozhe.grok@users.noreply.github.com" }
 ]
